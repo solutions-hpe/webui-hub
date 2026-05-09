@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .. import auth
 from ..database import get_db
 from ..models import Site
-from ..schemas import ApproveSiteResponse, MessageResponse, SiteBaseResponse, SiteDetailResponse
+from ..schemas import ApproveSiteResponse, MessageResponse, SiteDetailResponse
 
 router = APIRouter()
 
@@ -37,24 +37,13 @@ def _serialize_site(site: Site) -> SiteDetailResponse:
     )
 
 
-@router.get("", response_model=list[SiteBaseResponse])
+@router.get("", response_model=list[SiteDetailResponse])
 def list_sites(
     db: Session = Depends(get_db),
     current_user=Depends(auth.get_optional_current_user),
 ):
     sites = db.scalars(select(Site).order_by(Site.created_at.desc())).all()
-    return [
-        SiteBaseResponse(
-            id=site.id,
-            hostname=site.hostname,
-            workspace_id=site.workspace_id,
-            label=site.label,
-            status=site.status,
-            last_seen=site.last_seen,
-            created_at=site.created_at,
-        )
-        for site in sites
-    ]
+    return [_serialize_site(site) for site in sites]
 
 
 @router.get("/{site_id}", response_model=SiteDetailResponse)

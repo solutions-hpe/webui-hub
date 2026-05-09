@@ -48,10 +48,11 @@ class SiteBaseResponse(BaseModel):
     status: str
     last_seen: Optional[datetime] = None
     created_at: datetime
+    telemetry: Optional[Dict[str, Any]] = None
 
 
 class SiteDetailResponse(SiteBaseResponse):
-    telemetry: Optional[Dict[str, Any]] = None
+    pass
 
 
 class ApproveSiteResponse(BaseModel):
@@ -86,6 +87,8 @@ class WorkspaceResponse(WorkspaceBase):
 
     id: uuid.UUID
     created_at: datetime
+    site_count: int = 0
+    check_summary: Dict[str, int] = Field(default_factory=dict)
 
 
 class CommandCreate(BaseModel):
@@ -155,3 +158,9 @@ class CheckResponse(BaseModel):
 class CheckStateResponse(BaseModel):
     summary: Dict[str, int]
     items: List[CheckResponse]
+
+
+class WorkspaceDetail(WorkspaceResponse):
+    sites: List[SiteBaseResponse] = Field(default_factory=list)
+    checks: List[CheckResponse] = Field(default_factory=list)
+    recent_commands: List[CommandResponse] = Field(default_factory=list)

@@ -22,8 +22,8 @@ class Workspace(Base):
     central_poll_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
-    sites: Mapped[List["Site"]] = relationship("Site", back_populates="workspace")
-    commands: Mapped[List["Command"]] = relationship("Command", back_populates="workspace")
+    sites: Mapped[List["Site"]] = relationship("Site", back_populates="workspace", cascade="all, delete-orphan")
+    commands: Mapped[List["Command"]] = relationship("Command", back_populates="workspace", cascade="all, delete-orphan")
     checks: Mapped[List["Check"]] = relationship("Check", back_populates="workspace", cascade="all, delete-orphan")
 
 
@@ -41,7 +41,7 @@ class Site(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     workspace: Mapped[Optional[Workspace]] = relationship("Workspace", back_populates="sites")
-    commands: Mapped[List["Command"]] = relationship("Command", back_populates="site")
+    commands: Mapped[List["Command"]] = relationship("Command", back_populates="site", cascade="all, delete-orphan")
 
 
 class Command(Base):

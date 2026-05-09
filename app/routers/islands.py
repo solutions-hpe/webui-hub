@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import Command, Site
 from ..schemas import CommandAckRequest, MessageResponse, SiteRegisterRequest, SiteRegisterResponse
+from ..ws import ws_broadcast
 
 router = APIRouter()
 
@@ -80,7 +81,7 @@ def register_island(payload: SiteRegisterRequest, db: Session = Depends(get_db))
 
 
 @router.post("/{site_id}/telemetry", response_model=MessageResponse)
-def push_telemetry(
+async def push_telemetry(
     site_id: uuid.UUID,
     telemetry: dict = Body(...),
     site: Site = Depends(get_island_by_api_key),
@@ -92,6 +93,13 @@ def push_telemetry(
     site.telemetry_json = json.dumps(telemetry)
     site.last_seen = datetime.utcnow()
     db.commit()
+    await ws_broadcast(
+        {
+            "type": "telemetry",
+            "site_id": str(site.id),
+            "workspace_id": str(site.workspace_id) if site.workspace_id else None,
+        }
+    )
     return MessageResponse(message="Telemetry accepted")
 
 

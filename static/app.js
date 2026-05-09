@@ -3,6 +3,8 @@
 // ── Auth state ────────────────────────────────────────────────────
 let authToken = localStorage.getItem('csw_token') || null;
 let currentUser = null;
+let ws = null;
+let wsReconnectTimer = null;
 
 // ── API helper ────────────────────────────────────────────────────
 async function apiFetch(url, opts = {}) {
@@ -53,6 +55,33 @@ function activateSettingsSubtab(subtabId) {
   document.querySelectorAll('#tab-settings .setup-subpanel').forEach(panel => {
     panel.classList.toggle('hidden', panel.id !== subtabId);
   });
+}
+
+// ── WebSocket ─────────────────────────────────────────────────
+function connectWebSocket() {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${window.location.host}/ws`);
+  ws.onmessage = event => {
+    let data;
+    try { data = JSON.parse(event.data); } catch { return; }
+    if (data.type === 'check_update') {
+      if (authToken) loadChecks();
+    } else if (data.type === 'telemetry') {
+      loadDashboard();
+    }
+  };
+  ws.onclose = () => {
+    ws = null;
+    wsReconnectTimer = window.setTimeout(connectWebSocket, 3000);
+  };
+  ws.onerror = () => {
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
+  };
 }
 
 // ── Auth ──────────────────────────────────────────────────────────
@@ -124,6 +153,7 @@ async function submitLogin() {
   closeLoginModal();
   await checkAuth();
   showToast('Signed in successfully.', 'ok');
+  connectWebSocket();
 }
 
 function logout() {
@@ -151,7 +181,8 @@ async function loadDashboard() {
 
   let totalClients = 0;
   approved.forEach(s => {
-    try { const t = JSON.parse(s.telemetry_json || '{}'); totalClients += (t.clients || []).length; } catch {}
+    const telemetry = s.telemetry || {};
+    totalClients += (telemetry.clients || []).length;
   });
   if (clientsPill) clientsPill.textContent = `${totalClients} client${totalClients !== 1 ? 's' : ''}`;
   if (lastUpdated) lastUpdated.textContent = new Date().toLocaleTimeString();
@@ -165,7 +196,7 @@ async function loadDashboard() {
   grid.innerHTML = '';
 
   approved.forEach(site => {
-    const telemetry = (() => { try { return JSON.parse(site.telemetry_json || '{}'); } catch { return {}; } })();
+    const telemetry = site.telemetry || {};
     const isOnline = site.last_seen && (Date.now() / 1000 - new Date(site.last_seen).getTime() / 1000) < 120;
 
     const card = document.createElement('div');
@@ -275,7 +306,7 @@ async function deleteSite(id) {
 
 // ── Workspaces ────────────────────────────────────────────────────
 async function loadWorkspaces() {
-  const res = await apiFetch('/api/workspaces');
+  const res = await apiFetch('/api/admin/workspaces');
   if (!res || !res.ok) return;
   const workspaces = await res.json();
 
@@ -295,6 +326,7 @@ async function loadWorkspaces() {
   workspaces.forEach(ws => {
     const card = document.createElement('div');
     card.className = 'setup-card';
+    const summary = ws.check_summary || {};
     card.innerHTML = `
       <div class="setup-card-header">
         <h2>${escHtml(ws.name)}</h2>
@@ -302,6 +334,8 @@ async function loadWorkspaces() {
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <span class="server-stat-pill">ID: ${ws.id.slice(0, 8)}…</span>
+        <span class="server-stat-pill">Sites: ${ws.site_count || 0}</span>
+        <span class="server-stat-pill">🟢 ${summary.green || 0} · 🟡 ${summary.yellow || 0} · 🔴 ${summary.red || 0}</span>
         ${ws.aruba_workspace_id ? `<span class="server-stat-pill">☁ ${escHtml(ws.aruba_workspace_id)}</span>` : ''}
       </div>
       <div style="margin-top:14px;display:flex;gap:8px;">
@@ -313,7 +347,7 @@ async function loadWorkspaces() {
 
 async function deleteWorkspace(id) {
   if (!confirm('Delete this workspace?')) return;
-  const res = await apiFetch(`/api/workspaces/${id}`, { method: 'DELETE' });
+  const res = await apiFetch(`/api/admin/workspaces/${id}`, { method: 'DELETE' });
   if (!res || !res.ok) { showToast('Failed to delete workspace.', 'err'); return; }
   showToast('Workspace deleted.', 'ok');
   loadWorkspaces();
@@ -485,13 +519,14 @@ document.getElementById('send-command-btn')?.addEventListener('click', sendComma
 document.getElementById('add-workspace-btn')?.addEventListener('click', () => {
   const name = prompt('Workspace name:');
   if (!name) return;
-  apiFetch('/api/workspaces', { method: 'POST', body: JSON.stringify({ name }) })
+  apiFetch('/api/admin/workspaces', { method: 'POST', body: JSON.stringify({ name }) })
     .then(res => { if (res && res.ok) { showToast('Workspace created.', 'ok'); loadWorkspaces(); } });
 });
 
 // ── Init ──────────────────────────────────────────────────────────
 (async () => {
   await checkAuth();
+  connectWebSocket();
   loadDashboard();
   // Ping API status
   try {
