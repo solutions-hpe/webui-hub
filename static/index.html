@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Client-Sim Central</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- ── Top bar ── -->
+  <header class="topbar">
+    <div class="topbar-content">
+      <div>
+        <h1>
+          <svg class="hpe-logo-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 180 504 144" role="img" aria-label="HPE">
+            <path fill="#01a982" d="M391.2 261.27v35.46H504V324H362.4v-90H504v27.27H391.2Z"/>
+            <path fill="currentColor" d="M276.67 180h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V180H504v27.27H391.2v13.36ZM151.2 180v144h-28.8v-59.02H28.8V324H0V180h28.8v57.38h93.6V180h28.8Z"/>
+          </svg>
+          <span class="brand-divider" aria-hidden="true"></span>
+          Client-Sim Central
+        </h1>
+      </div>
+      <div class="topbar-right">
+        <div id="api-status" class="ws-status">
+          <span id="api-dot" class="status-dot offline"></span>
+          <span class="repo-label">API:</span>
+          <span id="api-text">Connecting…</span>
+        </div>
+        <span id="installer-version" class="installer-version-badge"></span>
+        <div id="topbar-user" class="topbar-user hidden">
+          <span>👤</span>
+          <span id="topbar-username" class="topbar-username"></span>
+          <button id="logout-btn" class="btn btn-secondary btn-small" type="button">Logout</button>
+        </div>
+        <button id="login-btn" class="btn btn-secondary btn-small" type="button">Login</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Tab nav ── -->
+  <nav class="tab-nav" role="tablist">
+    <button class="tab active" data-tab="dashboard" role="tab" aria-selected="true">⚡ Dashboard</button>
+    <button class="tab management-tab hidden" data-tab="sites" role="tab" aria-selected="false">🌐 Sites</button>
+    <button class="tab management-tab hidden" data-tab="workspaces" role="tab" aria-selected="false">🏢 Workspaces</button>
+    <button class="tab management-tab hidden" data-tab="checks" role="tab" aria-selected="false">✓ Checks</button>
+    <button class="tab management-tab hidden" data-tab="commands" role="tab" aria-selected="false">⌨ Commands</button>
+    <button class="tab management-tab hidden" data-tab="settings" role="tab" aria-selected="false">⚙ Settings</button>
+  </nav>
+
+  <!-- ── Dashboard tab (public) ── -->
+  <main id="tab-dashboard" class="page tab-content">
+    <div class="server-node-bar">
+      <span class="server-node-name">Fleet Health</span>
+      <span class="server-stat-pill" id="dash-sites-pill" title="Connected sites">— sites</span>
+      <span class="server-stat-pill" id="dash-clients-pill" title="Total clients">— clients</span>
+      <span class="server-last-seen">Updated: <span id="dash-last-updated">—</span></span>
+      <button id="refresh-dashboard-btn" class="btn btn-secondary btn-small" style="margin-left:auto;" type="button">Refresh</button>
+    </div>
+    <div id="dashboard-grid" class="sites-grid"></div>
+    <div id="dashboard-empty" class="central-empty hidden">No sites registered yet — islands register via the relay API.</div>
+  </main>
+
+  <!-- ── Sites tab (auth required) ── -->
+  <main id="tab-sites" class="page tab-content hidden">
+    <div class="server-node-bar">
+      <span class="server-node-name">Sites</span>
+      <span class="server-stat-pill" id="sites-count-pill">— sites</span>
+      <button id="refresh-sites-btn" class="btn btn-secondary btn-small" style="margin-left:auto;" type="button">Refresh</button>
+    </div>
+
+    <div id="key-once-banner" class="key-once-banner hidden">
+      <strong>⚠ Save this API key — it will not be shown again.</strong><br>
+      <div class="api-key-display" id="key-once-value"></div>
+      <button class="btn btn-secondary btn-small" onclick="document.getElementById('key-once-banner').classList.add('hidden')">Dismiss</button>
+    </div>
+
+    <!-- Pending sites -->
+    <div id="sites-pending-section" class="setup-card hidden">
+      <div class="setup-card-header">
+        <h2>Pending Approval <span id="sites-pending-count" class="badge-count">0</span></h2>
+        <p>Islands waiting for their API key to be approved.</p>
+      </div>
+      <table class="data-table" id="sites-pending-table">
+        <thead><tr><th>Hostname</th><th>Label</th><th>First Seen</th><th>Last Seen</th><th></th></tr></thead>
+        <tbody id="sites-pending-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Approved sites -->
+    <div class="setup-card setup-section-gap">
+      <div class="setup-card-header">
+        <h2>Approved Sites <span id="sites-approved-count" class="badge-count">0</span></h2>
+      </div>
+      <table class="data-table" id="sites-approved-table">
+        <thead><tr><th>Hostname</th><th>Label</th><th>Workspace</th><th>Last Seen</th><th>Status</th><th></th></tr></thead>
+        <tbody id="sites-approved-tbody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- ── Workspaces tab (auth required) ── -->
+  <main id="tab-workspaces" class="page tab-content hidden">
+    <div class="server-node-bar">
+      <span class="server-node-name">Workspaces</span>
+      <span class="server-stat-pill" id="workspaces-count-pill">— workspaces</span>
+      <button id="add-workspace-btn" class="btn btn-secondary btn-small" style="margin-left:auto;" type="button">+ New Workspace</button>
+    </div>
+    <div id="workspaces-grid" class="sites-grid"></div>
+    <div id="workspaces-empty" class="central-empty hidden">No workspaces yet — create one to group sites by Aruba Central workspace.</div>
+  </main>
+
+  <!-- ── Checks tab (auth required) ── -->
+  <main id="tab-checks" class="page tab-content hidden">
+    <div class="server-node-bar">
+      <span class="server-node-name">Checks</span>
+      <span class="server-stat-pill" id="checks-count-pill">— checks</span>
+      <button id="add-check-btn" class="btn btn-secondary btn-small" style="margin-left:auto;" type="button">+ Add Check</button>
+    </div>
+    <div class="setup-card">
+      <div class="setup-card-header">
+        <h2>Monitored Checks</h2>
+        <p>Configure Aruba Central alerts and insights to monitor across all sites. Set a per-check grace period before a missed alert is marked failed.</p>
+      </div>
+      <table class="data-table" id="checks-table">
+        <thead><tr><th>Name</th><th>Type</th><th>Workspace</th><th>Grace Period</th><th>Status</th><th></th></tr></thead>
+        <tbody id="checks-tbody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- ── Commands tab (auth required) ── -->
+  <main id="tab-commands" class="page tab-content hidden">
+    <div class="server-node-bar">
+      <span class="server-node-name">Commands</span>
+      <span class="server-stat-pill" id="commands-count-pill">— queued</span>
+      <button id="refresh-commands-btn" class="btn btn-secondary btn-small" style="margin-left:auto;" type="button">Refresh</button>
+    </div>
+
+    <!-- Send command form -->
+    <div class="setup-card">
+      <div class="setup-card-header">
+        <h2>Send Command</h2>
+        <p>Queue a command to one site, all sites in a workspace, or all sites globally.</p>
+      </div>
+      <div class="setup-form" style="max-width:480px;">
+        <div class="form-group">
+          <label class="form-label">Target</label>
+          <select id="cmd-target" class="form-input">
+            <option value="all">All Sites</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Command</label>
+          <select id="cmd-type" class="form-input">
+            <option value="kill_switch">Kill Switch</option>
+            <option value="restart_sim">Restart Simulation</option>
+            <option value="update_now">Update Now</option>
+            <option value="reclone">Reclone VMs</option>
+            <option value="reboot">Reboot</option>
+          </select>
+        </div>
+        <div class="form-actions">
+          <button id="send-command-btn" class="btn btn-primary" type="button">Send Command</button>
+          <span id="cmd-msg" class="form-msg"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Command queue table -->
+    <div class="setup-card setup-section-gap">
+      <div class="setup-card-header">
+        <h2>Command Queue</h2>
+      </div>
+      <table class="data-table" id="commands-table">
+        <thead><tr><th>Target</th><th>Command</th><th>Status</th><th>Created</th><th>Updated</th><th></th></tr></thead>
+        <tbody id="commands-tbody"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- ── Settings tab (auth required) ── -->
+  <main id="tab-settings" class="page tab-content hidden">
+    <div class="server-node-bar">
+      <span class="server-node-name">Settings</span>
+    </div>
+
+    <nav class="setup-subnav" role="tablist">
+      <button class="setup-subtab settings-subtab active" data-subtab="settings-account" role="tab">Account</button>
+      <button class="setup-subtab settings-subtab" data-subtab="settings-api" role="tab">API Info</button>
+    </nav>
+
+    <div id="settings-account" class="setup-subpanel">
+      <div class="setup-card" style="max-width:480px; margin-top:16px;">
+        <div class="setup-card-header">
+          <h2>Change Password</h2>
+        </div>
+        <div class="setup-form">
+          <div class="form-group">
+            <label class="form-label">Current Password</label>
+            <input id="pw-current" type="password" class="form-input" autocomplete="current-password">
+          </div>
+          <div class="form-group">
+            <label class="form-label">New Password</label>
+            <input id="pw-new" type="password" class="form-input" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Confirm New Password</label>
+            <input id="pw-confirm" type="password" class="form-input" autocomplete="new-password">
+          </div>
+          <div class="form-actions">
+            <button id="pw-save-btn" class="btn btn-primary" type="button">Save Password</button>
+            <span id="pw-msg" class="form-msg"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-api" class="setup-subpanel hidden">
+      <div class="setup-card" style="margin-top:16px;">
+        <div class="setup-card-header">
+          <h2>API Information</h2>
+          <p>Use these endpoints when configuring island relay connections.</p>
+        </div>
+        <div class="setup-status-grid">
+          <div class="setup-status-item">
+            <span class="setup-status-label">Registration Endpoint</span>
+            <span class="setup-status-value" id="api-register-url">—</span>
+          </div>
+          <div class="setup-status-item">
+            <span class="setup-status-label">Telemetry Endpoint</span>
+            <span class="setup-status-value">POST /api/islands/{id}/telemetry</span>
+          </div>
+          <div class="setup-status-item">
+            <span class="setup-status-label">Inbox Endpoint</span>
+            <span class="setup-status-value">GET /api/islands/{id}/inbox</span>
+          </div>
+          <div class="setup-status-item">
+            <span class="setup-status-label">Ack Endpoint</span>
+            <span class="setup-status-value">POST /api/islands/{id}/ack</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ── Login modal ── -->
+  <div id="login-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="login-modal-title">
+    <div class="modal-box">
+      <h2 id="login-modal-title" class="modal-title">Sign in to Client-Sim Central</h2>
+      <div class="setup-form">
+        <div class="form-group">
+          <label class="form-label" for="login-username">Username</label>
+          <input id="login-username" type="text" class="form-input" autocomplete="username" placeholder="admin">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="login-password">Password</label>
+          <input id="login-password" type="password" class="form-input" autocomplete="current-password">
+        </div>
+        <div id="login-error" class="form-msg" style="color:#C0392B;"></div>
+      </div>
+      <div class="modal-actions">
+        <button id="login-cancel-btn" class="btn btn-secondary" type="button">Cancel</button>
+        <button id="login-submit-btn" class="btn btn-primary" type="button">Sign In</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Toast notifications ── -->
+  <div id="toast-container" style="position:fixed;top:72px;right:24px;z-index:400;display:flex;flex-direction:column;gap:8px;"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
