@@ -10,7 +10,7 @@ from . import auth
 from .database import Base, engine
 from .routers import auth as auth_router
 from .routers import checks, commands, islands, sites, workspaces
-from .tasks import check_state_engine
+from .tasks import aruba_central_poller, check_state_engine
 from .ws import ws_connect
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -22,12 +22,16 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     auth.ensure_admin()
     check_engine_task = asyncio.create_task(check_state_engine())
+    aruba_poller_task = asyncio.create_task(aruba_central_poller())
     try:
         yield
     finally:
         check_engine_task.cancel()
+        aruba_poller_task.cancel()
         with suppress(asyncio.CancelledError):
             await check_engine_task
+        with suppress(asyncio.CancelledError):
+            await aruba_poller_task
 
 
 app = FastAPI(title="Client-Sim Central", lifespan=lifespan)
