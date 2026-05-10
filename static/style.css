@@ -1568,3 +1568,128 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 .ownership-row:last-child { border-bottom: none; }
 .ownership-label { flex: 1; font-size: 0.9rem; font-weight: 500; }
 .ownership-hint { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+
+
+/* ── Phase 7 UI overhaul ─────────────────────────────────────────── */
+:root {
+  --card-bg: var(--panel);
+  --hover-bg: #f5fdf9;
+  --pill-bg: #f3f4f6;
+  --text-muted: var(--muted);
+}
+
+/* Tenant selector */
+.tenant-selector { display: flex; align-items: center; gap: 8px; }
+.form-input-sm { padding: 4px 8px; font-size: 13px; height: 30px; }
+
+/* GKill badge */
+.gkill-badge { background: #c0392b; color: #fff; padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+/* Role badge */
+.role-badge { font-size: 11px; background: var(--hpe-green); color: #fff; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; }
+
+/* Island list */
+.island-section { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+.island-section-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--card-bg); cursor: pointer; user-select: none; }
+.island-section-header:hover { background: var(--hover-bg); }
+.island-section-body { padding: 0 14px 14px; display: none; }
+.island-section-body.expanded { display: block; }
+.island-toggle { font-size: 12px; color: var(--text-muted); transition: transform 0.15s; }
+.island-toggle.open { transform: rotate(90deg); }
+.island-hostname { font-weight: 600; font-size: 14px; }
+.island-meta { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+
+/* Island action bar */
+.island-action-bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+
+/* Page toolbar */
+.page-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px 20px; background: var(--card-bg); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.toolbar-stats { display: flex; gap: 8px; flex-wrap: wrap; }
+.toolbar-actions { display: flex; gap: 8px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+.stat-pill { background: var(--pill-bg); border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 500; }
+
+/* Modal large */
+.modal-box-large { max-width: 860px; width: 95vw; max-height: 85vh; overflow-y: auto; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; }
+
+/* Mode features grid */
+.mode-features-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.mode-feature-item { display: flex; flex-direction: column; gap: 4px; }
+.mode-feature-label { font-size: 12px; font-weight: 600; text-transform: capitalize; color: var(--text-muted); }
+
+/* Topbar center */
+.topbar-center { flex: 1; display: flex; justify-content: center; }
+
+/* Badge count */
+.badge-count { background: var(--hpe-green); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 11px; margin-left: 6px; }
+
+.topbar-brand { display: flex; align-items: center; }
+.topbar-right { gap: 12px; }
+.tab.dynamic-tenant-tab { font-weight: 600; }
+.sa-header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.island-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.island-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+}
+
+.compact-card { min-height: 130px; }
+.island-card-header-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.island-card-title { font-size: 0.98rem; font-weight: 600; color: var(--hpe-navy); word-break: break-word; }
+.island-card-subtitle { margin-top: 2px; font-size: 0.78rem; color: var(--muted); }
+.island-card-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.island-card-footer { margin-top: 12px; font-size: 0.8rem; color: var(--muted); }
+
+.workspace-group { margin-top: 16px; padding: 20px 24px; }
+.workspace-header { margin-bottom: 12px; }
+.workspace-header h2 { margin: 0 0 4px; font-size: 1.05rem; color: var(--hpe-navy); }
+.workspace-header p { margin: 0; color: var(--muted); font-size: 0.85rem; }
+.workspace-body { display: flex; flex-direction: column; gap: 8px; }
+.island-section-summary { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.island-label-inline { font-size: 12px; color: var(--muted); }
+.quick-command-select { min-width: 150px; max-width: 190px; }
+.island-client-table { table-layout: auto; }
+
+.inline-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tenant-role-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.tenant-role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--hpe-green-light);
+  color: var(--hpe-green-dark);
+  font-size: 0.78rem;
+  border: 1px solid rgba(1,169,130,0.25);
+}
+.tenant-role-chip button { border: none; background: none; color: inherit; cursor: pointer; font-size: 0.9rem; line-height: 1; }
+.row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+#sa-key-banner { margin-bottom: 20px; }
+#sa-tenants-table .btn,
+#sa-users-table .btn,
+#sa-pending-table .btn { margin-right: 4px; }
+
+@media (max-width: 900px) {
+  .topbar { height: auto; padding-top: 10px; padding-bottom: 10px; }
+  .topbar-content { flex-wrap: wrap; }
+  .topbar-center { order: 3; width: 100%; justify-content: flex-start; }
+  .topbar-right { width: 100%; justify-content: space-between; flex-wrap: wrap; }
+  .tab-nav { overflow-x: auto; }
+  .page-toolbar { padding: 12px 14px; }
+  .setup-card { padding: 20px; }
+  .setup-card .data-table { margin: 0 -20px; width: calc(100% + 40px); }
+  .data-table th, .data-table td { padding-left: 20px; padding-right: 20px; }
+}

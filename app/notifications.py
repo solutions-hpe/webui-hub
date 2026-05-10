@@ -1,9 +1,34 @@
-import httpx, smtplib, json, logging
+import json
+import logging
+import smtplib
 from email.mime.text import MIMEText
+from typing import Any
+
+import httpx
+
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _normalize_notification_config(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(cfg or {})
+    to_emails = data.get("to_emails") or []
+    if isinstance(to_emails, str):
+        to_emails = [item.strip() for item in to_emails.split(",") if item.strip()]
+    teams_webhook = data.get("teams_webhook") or data.get("teams_webhook_url") or ""
+    smtp_pass = data.get("smtp_pass")
+    if smtp_pass is None:
+        smtp_pass = data.get("smtp_password", "")
+    return {
+        **data,
+        "enabled": bool(data.get("enabled")),
+        "teams_webhook": teams_webhook,
+        "teams_webhook_url": teams_webhook,
+        "smtp_pass": smtp_pass or "",
+        "to_emails": to_emails,
+    }
 
 
 async def send_teams_webhook(url: str, title: str, message: str, color: str = "FF0000"):
@@ -44,12 +69,27 @@ async def send_email(
         logger.warning(f"Email notification failed: {e}")
 
 
+def get_notification_config(tenant_id: str) -> dict | None:
+    """Get decrypted notification config for a tenant. Returns None if not configured."""
+    from . import store
+    from .crypto import decrypt_dict
+
+    tenant = store.get_tenant(tenant_id)
+    if not tenant or not tenant.notification_config_enc:
+        return None
+    try:
+        cfg = _normalize_notification_config(decrypt_dict(tenant.notification_config_enc))
+        return cfg if cfg.get("enabled") else None
+    except Exception:
+        return None
+
+
 async def notify_check_red(workspace, check):
     """Fire notifications when a check transitions to red."""
     cfg = {}
     if workspace.notification_config:
         try:
-            cfg = json.loads(workspace.notification_config)
+            cfg = _normalize_notification_config(json.loads(workspace.notification_config))
         except Exception:
             pass
     if not cfg.get("enabled"):

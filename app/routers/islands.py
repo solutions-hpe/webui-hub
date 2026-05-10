@@ -1,173 +1,146 @@
+"""Island relay endpoints — used by spoke servers."""
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
-from sqlalchemy import and_, or_, select
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel, Field
 
-from ..database import get_db
-from ..models import Command, Site
-from ..schemas import CommandAckRequest, MessageResponse, SiteRegisterRequest, SiteRegisterResponse
+from .. import store
+from ..crypto import decrypt_str
+from ..data_models import AuditEntry, PendingIsland
 from ..ws import ws_broadcast
 
 router = APIRouter()
 
 
-def _parse_json(raw: str | None):
-    if not raw:
-        return None
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _auth_island(tenant_id: str, island_id: str, api_key: str):
+    island = store.get_island(tenant_id, island_id)
+    if not island or island.status != "approved" or not island.api_key_enc:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"raw": raw}
+        if decrypt_str(island.api_key_enc) != api_key:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise exc
+        raise HTTPException(status_code=401, detail="Invalid credentials") from exc
+    return island
 
 
-def get_island_by_api_key(
-    x_api_key: str = Header(..., alias="X-API-Key"),
-    db: Session = Depends(get_db),
-) -> Site:
-    site = db.scalar(select(Site).where(Site.api_key == x_api_key))
-    if not site or site.status != "approved":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid island API key")
-    return site
+class RegisterPayload(BaseModel):
+    hostname: str
+    label: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
-def _expire_commands(db: Session) -> None:
-    now = datetime.utcnow()
-    expired = db.scalars(
-        select(Command).where(
-            Command.status.in_(["queued", "delivered"]),
-            Command.expires_at <= now,
-        )
-    ).all()
-    for command in expired:
-        command.status = "expired"
-    if expired:
-        db.commit()
-
-
-def _command_targets_site(command: Command, site: Site) -> bool:
-    if command.site_id and command.site_id == site.id:
-        return True
-    if command.target == "all":
-        return True
-    if command.target == site.hostname:
-        return True
-    if command.target == "proxmox" and "proxmox" in site.hostname.lower():
-        return True
-    return False
-
-
-@router.post("/register", response_model=SiteRegisterResponse, status_code=status.HTTP_201_CREATED)
-def register_island(payload: SiteRegisterRequest, db: Session = Depends(get_db)):
-    site = db.scalar(select(Site).where(Site.hostname == payload.hostname))
-    if site:
-        site.label = payload.label or site.label
-        if site.status == "revoked":
-            site.status = "pending"
-            site.api_key = None
-        db.commit()
-        db.refresh(site)
-        return SiteRegisterResponse(site_id=site.id)
-
-    site = Site(hostname=payload.hostname, label=payload.label, status="pending")
-    db.add(site)
-    db.commit()
-    db.refresh(site)
-    return SiteRegisterResponse(site_id=site.id)
-
-
-@router.post("/{site_id}/telemetry", response_model=MessageResponse)
-async def push_telemetry(
-    site_id: uuid.UUID,
-    telemetry: dict = Body(...),
-    site: Site = Depends(get_island_by_api_key),
-    db: Session = Depends(get_db),
-):
-    if site.id != site_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Island ID and API key do not match")
-
-    site.telemetry_json = json.dumps(telemetry)
-    site.last_seen = datetime.utcnow()
-    db.commit()
-    await ws_broadcast(
-        {
-            "type": "telemetry",
-            "site_id": str(site.id),
-            "workspace_id": str(site.workspace_id) if site.workspace_id else None,
+@router.post("/islands/register", status_code=201)
+def register_island(payload: RegisterPayload):
+    approved = store.get_approved_island_by_hostname(payload.hostname)
+    if approved:
+        tenant_id, island = approved
+        return {
+            "island_id": island.id,
+            "status": "approved",
+            "tenant_id": tenant_id,
+            "api_key": decrypt_str(island.api_key_enc) if island.api_key_enc else "",
         }
+
+    existing = store.get_pending_by_hostname(payload.hostname)
+    if existing:
+        return {
+            "island_id": existing.id,
+            "status": "pending",
+            "message": "Registration already pending approval.",
+        }
+
+    pending = PendingIsland(
+        hostname=payload.hostname,
+        label=payload.label,
+        seed_config=payload.config,
     )
-    return MessageResponse(message="Telemetry accepted")
+    store.save_pending_island(pending)
+    return {
+        "island_id": pending.id,
+        "status": "pending",
+        "message": "Registration received. Awaiting superadmin approval and tenant assignment.",
+    }
 
 
-@router.get("/{site_id}/inbox")
-def get_inbox(
-    site_id: uuid.UUID,
-    site: Site = Depends(get_island_by_api_key),
-    db: Session = Depends(get_db),
+@router.post("/{tenant_id}/islands/{island_id}/telemetry")
+async def post_telemetry(
+    tenant_id: str,
+    island_id: str,
+    payload: dict[str, Any],
+    x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    if site.id != site_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Island ID and API key do not match")
+    _auth_island(tenant_id, island_id, x_api_key)
+    store.update_island_telemetry(tenant_id, island_id, payload)
+    await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "island_id": island_id})
+    return {"status": "ok"}
 
-    _expire_commands(db)
-    commands = db.scalars(
-        select(Command).where(
-            and_(
-                Command.status == "queued",
-                or_(Command.site_id.is_(None), Command.site_id == site.id),
-                or_(Command.workspace_id.is_(None), Command.workspace_id == site.workspace_id),
+
+@router.get("/{tenant_id}/islands/{island_id}/inbox")
+def get_inbox(
+    tenant_id: str,
+    island_id: str,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    _auth_island(tenant_id, island_id, x_api_key)
+    commands = store.get_queued_commands(tenant_id, island_id)
+    return [{"id": c.id, "target": c.target, "type": c.type, "payload": c.payload} for c in commands]
+
+
+class AckResultPayload(BaseModel):
+    success: Optional[bool] = None
+    task_type: Optional[str] = None
+    detail: str = ""
+    output: Any = None
+    timestamp: Optional[str] = None
+
+
+class AckPayload(BaseModel):
+    command_id: str
+    status: str = "executed"
+    result: Optional[AckResultPayload] = None
+
+
+@router.post("/{tenant_id}/islands/{island_id}/ack")
+async def ack_command_endpoint(
+    tenant_id: str,
+    island_id: str,
+    payload: AckPayload,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    _auth_island(tenant_id, island_id, x_api_key)
+    result = payload.result.model_dump(exclude_none=True) if payload.result else None
+    store.ack_command(tenant_id, island_id, payload.command_id, result)
+    if result and result.get("task_type"):
+        task_status = "success" if result.get("success") else "failure"
+        store.append_audit(
+            AuditEntry(
+                island_id=island_id,
+                tenant_id=tenant_id,
+                task_type=result.get("task_type", "command_ack"),
+                execution_mode="distributed",
+                status=task_status,
+                detail=result.get("detail", ""),
+                initiated_by="island",
+                result=result,
             )
-        ).order_by(Command.created_at.asc())
-    ).all()
-
-    now = datetime.utcnow()
-    results = []
-    delivered = False
-    for command in commands:
-        if not _command_targets_site(command, site):
-            continue
-        command.status = "delivered"
-        command.delivered_at = now
-        delivered = True
-        results.append(
+        )
+        await ws_broadcast(
             {
-                "id": str(command.id),
-                "site_id": str(command.site_id) if command.site_id else None,
-                "workspace_id": str(command.workspace_id) if command.workspace_id else None,
-                "target": command.target,
-                "type": command.type,
-                "payload": _parse_json(command.payload_json) or {},
-                "created_at": command.created_at.isoformat(),
-                "expires_at": command.expires_at.isoformat(),
+                "type": "task_result",
+                "tenant_id": tenant_id,
+                "island_id": island_id,
+                "task_type": result.get("task_type", "command_ack"),
+                "status": task_status,
             }
         )
-    if delivered:
-        db.commit()
-
-    return {"commands": results}
-
-
-@router.post("/{site_id}/ack", response_model=MessageResponse)
-def ack_command(
-    site_id: uuid.UUID,
-    payload: CommandAckRequest,
-    site: Site = Depends(get_island_by_api_key),
-    db: Session = Depends(get_db),
-):
-    if site.id != site_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Island ID and API key do not match")
-
-    command = db.get(Command, payload.command_id)
-    if not command:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command not found")
-    if command.site_id and command.site_id != site.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Command does not belong to this island")
-
-    command.status = payload.status if payload.status in {"queued", "delivered", "executed", "expired"} else "executed"
-    command.executed_at = datetime.utcnow()
-    command.result_json = json.dumps(payload.result or {})
-    db.commit()
-    return MessageResponse(message="Command acknowledged")
+    return {"status": "ok"}

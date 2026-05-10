@@ -1,52 +1,78 @@
+from __future__ import annotations
+
 import asyncio
-from contextlib import asynccontextmanager, suppress
+import contextlib
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth
-from .database import Base, engine
-from .routers import auth as auth_router
-from .routers import checks, commands, islands, sites, workspaces
-from .tasks import aruba_central_poller, check_state_engine
+from . import store
+from .auth import ensure_admin
+from .config import get_settings
 from .ws import ws_connect
 
+logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    auth.ensure_admin()
-    check_engine_task = asyncio.create_task(check_state_engine())
-    aruba_poller_task = asyncio.create_task(aruba_central_poller())
+    settings = get_settings()
+    store.init_store()
+    ensure_admin()
+    logger.info(f"Hub starting — data dir: {settings.data_dir}")
+
+    from . import tasks
+
+    bg_tasks = [
+        asyncio.create_task(tasks.gkill_switch_poller()),
+        asyncio.create_task(tasks.heartbeat_monitor()),
+        asyncio.create_task(tasks.auto_recovery_check()),
+        asyncio.create_task(tasks.schedule_check()),
+        asyncio.create_task(tasks.aruba_poller()),
+        asyncio.create_task(tasks.check_state_engine()),
+        asyncio.create_task(tasks.maintenance_loop()),
+    ]
     try:
         yield
     finally:
-        check_engine_task.cancel()
-        aruba_poller_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await check_engine_task
-        with suppress(asyncio.CancelledError):
-            await aruba_poller_task
+        for task in bg_tasks:
+            task.cancel()
+        for task in bg_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
-app = FastAPI(title="Client-Sim Central", lifespan=lifespan)
-app.include_router(islands.router, prefix="/api/islands", tags=["islands"])
-app.include_router(sites.router, prefix="/api/sites", tags=["sites"])
-app.include_router(workspaces.router, tags=["workspaces"])
-app.include_router(commands.router, prefix="/api/commands", tags=["commands"])
-app.include_router(checks.router, prefix="/api/checks", tags=["checks"])
-app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
+app = FastAPI(title="Hub — Client-Sim Central Platform", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await ws_connect(websocket)
+
+
+from .routers import auth as auth_router
+from .routers import checks, commands, islands, settings as settings_router, sites, superadmin, workspaces
+
+app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
+app.include_router(islands.router, prefix="/api", tags=["islands"])
+app.include_router(sites.router, prefix="/api", tags=["sites"])
+app.include_router(superadmin.router, prefix="/api", tags=["superadmin"])
+app.include_router(workspaces.router, prefix="/api", tags=["workspaces"])
+app.include_router(checks.router, prefix="/api", tags=["checks"])
+app.include_router(commands.router, prefix="/api", tags=["commands"])
+app.include_router(settings_router.router, prefix="/api", tags=["settings"])
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.get("/{full_path:path}")

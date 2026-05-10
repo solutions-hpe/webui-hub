@@ -1,106 +1,127 @@
 from __future__ import annotations
 
-import json
-import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
-from .. import auth
-from ..database import get_db
-from ..models import Command, Site, Workspace
-from ..schemas import CommandCreate, CommandResponse, MessageResponse
+from .. import auth, store
+from ..data_models import AuditEntry, Command, User
 
 router = APIRouter()
 
 
-def _loads(raw: str | None):
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"raw": raw}
+class CreateCommandRequest(BaseModel):
+    tenant_id: str
+    island_id: str
+    type: str
+    target: str = "island"
+    payload: dict[str, Any] = Field(default_factory=dict)
 
 
-def _expire_commands(db: Session) -> None:
-    now = datetime.utcnow()
-    expired = db.scalars(
-        select(Command).where(
-            Command.status.in_(["queued", "delivered"]),
-            Command.expires_at <= now,
-        )
-    ).all()
-    for command in expired:
-        command.status = "expired"
-    if expired:
-        db.commit()
+def _serialize_command(command: Command) -> dict[str, Any]:
+    return command.model_dump(mode="json")
 
 
-def _serialize(command: Command) -> CommandResponse:
-    return CommandResponse(
-        id=command.id,
-        site_id=command.site_id,
-        workspace_id=command.workspace_id,
-        target=command.target,
-        type=command.type,
-        payload=_loads(command.payload_json),
-        status=command.status,
-        created_at=command.created_at,
-        expires_at=command.expires_at,
-        delivered_at=command.delivered_at,
-        executed_at=command.executed_at,
-        result=_loads(command.result_json) if command.result_json else None,
-    )
+def _get_approved_island(tenant_id: str, island_id: str):
+    island = store.get_island(tenant_id, island_id)
+    if not island:
+        raise HTTPException(status_code=404, detail="Island not found")
+    if island.status != "approved":
+        raise HTTPException(status_code=409, detail="Island is not approved")
+    return island
 
 
-@router.get("", response_model=list[CommandResponse])
-def list_commands(
-    db: Session = Depends(get_db),
-    current_user=Depends(auth.get_current_user),
-):
-    _expire_commands(db)
-    commands = db.scalars(select(Command).order_by(Command.created_at.desc()).limit(200)).all()
-    return [_serialize(command) for command in commands]
-
-
-@router.post("", response_model=CommandResponse, status_code=status.HTTP_201_CREATED)
-def create_command(
-    payload: CommandCreate,
-    db: Session = Depends(get_db),
-    current_user=Depends(auth.get_current_user),
-):
-    if payload.site_id and not db.get(Site, payload.site_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
-    if payload.workspace_id and not db.get(Workspace, payload.workspace_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
-
+def _queue_command(
+    tenant_id: str,
+    island_id: str,
+    command_type: str,
+    payload: dict[str, Any],
+    current_user: User,
+    execution_mode: str = "centralized",
+) -> Command:
     command = Command(
-        site_id=payload.site_id,
-        workspace_id=payload.workspace_id,
-        target=payload.target,
-        type=payload.type,
-        payload_json=json.dumps(payload.payload or {}),
-        status="queued",
+        island_id=island_id,
+        tenant_id=tenant_id,
+        type=command_type,
+        payload=payload,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
     )
-    db.add(command)
-    db.commit()
-    db.refresh(command)
-    return _serialize(command)
+    store.enqueue_command(command)
+    store.append_audit(
+        AuditEntry(
+            island_id=island_id,
+            tenant_id=tenant_id,
+            task_type=command_type,
+            execution_mode=execution_mode,
+            status="pending",
+            detail=f"Queued command {command_type}",
+            initiated_by=current_user.username,
+            result={"payload": payload, "target": command.target},
+        )
+    )
+    return command
 
 
-@router.delete("/{command_id}", response_model=MessageResponse)
-def delete_command(
-    command_id: uuid.UUID,
-    db: Session = Depends(get_db),
-    current_user=Depends(auth.get_current_user),
+@router.post("/commands")
+def create_command(req: CreateCommandRequest, current_user: User = Depends(auth.get_current_user)):
+    auth.require_tenant_access(req.tenant_id, current_user)
+    island = _get_approved_island(req.tenant_id, req.island_id)
+    command = Command(
+        island_id=req.island_id,
+        tenant_id=req.tenant_id,
+        type=req.type,
+        target=req.target,
+        payload=req.payload,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+    )
+    store.enqueue_command(command)
+    store.append_audit(
+        AuditEntry(
+            island_id=req.island_id,
+            tenant_id=req.tenant_id,
+            task_type=req.type,
+            execution_mode=island.processing_mode.resolve(req.type) if hasattr(island.processing_mode, req.type) else "centralized",
+            status="pending",
+            detail=f"Queued command {req.type}",
+            initiated_by=current_user.username,
+            result={"payload": req.payload, "target": req.target},
+        )
+    )
+    return {"id": command.id, "status": command.status}
+
+
+@router.post("/{tenant_id}/islands/{island_id}/repo-sync")
+def repo_sync_island(tenant_id: str, island_id: str, current_user: User = Depends(auth.get_current_user)):
+    auth.require_tenant_access(tenant_id, current_user)
+    island = _get_approved_island(tenant_id, island_id)
+    command = _queue_command(
+        tenant_id,
+        island_id,
+        "repo_sync",
+        {},
+        current_user,
+        execution_mode=island.processing_mode.resolve("repo_sync"),
+    )
+    return {"id": command.id, "status": command.status}
+
+
+@router.get("/{tenant_id}/commands")
+def list_commands(
+    tenant_id: str,
+    island_id: Optional[str] = None,
+    current_user: User = Depends(auth.get_current_user),
 ):
-    command = db.get(Command, command_id)
-    if not command:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command not found")
+    auth.require_tenant_access(tenant_id, current_user)
+    if island_id and not store.get_island(tenant_id, island_id):
+        raise HTTPException(status_code=404, detail="Island not found")
+    return [_serialize_command(command) for command in store.list_commands(tenant_id, island_id)]
 
-    db.delete(command)
-    db.commit()
-    return MessageResponse(message="Command deleted")
+
+@router.get("/{tenant_id}/islands/{island_id}/audit")
+def get_island_audit(tenant_id: str, island_id: str, current_user: User = Depends(auth.get_current_user)):
+    auth.require_tenant_access(tenant_id, current_user)
+    if not store.get_island(tenant_id, island_id):
+        raise HTTPException(status_code=404, detail="Island not found")
+    return [entry.model_dump(mode="json") for entry in store.get_audit(tenant_id, island_id)]
