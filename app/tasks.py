@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 GKILL_SWITCH_URL = "https://raw.githubusercontent.com/solutions-hpe/main/main/gkill"
 
 gkill_state: dict[str, Any] = {"value": "off", "last_fetched": 0.0, "error": None}
-island_online: dict[str, dict[str, bool]] = {}
+spoke_online: dict[str, dict[str, bool]] = {}
 
 
 def _now() -> datetime:
@@ -41,10 +41,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _cmd(island_id: str, tenant_id: str, cmd_type: str, payload: dict[str, Any]) -> Command:
-    """Build a 24-hour command queue entry destined for a specific island."""
+def _cmd(spoke_id: str, tenant_id: str, cmd_type: str, payload: dict[str, Any]) -> Command:
+    """Build a 24-hour command queue entry destined for a specific spoke."""
     return Command(
-        island_id=island_id,
+        spoke_id=spoke_id,
         tenant_id=tenant_id,
         type=cmd_type,
         payload=payload,
@@ -52,10 +52,10 @@ def _cmd(island_id: str, tenant_id: str, cmd_type: str, payload: dict[str, Any])
     )
 
 
-def _audit(island_id: str, tenant_id: str, task_type: str, mode: str, status: str, detail: str = "") -> AuditEntry:
+def _audit(spoke_id: str, tenant_id: str, task_type: str, mode: str, status: str, detail: str = "") -> AuditEntry:
     """Create a normalized audit record for work initiated by background tasks."""
     return AuditEntry(
-        island_id=island_id,
+        spoke_id=spoke_id,
         tenant_id=tenant_id,
         task_type=task_type,
         execution_mode=mode,
@@ -93,13 +93,13 @@ async def _broadcast_gkill(value: str) -> None:
     """Publish a new gkill value to the UI and queue updates for distributed islands."""
     await ws_broadcast({"type": "gkill_switch_update", "value": value})
     for tenant in store.list_tenants():
-        for island in store.list_islands(tenant.id):
-            if island.status != "approved":
+        for spoke in store.list_spokes(tenant.id):
+            if spoke.status != "approved":
                 continue
-            mode = island.processing_mode.resolve("gkill")
+            mode = spoke.processing_mode.resolve("gkill")
             if mode == "distributed":
-                store.enqueue_command(_cmd(island.id, tenant.id, "gkill_update", {"value": value}))
-            store.append_audit(_audit(island.id, tenant.id, "gkill", mode, "success", f"gkill={value}"))
+                store.enqueue_command(_cmd(spoke.id, tenant.id, "gkill_update", {"value": value}))
+            store.append_audit(_audit(spoke.id, tenant.id, "gkill", mode, "success", f"gkill={value}"))
 
 
 async def heartbeat_monitor() -> None:
@@ -109,26 +109,26 @@ async def heartbeat_monitor() -> None:
         try:
             changed = False
             for tenant in store.list_tenants():
-                tenant_state = island_online.setdefault(tenant.id, {})
-                for island in store.list_islands(tenant.id):
-                    if island.status != "approved":
+                tenant_state = spoke_online.setdefault(tenant.id, {})
+                for spoke in store.list_spokes(tenant.id):
+                    if spoke.status != "approved":
                         continue
-                    online = bool(island.last_seen and (_now() - island.last_seen).total_seconds() < 120)
-                    prev = tenant_state.get(island.id)
+                    online = bool(spoke.last_seen and (_now() - spoke.last_seen).total_seconds() < 120)
+                    prev = tenant_state.get(spoke.id)
                     if prev != online:
-                        tenant_state[island.id] = online
+                        tenant_state[spoke.id] = online
                         changed = True
                         logger.info(
                             "Island %s (%s) went %s",
-                            island.hostname,
-                            island.id,
+                            spoke.hostname,
+                            spoke.id,
                             "online" if online else "offline",
                         )
             if changed:
                 await ws_broadcast(
                     {
                         "type": "heartbeat_update",
-                        "island_online": {tenant_id: dict(values) for tenant_id, values in island_online.items()},
+                        "island_online": {tenant_id: dict(values) for tenant_id, values in spoke_online.items()},
                     }
                 )
         except asyncio.CancelledError:
@@ -144,18 +144,18 @@ async def auto_recovery_check() -> None:
     while True:
         try:
             for tenant in store.list_tenants():
-                for island in store.list_islands(tenant.id):
-                    if island.status != "approved":
+                for spoke in store.list_spokes(tenant.id):
+                    if spoke.status != "approved":
                         continue
-                    timeout_hours = island.config.get("vm_silent_timeout", 24)
-                    if not island.last_seen:
+                    timeout_hours = spoke.config.get("vm_silent_timeout", 24)
+                    if not spoke.last_seen:
                         continue
-                    offline_secs = (_now() - island.last_seen).total_seconds()
+                    offline_secs = (_now() - spoke.last_seen).total_seconds()
                     if offline_secs > timeout_hours * 3600:
-                        mode = island.processing_mode.resolve("heartbeat")
+                        mode = spoke.processing_mode.resolve("heartbeat")
                         store.enqueue_command(
                             _cmd(
-                                island.id,
+                                spoke.id,
                                 tenant.id,
                                 "auto_recovery",
                                 {"reason": f"Island offline for {offline_secs / 3600:.1f}h"},
@@ -163,7 +163,7 @@ async def auto_recovery_check() -> None:
                         )
                         store.append_audit(
                             _audit(
-                                island.id,
+                                spoke.id,
                                 tenant.id,
                                 "auto_recovery",
                                 mode,
@@ -176,7 +176,7 @@ async def auto_recovery_check() -> None:
                                 "type": "notification",
                                 "level": "warning",
                                 "tenant_id": tenant.id,
-                                "message": f"Auto-recovery: island {island.hostname} offline {offline_secs / 3600:.1f}h",
+                                "message": f"Auto-recovery: spoke {spoke.hostname} offline {offline_secs / 3600:.1f}h",
                             }
                         )
         except asyncio.CancelledError:
@@ -199,10 +199,10 @@ async def schedule_check() -> None:
             current_day = day_names[now.weekday()]
 
             for tenant in store.list_tenants():
-                for island in store.list_islands(tenant.id):
-                    if island.status != "approved":
+                for spoke in store.list_spokes(tenant.id):
+                    if spoke.status != "approved":
                         continue
-                    cfg = island.config
+                    cfg = spoke.config
                     if cfg.get("reclone_schedule_enabled") != "on":
                         continue
                     cron = cfg.get("reclone_schedule_cron", "sunday 02:00")
@@ -219,14 +219,14 @@ async def schedule_check() -> None:
                         continue
 
                     trigger_key = now.strftime("%Y-%m-%d %H:%M")
-                    if _last_schedule_trigger.get(island.id) == trigger_key:
+                    if _last_schedule_trigger.get(spoke.id) == trigger_key:
                         continue
-                    _last_schedule_trigger[island.id] = trigger_key
+                    _last_schedule_trigger[spoke.id] = trigger_key
 
-                    mode = island.processing_mode.resolve("schedules")
-                    store.enqueue_command(_cmd(island.id, tenant.id, "reclone_schedule", {}))
-                    store.append_audit(_audit(island.id, tenant.id, "schedule", mode, "pending", f"Scheduled reclone: {cron}"))
-                    logger.info("Schedule triggered reclone for island %s (%s)", island.hostname, island.id)
+                    mode = spoke.processing_mode.resolve("schedules")
+                    store.enqueue_command(_cmd(spoke.id, tenant.id, "reclone_schedule", {}))
+                    store.append_audit(_audit(spoke.id, tenant.id, "schedule", mode, "pending", f"Scheduled reclone: {cron}"))
+                    logger.info("Schedule triggered reclone for island %s (%s)", spoke.hostname, spoke.id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -268,29 +268,29 @@ async def aruba_poller() -> None:
     while True:
         try:
             for tenant in store.list_tenants():
-                islands = [island for island in store.list_islands(tenant.id) if island.status == "approved"]
-                if not islands:
+                spokes = [spoke for spoke in store.list_spokes(tenant.id) if spoke.status == "approved"]
+                if not spokes:
                     continue
 
                 client = _get_aruba_client(tenant.id)
                 tenant_config: dict[str, Any] | None = None
-                if any(island.processing_mode.resolve("aruba_polling") == "distributed" for island in islands):
+                if any(spoke.processing_mode.resolve("aruba_polling") == "distributed" for spoke in spokes):
                     if tenant.aruba_config_enc:
                         try:
                             tenant_config = decrypt_dict(tenant.aruba_config_enc)
                         except Exception as exc:
                             logger.warning("Failed to load Aruba config for tenant %s: %s", tenant.id, exc)
 
-                distributed_islands = [island for island in islands if island.processing_mode.resolve("aruba_polling") == "distributed"]
-                for island in distributed_islands:
+                distributed_spokes = [spoke for spoke in spokes if spoke.processing_mode.resolve("aruba_polling") == "distributed"]
+                for spoke in distributed_spokes:
                     if not tenant_config:
-                        store.append_audit(_audit(island.id, tenant.id, "aruba_poll", "distributed", "failure", "Aruba config unavailable"))
+                        store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "distributed", "failure", "Aruba config unavailable"))
                         continue
-                    store.enqueue_command(_cmd(island.id, tenant.id, "aruba_config_update", tenant_config))
-                    store.append_audit(_audit(island.id, tenant.id, "aruba_poll", "distributed", "pending", "Aruba config pushed"))
+                    store.enqueue_command(_cmd(spoke.id, tenant.id, "aruba_config_update", tenant_config))
+                    store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "distributed", "pending", "Aruba config pushed"))
 
-                centralized_islands = [island for island in islands if island.processing_mode.resolve("aruba_polling") == "centralized"]
-                if not centralized_islands:
+                centralized_spokes = [spoke for spoke in spokes if spoke.processing_mode.resolve("aruba_polling") == "centralized"]
+                if not centralized_spokes:
                     continue
                 if not client or not client.is_configured():
                     continue
@@ -298,23 +298,23 @@ async def aruba_poller() -> None:
                 try:
                     findings = await client.poll_alerts_and_insights()
                 except Exception as exc:
-                    for island in centralized_islands:
-                        store.append_audit(_audit(island.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
+                    for spoke in centralized_spokes:
+                        store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
                     continue
 
                 finding_payload = [
                     {"site": finding.site_name, "check": finding.check_name, "status": finding.status, "source": finding.source}
                     for finding in findings
                 ]
-                for island in centralized_islands:
+                for spoke in centralized_spokes:
                     store.append_audit(
-                        _audit(island.id, tenant.id, "aruba_poll", "centralized", "success", f"{len(findings)} findings")
+                        _audit(spoke.id, tenant.id, "aruba_poll", "centralized", "success", f"{len(findings)} findings")
                     )
                     await ws_broadcast(
                         {
                             "type": "aruba_update",
                             "tenant_id": tenant.id,
-                            "island_id": island.id,
+                            "island_id": spoke.id,
                             "findings": finding_payload,
                         }
                     )
@@ -325,7 +325,7 @@ async def aruba_poller() -> None:
         await asyncio.sleep(300)
 
 
-async def send_notification(tenant_id: str, island_id: str, title: str, message: str, mode: str = "centralized") -> None:
+async def send_notification(tenant_id: str, spoke_id: str, title: str, message: str, mode: str = "centralized") -> None:
     """Send notifications centrally or queue island-side delivery based on feature mode."""
     from .notifications import send_email, send_teams_webhook
 
@@ -333,9 +333,9 @@ async def send_notification(tenant_id: str, island_id: str, title: str, message:
     if not cfg:
         return
 
-    island = store.get_island(tenant_id, island_id) if island_id else None
-    teams_mode = island.processing_mode.resolve("teams_webhook") if island else mode
-    email_mode = island.processing_mode.resolve("email") if island else mode
+    spoke = store.get_spoke(tenant_id, spoke_id) if spoke_id else None
+    teams_mode = spoke.processing_mode.resolve("teams_webhook") if spoke else mode
+    email_mode = spoke.processing_mode.resolve("email") if spoke else mode
 
     distributed_cfg: dict[str, Any] = {"enabled": True}
     distributed = False
@@ -376,18 +376,18 @@ async def send_notification(tenant_id: str, island_id: str, title: str, message:
             )
             centralized = True
 
-    if distributed and island_id:
+    if distributed and spoke_id:
         store.enqueue_command(
             _cmd(
-                island_id,
+                spoke_id,
                 tenant_id,
                 "notification_push",
                 {"title": title, "message": message, "config": distributed_cfg},
             )
         )
-        store.append_audit(_audit(island_id, tenant_id, "notification", "distributed", "pending", title))
-    if centralized and island_id:
-        store.append_audit(_audit(island_id, tenant_id, "notification", "centralized", "success", title))
+        store.append_audit(_audit(spoke_id, tenant_id, "notification", "distributed", "pending", title))
+    if centralized and spoke_id:
+        store.append_audit(_audit(spoke_id, tenant_id, "notification", "centralized", "success", title))
 
 
 async def maintenance_loop() -> None:
@@ -429,18 +429,18 @@ async def check_state_engine() -> None:
     while True:
         try:
             for tenant in store.list_tenants():
-                for island in store.list_islands(tenant.id):
-                    if island.status != "approved":
+                for spoke in store.list_spokes(tenant.id):
+                    if spoke.status != "approved":
                         continue
-                    key = f"{tenant.id}:{island.id}"
-                    online = bool(island.last_seen and (_now() - island.last_seen).total_seconds() < 120)
+                    key = f"{tenant.id}:{spoke.id}"
+                    online = bool(spoke.last_seen and (_now() - spoke.last_seen).total_seconds() < 120)
                     was_online = prev_online.get(key)
                     if was_online is True and not online:
                         await send_notification(
                             tenant.id,
-                            island.id,
-                            f"🔴 Island Offline: {island.hostname}",
-                            f"Island {island.hostname} has gone offline (no telemetry in 2 minutes).",
+                            spoke.id,
+                            f"🔴 Spoke Offline: {spoke.hostname}",
+                            f"Spoke {spoke.hostname} has gone offline (no telemetry in 2 minutes).",
                         )
                     prev_online[key] = online
         except asyncio.CancelledError:

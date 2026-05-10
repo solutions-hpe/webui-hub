@@ -174,13 +174,13 @@ def _pending_dir() -> Path:
     return _data_dir() / "pending"
 
 
-def get_pending_island(island_id: str) -> Optional[PendingIsland]:
+def get_pending_spoke(spoke_id: str) -> Optional[PendingIsland]:
     with _lock:
-        raw = _read_json(_pending_dir() / f"{island_id}.json")
+        raw = _read_json(_pending_dir() / f"{spoke_id}.json")
         return PendingIsland(**raw) if raw else None
 
 
-def list_pending_islands() -> list[PendingIsland]:
+def list_pending_spokes() -> list[PendingIsland]:
     with _lock:
         d = _pending_dir()
         if not d.exists():
@@ -195,7 +195,7 @@ def list_pending_islands() -> list[PendingIsland]:
 
 def get_pending_by_hostname(hostname: str) -> Optional[PendingIsland]:
     with _lock:
-        for p in list_pending_islands():
+        for p in list_pending_spokes():
             if p.hostname == hostname:
                 return p
     return None
@@ -205,35 +205,35 @@ def get_island_by_hostname(hostname: str) -> Optional[PendingIsland]:
     return get_pending_by_hostname(hostname)
 
 
-def save_pending_island(island: PendingIsland) -> None:
+def save_pending_spoke(spoke: PendingIsland) -> None:
     with _lock:
-        _write_json(_pending_dir() / f"{island.id}.json", island.model_dump(mode="json"))
+        _write_json(_pending_dir() / f"{spoke.id}.json", spoke.model_dump(mode="json"))
 
 
-def delete_pending_island(island_id: str) -> None:
+def delete_pending_spoke(spoke_id: str) -> None:
     with _lock:
-        p = _pending_dir() / f"{island_id}.json"
+        p = _pending_dir() / f"{spoke_id}.json"
         if p.exists():
             p.unlink()
 
 
-def _islands_path(tenant_id: str) -> Path:
+def _spoke_path(tenant_id: str) -> Path:
     return _data_dir() / tenant_id / "islands.json"
 
 
-def _load_islands(tenant_id: str) -> list[Island]:
-    raw = _read_json(_islands_path(tenant_id)) or []
+def _load_spokes(tenant_id: str) -> list[Island]:
+    raw = _read_json(_spoke_path(tenant_id)) or []
     return [Island(**i) for i in raw]
 
 
-def _save_islands(tenant_id: str, islands: list[Island]) -> None:
-    _write_json(_islands_path(tenant_id), [i.model_dump(mode="json") for i in islands])
+def _save_spokes(tenant_id: str, spokes: list[Island]) -> None:
+    _write_json(_spoke_path(tenant_id), [i.model_dump(mode="json") for i in spokes])
 
 
-def get_island(tenant_id: str, island_id: str) -> Optional[Island]:
+def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Island]:
     with _lock:
-        for i in _load_islands(tenant_id):
-            if i.id == island_id:
+        for i in _load_spokes(tenant_id):
+            if i.id == spoke_id:
                 return i
     return None
 
@@ -241,7 +241,7 @@ def get_island(tenant_id: str, island_id: str) -> Optional[Island]:
 def get_island_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
     """Return the approved island whose encrypted API key matches the plaintext key."""
     with _lock:
-        for i in _load_islands(tenant_id):
+        for i in _load_spokes(tenant_id):
             if i.api_key_enc:
                 try:
                     if decrypt_str(i.api_key_enc) == api_key:
@@ -251,148 +251,148 @@ def get_island_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
     return None
 
 
-def get_approved_island_by_hostname(hostname: str) -> Optional[tuple[str, Island]]:
+def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Island]]:
     """Return (tenant_id, island) for the first approved island matching hostname across all tenants."""
     with _lock:
         for tenant in _load_tenants():
-            for island in _load_islands(tenant.id):
-                if island.status == "approved" and island.hostname == hostname:
-                    return tenant.id, island
+            for spoke in _load_spokes(tenant.id):
+                if spoke.status == "approved" and spoke.hostname == hostname:
+                    return tenant.id, spoke
     return None
 
 
-def list_islands(tenant_id: str) -> list[Island]:
+def list_spokes(tenant_id: str) -> list[Island]:
     with _lock:
-        return _load_islands(tenant_id)
+        return _load_spokes(tenant_id)
 
 
-def save_island(island: Island) -> None:
+def save_spoke(spoke: Island) -> None:
     with _lock:
-        islands = _load_islands(island.tenant_id)
-        islands = [i for i in islands if i.id != island.id]
-        islands.append(island)
-        _save_islands(island.tenant_id, islands)
+        spokes = _load_spokes(spoke.tenant_id)
+        spokes = [i for i in spokes if i.id != spoke.id]
+        spokes.append(spoke)
+        _save_spokes(spoke.tenant_id, spokes)
 
 
 def get_processing_stats(tenant_id: str) -> dict:
     """Return count of islands in centralized vs distributed mode per feature."""
-    islands = list_islands(tenant_id)
+    spokes = list_spokes(tenant_id)
     features = ["aruba_polling", "teams_webhook", "email", "heartbeat", "gkill", "schedules", "repo_sync"]
     stats = {feature: {"centralized": 0, "distributed": 0} for feature in features}
-    approved_islands = [island for island in islands if island.status == "approved"]
-    for island in approved_islands:
+    approved_spokes = [spoke for spoke in spokes if spoke.status == "approved"]
+    for spoke in approved_spokes:
         for feature in features:
-            mode = island.processing_mode.resolve(feature)
+            mode = spoke.processing_mode.resolve(feature)
             stats[feature][mode] += 1
-    return {"total_islands": len(approved_islands), "by_feature": stats}
+    return {"total_islands": len(approved_spokes), "by_feature": stats}
 
 
-def get_island_processing_stats(tenant_id: str) -> dict:
+def get_spoke_processing_stats(tenant_id: str) -> dict:
     return get_processing_stats(tenant_id)
 
 
-def delete_island(tenant_id: str, island_id: str) -> None:
+def delete_spoke(tenant_id: str, spoke_id: str) -> None:
     with _lock:
-        islands = [i for i in _load_islands(tenant_id) if i.id != island_id]
-        _save_islands(tenant_id, islands)
+        spokes = [i for i in _load_spokes(tenant_id) if i.id != spoke_id]
+        _save_spokes(tenant_id, spokes)
 
-        queue_path = _queue_path(tenant_id, island_id)
+        queue_path = _queue_path(tenant_id, spoke_id)
         if queue_path.exists():
             queue_path.unlink()
 
-        audit_path = _audit_path(tenant_id, island_id)
+        audit_path = _audit_path(tenant_id, spoke_id)
         if audit_path.exists():
             audit_path.unlink()
 
 
-def approve_island(tenant_id: str, island_id: str) -> Optional[str]:
+def approve_spoke(tenant_id: str, spoke_id: str) -> Optional[str]:
     """Approve an island, persist a newly encrypted API key, and return it once."""
     with _lock:
-        islands = _load_islands(tenant_id)
-        for i in islands:
-            if i.id == island_id:
+        spokes = _load_spokes(tenant_id)
+        for i in spokes:
+            if i.id == spoke_id:
                 plain_key = generate_api_key()
                 i.api_key_enc = encrypt_str(plain_key)
                 i.status = "approved"
-                _save_islands(tenant_id, islands)
+                _save_spokes(tenant_id, spokes)
                 return plain_key
     return None
 
 
-def revoke_island(tenant_id: str, island_id: str) -> None:
+def revoke_spoke(tenant_id: str, spoke_id: str) -> None:
     with _lock:
-        islands = _load_islands(tenant_id)
-        for i in islands:
-            if i.id == island_id:
+        spokes = _load_spokes(tenant_id)
+        for i in spokes:
+            if i.id == spoke_id:
                 i.status = "revoked"
                 i.api_key_enc = None
                 break
-        _save_islands(tenant_id, islands)
+        _save_spokes(tenant_id, spokes)
 
 
-def update_island_telemetry(tenant_id: str, island_id: str, telemetry: dict) -> None:
+def update_spoke_telemetry(tenant_id: str, spoke_id: str, telemetry: dict) -> None:
     with _lock:
-        islands = _load_islands(tenant_id)
-        for i in islands:
-            if i.id == island_id:
+        spokes = _load_spokes(tenant_id)
+        for i in spokes:
+            if i.id == spoke_id:
                 i.telemetry = telemetry
                 i.last_seen = _now()
                 break
-        _save_islands(tenant_id, islands)
+        _save_spokes(tenant_id, spokes)
 
 
-def _queue_path(tenant_id: str, island_id: str) -> Path:
-    return _data_dir() / tenant_id / "queue" / f"{island_id}.json"
+def _queue_path(tenant_id: str, spoke_id: str) -> Path:
+    return _data_dir() / tenant_id / "queue" / f"{spoke_id}.json"
 
 
-def _load_queue(tenant_id: str, island_id: str) -> list[Command]:
-    raw = _read_json(_queue_path(tenant_id, island_id)) or []
+def _load_queue(tenant_id: str, spoke_id: str) -> list[Command]:
+    raw = _read_json(_queue_path(tenant_id, spoke_id)) or []
     return [Command(**c) for c in raw]
 
 
-def _save_queue(tenant_id: str, island_id: str, commands: list[Command]) -> None:
-    _write_json(_queue_path(tenant_id, island_id), [c.model_dump(mode="json") for c in commands])
+def _save_queue(tenant_id: str, spoke_id: str, commands: list[Command]) -> None:
+    _write_json(_queue_path(tenant_id, spoke_id), [c.model_dump(mode="json") for c in commands])
 
 
 def enqueue_command(command: Command) -> None:
     with _lock:
-        cmds = _load_queue(command.tenant_id, command.island_id)
+        cmds = _load_queue(command.tenant_id, command.spoke_id)
         now = _now()
         cmds = [c for c in cmds if c.expires_at > now]
         cmds.append(command)
-        _save_queue(command.tenant_id, command.island_id, cmds)
+        _save_queue(command.tenant_id, command.spoke_id, cmds)
 
 
-def get_queued_commands(tenant_id: str, island_id: str) -> list[Command]:
+def get_queued_commands(tenant_id: str, spoke_id: str) -> list[Command]:
     """Return queued commands, mark as delivered, purge expired."""
     with _lock:
         now = _now()
-        cmds = _load_queue(tenant_id, island_id)
+        cmds = _load_queue(tenant_id, spoke_id)
         active = [c for c in cmds if c.expires_at > now]
         queued = [c for c in active if c.status == "queued"]
         for c in queued:
             c.status = "delivered"
             c.delivered_at = now
-        _save_queue(tenant_id, island_id, active)
+        _save_queue(tenant_id, spoke_id, active)
         return queued
 
 
-def list_commands(tenant_id: str, island_id: Optional[str] = None) -> list[Command]:
+def list_commands(tenant_id: str, spoke_id: Optional[str] = None) -> list[Command]:
     with _lock:
         now = _now()
-        if island_id:
-            commands = [c for c in _load_queue(tenant_id, island_id) if c.expires_at > now]
+        if spoke_id:
+            commands = [c for c in _load_queue(tenant_id, spoke_id) if c.expires_at > now]
             return sorted(commands, key=lambda c: c.created_at, reverse=True)
 
         commands: list[Command] = []
-        for island in _load_islands(tenant_id):
-            commands.extend(c for c in _load_queue(tenant_id, island.id) if c.expires_at > now)
+        for spoke in _load_spokes(tenant_id):
+            commands.extend(c for c in _load_queue(tenant_id, spoke.id) if c.expires_at > now)
         return sorted(commands, key=lambda c: c.created_at, reverse=True)
 
 
-def ack_command(tenant_id: str, island_id: str, command_id: str, result: Optional[dict] = None) -> None:
+def ack_command(tenant_id: str, spoke_id: str, command_id: str, result: Optional[dict] = None) -> None:
     with _lock:
-        cmds = _load_queue(tenant_id, island_id)
+        cmds = _load_queue(tenant_id, spoke_id)
         for c in cmds:
             if c.id == command_id:
                 c.status = "executed"
@@ -400,7 +400,7 @@ def ack_command(tenant_id: str, island_id: str, command_id: str, result: Optiona
                 if result:
                     c.result = result
                 break
-        _save_queue(tenant_id, island_id, cmds)
+        _save_queue(tenant_id, spoke_id, cmds)
 
 
 def purge_expired_commands() -> int:
@@ -421,31 +421,31 @@ def purge_expired_commands() -> int:
     return total
 
 
-def _audit_path(tenant_id: str, island_id: str) -> Path:
-    return _data_dir() / tenant_id / "audit" / f"{island_id}.json"
+def _audit_path(tenant_id: str, spoke_id: str) -> Path:
+    return _data_dir() / tenant_id / "audit" / f"{spoke_id}.json"
 
 
-def _load_audit(tenant_id: str, island_id: str) -> list[AuditEntry]:
-    raw = _read_json(_audit_path(tenant_id, island_id)) or []
+def _load_audit(tenant_id: str, spoke_id: str) -> list[AuditEntry]:
+    raw = _read_json(_audit_path(tenant_id, spoke_id)) or []
     return [AuditEntry(**e) for e in raw]
 
 
 def append_audit(entry: AuditEntry) -> None:
     """Append audit entry and trim to 7-day rolling window."""
     with _lock:
-        entries = _load_audit(entry.tenant_id, entry.island_id)
+        entries = _load_audit(entry.tenant_id, entry.spoke_id)
         entries.append(entry)
         cutoff = _now() - timedelta(days=7)
         entries = [e for e in entries if e.timestamp > cutoff]
         _write_json(
-            _audit_path(entry.tenant_id, entry.island_id),
+            _audit_path(entry.tenant_id, entry.spoke_id),
             [e.model_dump(mode="json") for e in entries],
         )
 
 
-def get_audit(tenant_id: str, island_id: str) -> list[AuditEntry]:
+def get_audit(tenant_id: str, spoke_id: str) -> list[AuditEntry]:
     with _lock:
-        return _load_audit(tenant_id, island_id)
+        return _load_audit(tenant_id, spoke_id)
 
 
 def purge_old_audit() -> int:

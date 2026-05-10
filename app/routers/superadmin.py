@@ -243,26 +243,26 @@ def get_auth_provider_status(_: User = Depends(auth.require_superadmin)):
 
 
 @router.get("/superadmin/pending-islands")
-def list_pending_islands(_: User = Depends(auth.require_superadmin)):
-    return store.list_pending_islands()
+def list_pending_spokes(_: User = Depends(auth.require_superadmin)):
+    return store.list_pending_spokes()
 
 
-@router.post("/superadmin/pending-islands/{island_id}/approve")
-def approve_pending_island(
-    island_id: str,
+@router.post("/superadmin/pending-islands/{spoke_id}/approve")
+def approve_pending_spoke(
+    spoke_id: str,
     payload: ApprovePendingIslandRequest,
     request: Request,
     _: User = Depends(auth.require_superadmin),
 ):
-    pending = store.get_pending_island(island_id)
+    pending = store.get_pending_spoke(spoke_id)
     if not pending:
-        raise HTTPException(status_code=404, detail="Pending island not found")
+        raise HTTPException(status_code=404, detail="Pending spoke not found")
 
     tenant = store.get_tenant(payload.tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    island = Island(
+    spoke = Island(
         id=pending.id,
         tenant_id=payload.tenant_id,
         hostname=pending.hostname,
@@ -274,18 +274,18 @@ def approve_pending_island(
         last_seen=pending.last_seen,
     )
     plain_key = generate_api_key()
-    island.api_key_enc = encrypt_str(plain_key)
-    store.save_island(island)
-    store.delete_pending_island(island_id)
+    spoke.api_key_enc = encrypt_str(plain_key)
+    store.save_spoke(spoke)
+    store.delete_pending_spoke(spoke_id)
 
     relay_server_url = str(request.base_url).rstrip("/") + f"/api/{payload.tenant_id}"
     store.enqueue_command(
         Command(
-            island_id=island.id,
+            spoke_id=spoke.id,
             tenant_id=payload.tenant_id,
             type="config_update",
             payload={
-                "relay_island_id": island.id,
+                "relay_island_id": spoke.id,
                 "relay_api_key": plain_key,
                 "relay_tenant_id": payload.tenant_id,
                 "relay_server_url": relay_server_url,
@@ -295,18 +295,18 @@ def approve_pending_island(
     )
 
     return {
-        "island_id": island.id,
+        "island_id": spoke.id,
         "api_key": plain_key,
-        "message": "Island approved. API key shown once.",
+        "message": "Spoke approved. API key shown once.",
     }
 
 
-@router.delete("/superadmin/pending-islands/{island_id}")
-def delete_pending_island(island_id: str, _: User = Depends(auth.require_superadmin)):
-    pending = store.get_pending_island(island_id)
+@router.delete("/superadmin/pending-islands/{spoke_id}")
+def delete_pending_spoke(spoke_id: str, _: User = Depends(auth.require_superadmin)):
+    pending = store.get_pending_spoke(spoke_id)
     if not pending:
-        raise HTTPException(status_code=404, detail="Pending island not found")
-    store.delete_pending_island(island_id)
+        raise HTTPException(status_code=404, detail="Pending spoke not found")
+    store.delete_pending_spoke(spoke_id)
     return {"status": "deleted"}
 
 

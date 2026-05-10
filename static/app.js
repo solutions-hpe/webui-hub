@@ -4,8 +4,8 @@ let authToken = localStorage.getItem("hub_token") || null;
 let currentUser = null;
 let currentTenantId = null;
 let tenants = [];
-let islandCache = {};
-let activeIslandModal = null;
+let spokeCache = {};
+let activeSpokeModal = null;
 let ws = null;
 let wsReconnectTimer = null;
 let activeTab = "dashboard";
@@ -14,7 +14,7 @@ let autoRefreshCountdownTimer = null;
 let autoRefreshSecondsLeft = 10;
 
 const PROCESSING_FEATURES = ["aruba_polling", "teams_webhook", "email", "heartbeat", "gkill", "schedules", "repo_sync"];
-const islandUiState = { expandedByTenant: {}, search: "" };
+const spokeUiState = { expandedByTenant: {}, search: "" };
 const renderTokens = {};
 const scheduledReloads = {};
 
@@ -181,8 +181,8 @@ async function pingApi() {
 
 function getExpandedSet(tenantId = currentTenantId) {
   if (!tenantId) return new Set();
-  if (!islandUiState.expandedByTenant[tenantId]) islandUiState.expandedByTenant[tenantId] = new Set();
-  return islandUiState.expandedByTenant[tenantId];
+  if (!spokeUiState.expandedByTenant[tenantId]) spokeUiState.expandedByTenant[tenantId] = new Set();
+  return spokeUiState.expandedByTenant[tenantId];
 }
 
 function syncRoleBadge() {
@@ -206,19 +206,19 @@ function clearDynamicTenantTabs() {
 
 function buildSuperadminTenantTabs() {
   clearDynamicTenantTabs();
-  const islandsTab = $('.tab[data-tab="islands"]');
+  const spokesTab = $('.tab[data-tab="spokes"]');
   const superTab = $('.tab[data-tab="superadmin"]');
-  if (!currentUser?.is_superadmin || !islandsTab || !superTab) {
-    if (islandsTab) islandsTab.classList.remove("hidden");
+  if (!currentUser?.is_superadmin || !spokesTab || !superTab) {
+    if (spokesTab) spokesTab.classList.remove("hidden");
     return;
   }
-  islandsTab.classList.add("hidden");
+  spokesTab.classList.add("hidden");
   superTab.textContent = "⚙ Admin";
   tenants.forEach(tenant => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "tab auth-tab dynamic-tenant-tab";
-    button.dataset.tab = "islands";
+    button.dataset.tab = "spokes";
     button.dataset.tenantId = tenant.id;
     button.textContent = tenant.name;
     superTab.parentNode.insertBefore(button, superTab);
@@ -235,10 +235,10 @@ function applyAuthUI() {
   if (!loggedIn) {
     currentTenantId = null;
     tenants = [];
-    islandCache = {};
+    spokeCache = {};
     clearDynamicTenantTabs();
     $("#tenant-selector")?.classList.add("hidden");
-    $(".tab[data-tab='islands']")?.classList.remove("hidden");
+    $(".tab[data-tab='spokes']")?.classList.remove("hidden");
     $(".tab[data-tab='superadmin']") && ($(".tab[data-tab='superadmin']").textContent = "🔑 Superadmin");
     if (activeTab !== "dashboard") showTab("dashboard");
     return;
@@ -272,7 +272,7 @@ async function loadUserContext() {
     currentTenantId = tenants[0].id;
   }
   applyAuthUI();
-  populateCommandIslandSelect();
+  populateCommandSpokeSelect();
 }
 
 function openLoginModal() {
@@ -319,11 +319,11 @@ function logout(showMessage = true) {
   currentUser = null;
   currentTenantId = null;
   tenants = [];
-  islandCache = {};
-  activeIslandModal = null;
+  spokeCache = {};
+  activeSpokeModal = null;
   localStorage.removeItem("hub_token");
   applyAuthUI();
-  closeIslandModal();
+  closeSpokeModal();
   if (showMessage) showToast("Signed out.", "ok");
 }
 
@@ -332,12 +332,12 @@ async function setCurrentTenant(tenantId, reload = true) {
   $("#tenant-select") && ($("#tenant-select").value = tenantId || "");
   syncRoleBadge();
   applyAuthUI();
-  populateCommandIslandSelect();
-  if (reload && ["islands", "commands", "settings"].includes(activeTab)) await refreshCurrentView(true);
+  populateCommandSpokeSelect();
+  if (reload && ["spokes", "commands", "settings"].includes(activeTab)) await refreshCurrentView(true);
 }
 
 function showTab(tabId, opts = {}) {
-  if (["islands", "commands", "settings", "superadmin"].includes(tabId) && !currentUser) {
+  if (["spokes", "commands", "settings", "superadmin"].includes(tabId) && !currentUser) {
     openLoginModal();
     return;
   }
@@ -348,7 +348,7 @@ function showTab(tabId, opts = {}) {
   $$("#tab-nav .tab").forEach(button => button.classList.remove("active"));
   if (opts.button) {
     opts.button.classList.add("active");
-  } else if (currentUser?.is_superadmin && tabId === "islands" && currentTenantId) {
+  } else if (currentUser?.is_superadmin && tabId === "spokes" && currentTenantId) {
     const tenantButton = $(`.dynamic-tenant-tab[data-tenant-id="${CSS.escape(currentTenantId)}"]`);
     if (tenantButton) tenantButton.classList.add("active");
   } else {
@@ -360,8 +360,8 @@ function showTab(tabId, opts = {}) {
 async function refreshCurrentView(force = false) {
   if (activeTab === "dashboard") {
     await loadDashboard();
-  } else if (activeTab === "islands") {
-    await loadIslands(force);
+  } else if (activeTab === "spokes") {
+    await loadSpokes(force);
   } else if (activeTab === "commands") {
     await loadCommands();
   } else if (activeTab === "settings") {
@@ -371,21 +371,21 @@ async function refreshCurrentView(force = false) {
   }
 }
 
-function getTenantIslands() {
-  return currentTenantId ? (islandCache[currentTenantId] || []) : [];
+function getTenantSpokes() {
+  return currentTenantId ? (spokeCache[currentTenantId] || []) : [];
 }
 
 function spokeLabel(count) {
   return `${count} ${count === 1 ? "spoke" : "spokes"}`;
 }
 
-function updateIslandStatPills(islands) {
-  const approved = islands.filter(island => island.status === "approved");
-  const onlineCount = approved.filter(island => isOnline(island.last_seen)).length;
-  const clientCount = approved.reduce((sum, island) => sum + ((island.telemetry?.clients || []).length), 0);
-  $("#islands-count-pill") && ($("#islands-count-pill").textContent = spokeLabel(approved.length));
-  $("#islands-online-pill") && ($("#islands-online-pill").textContent = `${onlineCount} online`);
-  $("#islands-clients-pill") && ($("#islands-clients-pill").textContent = `${clientCount} clients`);
+function updateSpokeStatPills(spokes) {
+  const approved = spokes.filter(spoke => spoke.status === "approved");
+  const onlineCount = approved.filter(spoke => isOnline(spoke.last_seen)).length;
+  const clientCount = approved.reduce((sum, spoke) => sum + ((spoke.telemetry?.clients || []).length), 0);
+  $("#spokes-count-pill") && ($("#spokes-count-pill").textContent = spokeLabel(approved.length));
+  $("#spokes-online-pill") && ($("#spokes-online-pill").textContent = `${onlineCount} online`);
+  $("#spokes-clients-pill") && ($("#spokes-clients-pill").textContent = `${clientCount} clients`);
 }
 
 async function loadDashboard() {
@@ -396,7 +396,7 @@ async function loadDashboard() {
   const empty = $("#dashboard-empty");
   const onlineCount = sites.filter(site => isOnline(site.last_seen)).length;
   const clientCount = sites.reduce((sum, site) => sum + ((site.telemetry?.clients || []).length), 0);
-  $("#dash-islands-pill") && ($("#dash-islands-pill").textContent = spokeLabel(sites.length));
+  $("#dash-spokes-pill") && ($("#dash-spokes-pill").textContent = spokeLabel(sites.length));
   $("#dash-clients-pill") && ($("#dash-clients-pill").textContent = `${clientCount} clients`);
   $("#dash-online-pill") && ($("#dash-online-pill").textContent = `${onlineCount} online`);
   empty?.classList.toggle("hidden", sites.length > 0);
@@ -405,36 +405,36 @@ async function loadDashboard() {
     const online = isOnline(site.last_seen);
     const clients = site.telemetry?.clients || [];
     const card = document.createElement("article");
-    card.className = "island-card compact-card";
+    card.className = "spoke-card compact-card";
     card.dataset.tenantId = site.workspace_id || site.tenant_id || "";
-    card.dataset.islandId = site.id;
+    card.dataset.spokeId = site.id;
     card.innerHTML = `
-      <div class="island-card-header-row">
-        <div class="island-card-title-wrap">
-          <div class="island-card-title">${escHtml(site.hostname)}</div>
-          <div class="island-card-subtitle">${escHtml(site.label || site.workspace_id || "—")}</div>
+      <div class="spoke-card-header-row">
+        <div class="spoke-card-title-wrap">
+          <div class="spoke-card-title">${escHtml(site.hostname)}</div>
+          <div class="spoke-card-subtitle">${escHtml(site.label || site.workspace_id || "—")}</div>
         </div>
-        <div class="island-card-status" data-online-state>${statusDot(online)}</div>
+        <div class="spoke-card-status" data-online-state>${statusDot(online)}</div>
       </div>
-      <div class="island-card-meta">
+      <div class="spoke-card-meta">
         <span class="stat-pill">${clients.length} clients</span>
         <span class="stat-pill">${online ? "Online" : "Offline"}</span>
       </div>
-      <div class="island-card-footer">Last seen ${escHtml(relativeTime(site.last_seen))}</div>
+      <div class="spoke-card-footer">Last seen ${escHtml(relativeTime(site.last_seen))}</div>
     `;
     return card;
   }, 60);
 }
 
-async function ensureIslands(force = false) {
+async function ensureSpokes(force = false) {
   if (!currentTenantId) return [];
-  if (!force && islandCache[currentTenantId]) return islandCache[currentTenantId];
+  if (!force && spokeCache[currentTenantId]) return spokeCache[currentTenantId];
   const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/islands`);
   if (!res || !res.ok) return [];
-  const islands = await res.json();
-  islandCache[currentTenantId] = islands;
-  populateCommandIslandSelect();
-  return islands;
+  const spokes = await res.json();
+  spokeCache[currentTenantId] = spokes;
+  populateCommandSpokeSelect();
+  return spokes;
 }
 
 function renderClientRows(clients = []) {
@@ -456,17 +456,17 @@ function renderClientRows(clients = []) {
   }).join("");
 }
 
-function renderIslandBody(section, island) {
-  const body = $(".island-section-body", section);
+function renderSpokeBody(section, spoke) {
+  const body = $(".spoke-section-body", section);
   if (!body) return;
-  const clients = island.telemetry?.clients || [];
+  const clients = spoke.telemetry?.clients || [];
   body.innerHTML = `
-    <div class="island-section-summary">
-      <span class="stat-pill">Workspace ${escHtml(tenantName(island.tenant_id))}</span>
+    <div class="spoke-section-summary">
+      <span class="stat-pill">Workspace ${escHtml(tenantName(spoke.tenant_id))}</span>
       <span class="stat-pill">${clients.length} clients</span>
-      <span class="stat-pill">Seen ${escHtml(relativeTime(island.last_seen))}</span>
+      <span class="stat-pill">Seen ${escHtml(relativeTime(spoke.last_seen))}</span>
     </div>
-    <div class="island-action-bar">
+    <div class="spoke-action-bar">
       <button class="btn btn-secondary btn-small" data-action="detail" type="button">Open Detail</button>
       <button class="btn btn-secondary btn-small" data-action="audit" type="button">View Audit Log</button>
       <button class="btn btn-secondary btn-small" data-action="mode" type="button">Processing Mode</button>
@@ -480,80 +480,80 @@ function renderIslandBody(section, island) {
       </select>
       <button class="btn btn-primary btn-small" data-action="send" type="button">Send Command</button>
     </div>
-    <table class="data-table island-client-table">
+    <table class="data-table spoke-client-table">
       <thead><tr><th>Client ID</th><th>Hostname</th><th>Status</th><th>Last Seen</th><th>IP</th></tr></thead>
       <tbody>${renderClientRows(clients)}</tbody>
     </table>
   `;
   const quickSelect = $(".quick-command-select", body);
-  if (!canManageTenant(island.tenant_id)) {
+  if (!canManageTenant(spoke.tenant_id)) {
     const modeButton = $('[data-action="mode"]', body);
     if (modeButton) modeButton.disabled = true;
   }
   body.addEventListener("click", async event => {
     const action = event.target.closest("[data-action]")?.dataset.action;
     if (!action) return;
-    if (action === "detail") openIslandModal(island, island.tenant_id, "island-clients");
-    if (action === "audit") openIslandModal(island, island.tenant_id, "island-audit");
-    if (action === "mode") openIslandModal(island, island.tenant_id, "island-mode");
-    if (action === "send") await sendCommandToIsland(island.tenant_id, island.id, quickSelect?.value || "kill_switch");
+    if (action === "detail") openSpokeModal(spoke, spoke.tenant_id, "spoke-clients");
+    if (action === "audit") openSpokeModal(spoke, spoke.tenant_id, "spoke-audit");
+    if (action === "mode") openSpokeModal(spoke, spoke.tenant_id, "spoke-mode");
+    if (action === "send") await sendCommandToSpoke(spoke.tenant_id, spoke.id, quickSelect?.value || "kill_switch");
   }, { once: true });
 }
 
-function createIslandSection(island) {
-  const expanded = getExpandedSet().has(island.id);
-  const online = isOnline(island.last_seen);
-  const clients = island.telemetry?.clients || [];
+function createSpokeSection(spoke) {
+  const expanded = getExpandedSet().has(spoke.id);
+  const online = isOnline(spoke.last_seen);
+  const clients = spoke.telemetry?.clients || [];
   const section = document.createElement("section");
-  section.className = "island-section";
-  section.dataset.islandId = island.id;
-  section.dataset.tenantId = island.tenant_id;
+  section.className = "spoke-section";
+  section.dataset.spokeId = spoke.id;
+  section.dataset.tenantId = spoke.tenant_id;
   section.innerHTML = `
-    <div class="island-section-header">
-      <span class="island-toggle ${expanded ? "open" : ""}">▶</span>
+    <div class="spoke-section-header">
+      <span class="spoke-toggle ${expanded ? "open" : ""}">▶</span>
       ${statusDot(online)}
-      <span class="island-hostname">${escHtml(island.hostname)}</span>
-      <span class="island-label-inline">${escHtml(island.label || "—")}</span>
-      <span class="island-meta">${clients.length} clients · ${escHtml(relativeTime(island.last_seen))}</span>
+      <span class="spoke-hostname">${escHtml(spoke.hostname)}</span>
+      <span class="spoke-label-inline">${escHtml(spoke.label || "—")}</span>
+      <span class="spoke-meta">${clients.length} clients · ${escHtml(relativeTime(spoke.last_seen))}</span>
     </div>
-    <div class="island-section-body ${expanded ? "expanded" : ""}"></div>
+    <div class="spoke-section-body ${expanded ? "expanded" : ""}"></div>
   `;
-  $(".island-section-header", section)?.addEventListener("click", event => {
+  $(".spoke-section-header", section)?.addEventListener("click", event => {
     if (event.target.closest("button,select,input,a")) return;
-    toggleIslandSection(section, island);
+    toggleSpokeSection(section, spoke);
   });
   if (expanded) {
-    renderIslandBody(section, island);
-    $(".island-section-body", section).dataset.rendered = "1";
+    renderSpokeBody(section, spoke);
+    $(".spoke-section-body", section).dataset.rendered = "1";
   }
   return section;
 }
 
-function toggleIslandSection(section, island) {
+function toggleSpokeSection(section, spoke) {
   const expandedSet = getExpandedSet();
-  const body = $(".island-section-body", section);
-  const toggle = $(".island-toggle", section);
+  const body = $(".spoke-section-body", section);
+  const toggle = $(".spoke-toggle", section);
   const opening = !body.classList.contains("expanded");
   body.classList.toggle("expanded", opening);
   toggle?.classList.toggle("open", opening);
   if (opening) {
-    expandedSet.add(island.id);
+    expandedSet.add(spoke.id);
     if (!body.dataset.rendered) {
-      renderIslandBody(section, island);
+      renderSpokeBody(section, spoke);
       body.dataset.rendered = "1";
     }
   } else {
-    expandedSet.delete(island.id);
+    expandedSet.delete(spoke.id);
   }
 }
 
-async function loadIslands(force = false) {
-  const islands = await ensureIslands(force);
-  updateIslandStatPills(islands);
-  const search = islandUiState.search.trim().toLowerCase();
-  const filtered = islands.filter(island => island.status === "approved" && (!search || island.hostname.toLowerCase().includes(search)));
-  const list = $("#islands-list");
-  const empty = $("#islands-empty");
+async function loadSpokes(force = false) {
+  const spokes = await ensureSpokes(force);
+  updateSpokeStatPills(spokes);
+  const search = spokeUiState.search.trim().toLowerCase();
+  const filtered = spokes.filter(spoke => spoke.status === "approved" && (!search || spoke.hostname.toLowerCase().includes(search)));
+  const list = $("#spokes-list");
+  const empty = $("#spokes-empty");
   empty?.classList.toggle("hidden", filtered.length > 0);
   if (!list) return;
   if (!filtered.length) {
@@ -565,36 +565,36 @@ async function loadIslands(force = false) {
   group.innerHTML = `<div class="workspace-header"><h2>${escHtml(tenantName(currentTenantId))}</h2><p>Workspace: ${escHtml(currentTenantId)}</p></div><div class="workspace-body"></div>`;
   list.innerHTML = "";
   list.appendChild(group);
-  renderInBatches("islands", $(".workspace-body", group), filtered, island => createIslandSection(island), 30);
+  renderInBatches("spokes", $(".workspace-body", group), filtered, spoke => createSpokeSection(spoke), 30);
 }
 
-function populateCommandIslandSelect() {
-  const select = $("#cmd-island");
+function populateCommandSpokeSelect() {
+  const select = $("#cmd-spoke");
   if (!select) return;
-  const islands = getTenantIslands().filter(island => island.status === "approved");
-  select.innerHTML = islands.map(island => `<option value="${escHtml(island.id)}">${escHtml(island.hostname)}</option>`).join("");
+  const spokes = getTenantSpokes().filter(spoke => spoke.status === "approved");
+  select.innerHTML = spokes.map(spoke => `<option value="${escHtml(spoke.id)}">${escHtml(spoke.hostname)}</option>`).join("");
 }
 
-async function sendCommandToIsland(tenantId, islandId, type) {
+async function sendCommandToSpoke(tenantId, spokeId, type) {
   const response = await apiFetch("/api/commands", {
     method: "POST",
-    body: { tenant_id: tenantId, island_id: islandId, type, target: "island", payload: {} },
+    body: { tenant_id: tenantId, island_id: spokeId, type, target: "spoke", payload: {} },
   });
   if (!response || !response.ok) {
     const err = await readJson(response);
     showToast(err?.detail || `Failed to send ${type}.`, "err");
     return false;
   }
-  showToast(`${type} queued for ${islandId}.`, "ok");
+  showToast(`${type} queued for ${spokeId}.`, "ok");
   if (activeTab === "commands") loadCommands();
-  if (activeIslandModal?.island?.id === islandId) loadIslandCommands();
+  if (activeSpokeModal?.spoke?.id === spokeId) loadSpokeCommands();
   return true;
 }
 
 async function loadCommands() {
   if (!currentTenantId) return;
-  await ensureIslands();
-  populateCommandIslandSelect();
+  await ensureSpokes();
+  populateCommandSpokeSelect();
   const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/commands`);
   if (!res || !res.ok) return;
   const commands = await res.json();
@@ -607,10 +607,10 @@ async function loadCommands() {
     return;
   }
   tbody.innerHTML = commands.map(command => {
-    const island = getTenantIslands().find(item => item.id === command.island_id);
+    const spoke = getTenantSpokes().find(item => item.id === command.island_id);
     return `
       <tr>
-        <td>${escHtml(island?.hostname || command.island_id)}</td>
+        <td>${escHtml(spoke?.hostname || command.island_id)}</td>
         <td>${escHtml(command.type)}</td>
         <td><span class="badge cmd-status-${escHtml(command.status)}">${escHtml(command.status)}</span></td>
         <td>${escHtml(fmtDate(command.created_at))}</td>
@@ -621,37 +621,37 @@ async function loadCommands() {
 }
 
 async function sendCommandFromForm() {
-  const islandId = $("#cmd-island")?.value;
+  const spokeId = $("#cmd-spoke")?.value;
   const type = $("#cmd-type")?.value || "kill_switch";
-  if (!currentTenantId || !islandId) {
+  if (!currentTenantId || !spokeId) {
     setFormMessage("cmd-msg", "Select a spoke first.", false);
     return;
   }
-  const ok = await sendCommandToIsland(currentTenantId, islandId, type);
+  const ok = await sendCommandToSpoke(currentTenantId, spokeId, type);
   setFormMessage("cmd-msg", ok ? "Command queued." : "Failed to queue command.", ok);
   if (ok) loadCommands();
 }
 
-function getIslandFromCache(tenantId, islandId) {
-  return (islandCache[tenantId] || []).find(island => island.id === islandId) || null;
+function getSpokeFromCache(tenantId, spokeId) {
+  return (spokeCache[tenantId] || []).find(spoke => spoke.id === spokeId) || null;
 }
 
-function renderIslandClientsTab() {
-  const island = getIslandFromCache(activeIslandModal?.tenant_id, activeIslandModal?.island?.id) || activeIslandModal?.island;
-  if (!island) return;
-  activeIslandModal.island = island;
-  const tbody = $("#island-clients-tbody");
+function renderSpokeClientsTab() {
+  const spoke = getSpokeFromCache(activeSpokeModal?.tenant_id, activeSpokeModal?.spoke?.id) || activeSpokeModal?.spoke;
+  if (!spoke) return;
+  activeSpokeModal.spoke = spoke;
+  const tbody = $("#spoke-clients-tbody");
   if (!tbody) return;
-  tbody.innerHTML = renderClientRows(island.telemetry?.clients || []);
+  tbody.innerHTML = renderClientRows(spoke.telemetry?.clients || []);
 }
 
-async function loadIslandCommands() {
-  if (!activeIslandModal) return;
-  const { tenant_id: tenantId, island } = activeIslandModal;
-  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/commands?island_id=${encodeURIComponent(island.id)}`);
+async function loadSpokeCommands() {
+  if (!activeSpokeModal) return;
+  const { tenant_id: tenantId, spoke } = activeSpokeModal;
+  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/commands?island_id=${encodeURIComponent(spoke.id)}`);
   if (!res || !res.ok) return;
   const commands = await res.json();
-  const tbody = $("#island-cmds-tbody");
+  const tbody = $("#spoke-cmds-tbody");
   if (!tbody) return;
   const items = commands.slice(0, 20);
   tbody.innerHTML = items.length ? items.map(command => `
@@ -663,13 +663,13 @@ async function loadIslandCommands() {
     </tr>`).join("") : '<tr><td colspan="4" class="empty-state">No commands for this spoke.</td></tr>';
 }
 
-async function loadIslandAudit() {
-  if (!activeIslandModal) return;
-  const { tenant_id: tenantId, island } = activeIslandModal;
-  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/islands/${encodeURIComponent(island.id)}/audit`);
+async function loadSpokeAudit() {
+  if (!activeSpokeModal) return;
+  const { tenant_id: tenantId, spoke } = activeSpokeModal;
+  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/islands/${encodeURIComponent(spoke.id)}/audit`);
   if (!res || !res.ok) return;
   const audit = (await res.json()).slice(-20).reverse();
-  const tbody = $("#island-audit-tbody");
+  const tbody = $("#spoke-audit-tbody");
   if (!tbody) return;
   tbody.innerHTML = audit.length ? audit.map(entry => `
     <tr>
@@ -681,16 +681,16 @@ async function loadIslandAudit() {
     </tr>`).join("") : '<tr><td colspan="5" class="empty-state">No audit entries.</td></tr>';
 }
 
-async function loadIslandProcessingMode() {
-  if (!activeIslandModal) return;
+async function loadSpokeProcessingMode() {
+  if (!activeSpokeModal) return;
   const saveBtn = $("#mode-save-btn");
-  if (saveBtn) saveBtn.disabled = !canManageTenant(activeIslandModal.tenant_id);
-  const res = await apiFetch(`/api/${encodeURIComponent(activeIslandModal.tenant_id)}/processing-summary`);
+  if (saveBtn) saveBtn.disabled = !canManageTenant(activeSpokeModal.tenant_id);
+  const res = await apiFetch(`/api/${encodeURIComponent(activeSpokeModal.tenant_id)}/processing-summary`);
   if (!res || !res.ok) return;
   const summary = await res.json();
-  const islandSummary = summary.islands.find(item => item.island_id === activeIslandModal.island.id);
-  if (!islandSummary) return;
-  $("#mode-global") && ($("#mode-global").value = islandSummary.global_mode || "centralized");
+  const spokeSummary = summary.islands.find(item => item.island_id === activeSpokeModal.spoke.id);
+  if (!spokeSummary) return;
+  $("#mode-global") && ($("#mode-global").value = spokeSummary.global_mode || "centralized");
   const grid = $("#mode-features-grid");
   if (!grid) return;
   grid.innerHTML = PROCESSING_FEATURES.map(feature => `
@@ -704,22 +704,22 @@ async function loadIslandProcessingMode() {
     </div>
   `).join("");
   PROCESSING_FEATURES.forEach(feature => {
-    const value = islandSummary.feature_overrides?.[feature];
+    const value = spokeSummary.feature_overrides?.[feature];
     const select = $(`#mode-${feature}`);
     if (select) select.value = value || "inherit";
-    if (select && !canManageTenant(activeIslandModal.tenant_id)) select.disabled = true;
+    if (select && !canManageTenant(activeSpokeModal.tenant_id)) select.disabled = true;
   });
   setFormMessage("mode-msg", "", true);
 }
 
-async function saveIslandProcessingMode() {
-  if (!activeIslandModal || !canManageTenant(activeIslandModal.tenant_id)) return;
+async function saveSpokeProcessingMode() {
+  if (!activeSpokeModal || !canManageTenant(activeSpokeModal.tenant_id)) return;
   const payload = { global_mode: $("#mode-global")?.value || "centralized" };
   PROCESSING_FEATURES.forEach(feature => {
     const value = $(`#mode-${feature}`)?.value || "inherit";
     payload[feature] = value === "inherit" ? null : value;
   });
-  const res = await apiFetch(`/api/${encodeURIComponent(activeIslandModal.tenant_id)}/islands/${encodeURIComponent(activeIslandModal.island.id)}/processing-mode`, {
+  const res = await apiFetch(`/api/${encodeURIComponent(activeSpokeModal.tenant_id)}/islands/${encodeURIComponent(activeSpokeModal.spoke.id)}/processing-mode`, {
     method: "PATCH",
     body: payload,
   });
@@ -730,44 +730,44 @@ async function saveIslandProcessingMode() {
   }
   setFormMessage("mode-msg", "Processing mode saved.", true);
   showToast("Processing mode updated.", "ok");
-  await loadIslands(true);
+  await loadSpokes(true);
 }
 
-function openIslandModal(island, tenantId, subtab = "island-clients") {
-  activeIslandModal = { island, tenant_id: tenantId };
-  $("#island-modal-title") && ($("#island-modal-title").textContent = `${island.hostname} — ${tenantName(tenantId)}`);
-  $("#island-modal")?.classList.remove("hidden");
-  activateIslandSubtab(subtab);
-  renderIslandClientsTab();
-  loadIslandCommands();
-  loadIslandProcessingMode();
-  loadIslandAudit();
+function openSpokeModal(spoke, tenantId, subtab = "spoke-clients") {
+  activeSpokeModal = { spoke, tenant_id: tenantId };
+  $("#spoke-modal-title") && ($("#spoke-modal-title").textContent = `${spoke.hostname} — ${tenantName(tenantId)}`);
+  $("#spoke-modal")?.classList.remove("hidden");
+  activateSpokeSubtab(subtab);
+  renderSpokeClientsTab();
+  loadSpokeCommands();
+  loadSpokeProcessingMode();
+  loadSpokeAudit();
 }
 
-function closeIslandModal() {
-  $("#island-modal")?.classList.add("hidden");
-  activeIslandModal = null;
+function closeSpokeModal() {
+  $("#spoke-modal")?.classList.add("hidden");
+  activeSpokeModal = null;
 }
 
-function activateIslandSubtab(subtabId) {
-  $$(".island-subtab").forEach(button => button.classList.toggle("active", button.dataset.subtab === subtabId));
-  ["island-clients", "island-commands", "island-mode", "island-audit"].forEach(panelId => {
+function activateSpokeSubtab(subtabId) {
+  $$(".spoke-subtab").forEach(button => button.classList.toggle("active", button.dataset.subtab === subtabId));
+  ["spoke-clients", "spoke-commands", "spoke-mode", "spoke-audit"].forEach(panelId => {
     document.getElementById(panelId)?.classList.toggle("hidden", panelId !== subtabId);
   });
-  if (subtabId === "island-commands") loadIslandCommands();
-  if (subtabId === "island-mode") loadIslandProcessingMode();
-  if (subtabId === "island-audit") loadIslandAudit();
+  if (subtabId === "spoke-commands") loadSpokeCommands();
+  if (subtabId === "spoke-mode") loadSpokeProcessingMode();
+  if (subtabId === "spoke-audit") loadSpokeAudit();
 }
 
-async function sendIslandCommand(type) {
-  if (!activeIslandModal) return;
-  const ok = await sendCommandToIsland(activeIslandModal.tenant_id, activeIslandModal.island.id, type);
+async function sendSpokeCommand(type) {
+  if (!activeSpokeModal) return;
+  const ok = await sendCommandToSpoke(activeSpokeModal.tenant_id, activeSpokeModal.spoke.id, type);
   if (ok) {
-    loadIslandCommands();
-    loadIslandAudit();
+    loadSpokeCommands();
+    loadSpokeAudit();
   }
 }
-window.sendIslandCommand = sendIslandCommand;
+window.sendSpokeCommand = sendSpokeCommand;
 
 async function loadSettings() {
   if (!currentTenantId) return;
@@ -858,14 +858,14 @@ async function saveNotificationSettings() {
   $("#notif-smtp-pass") && ($("#notif-smtp-pass").value = "");
 }
 
-function showKeyBanner(apiKey, islandId) {
+function showKeyBanner(apiKey, spokeId) {
   const banner = $("#sa-key-banner");
   if (!banner) return;
   banner.innerHTML = `
     <strong>⚠ Save this API key — it will not be shown again.</strong>
     <div class="api-key-display">${escHtml(apiKey)}</div>
     <div class="row">
-      <span>Spoke ${escHtml(islandId)} approved.</span>
+      <span>Spoke ${escHtml(spokeId)} approved.</span>
       <button class="btn btn-secondary btn-small" id="sa-key-dismiss" type="button">Dismiss</button>
     </div>
   `;
@@ -990,12 +990,12 @@ async function loadSuperadmin() {
     buildSuperadminTenantTabs();
     renderSuperadminTenants(tenantData);
   }
-  if (pendingRes?.ok) renderPendingIslands(await pendingRes.json());
+  if (pendingRes?.ok) renderPendingSpokes(await pendingRes.json());
   if (usersRes?.ok) renderSuperadminUsers(await usersRes.json());
   loadGkillState();
 }
 
-function renderPendingIslands(items) {
+function renderPendingSpokes(items) {
   $("#sa-pending-count") && ($("#sa-pending-count").textContent = String(items.length));
   const tbody = $("#sa-pending-tbody");
   if (!tbody) return;
@@ -1026,13 +1026,13 @@ function renderSuperadminTenants(items) {
   const tbody = $("#sa-tenants-tbody");
   if (!tbody) return;
   tbody.innerHTML = items.length ? items.map(item => {
-    const islandCount = Object.values(islandCache).reduce((sum, arr) => sum + arr.filter(island => island.tenant_id === item.id).length, 0);
+    const spokeCount = Object.values(spokeCache).reduce((sum, arr) => sum + arr.filter(spoke => spoke.tenant_id === item.id).length, 0);
     return `
       <tr>
         <td>${escHtml(item.name)}</td>
         <td>${escHtml(item.id)}</td>
         <td>${item.has_aruba_config ? "Yes" : "No"}</td>
-        <td>${islandCount}</td>
+        <td>${spokeCount}</td>
         <td><button class="btn btn-danger btn-small" data-delete-tenant="${escHtml(item.id)}" type="button">Delete</button></td>
       </tr>
     `;
@@ -1084,7 +1084,7 @@ async function loadGkillState() {
   updateGkillBadge(data.value);
 }
 
-async function approvePendingIsland(id) {
+async function approvePendingSpoke(id) {
   const select = $(`.sa-tenant-assign[data-pending-id="${CSS.escape(id)}"]`);
   const tenantId = select?.value;
   if (!tenantId) return;
@@ -1100,10 +1100,10 @@ async function approvePendingIsland(id) {
   const data = await res.json();
   showKeyBanner(data.api_key, data.island_id);
   showToast("Spoke approved.", "ok");
-  await Promise.all([loadSuperadmin(), loadIslands(true), loadDashboard()]);
+  await Promise.all([loadSuperadmin(), loadSpokes(true), loadDashboard()]);
 }
 
-async function rejectPendingIsland(id) {
+async function rejectPendingSpoke(id) {
   const res = await apiFetch(`/api/superadmin/pending-islands/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res || !res.ok) {
     showToast("Failed to reject spoke.", "err");
@@ -1199,17 +1199,17 @@ async function removeRole(userId, tenantId) {
 }
 
 function applyOnlineState(root, online) {
-  root.querySelectorAll("[data-online-state] .status-dot, .island-section-header > .status-dot").forEach(dot => {
+  root.querySelectorAll("[data-online-state] .status-dot, .spoke-section-header > .status-dot").forEach(dot => {
     dot.className = `status-dot ${online ? "online" : "offline"}`;
   });
 }
 
-function updateOnlineBadges(islandOnline) {
-  if (!islandOnline) return;
-  document.querySelectorAll("[data-island-id]").forEach(node => {
+function updateOnlineBadges(spokeOnline) {
+  if (!spokeOnline) return;
+  document.querySelectorAll("[data-spoke-id]").forEach(node => {
     const tenantId = node.dataset.tenantId;
-    const islandId = node.dataset.islandId;
-    const online = islandOnline?.[tenantId]?.[islandId];
+    const spokeId = node.dataset.spokeId;
+    const online = spokeOnline?.[tenantId]?.[spokeId];
     if (typeof online === "boolean") applyOnlineState(node, online);
   });
 }
@@ -1260,10 +1260,10 @@ function connectWebSocket() {
   ws.onmessage = event => {
     const data = JSON.parse(event.data);
     if (data.type === "telemetry") {
-      if (activeTab === "islands") scheduleReload("ws-islands", () => loadIslands(true));
+      if (activeTab === "spokes") scheduleReload("ws-spokes", () => loadSpokes(true));
       if (activeTab === "dashboard") scheduleReload("ws-dashboard", () => loadDashboard());
-      if (activeIslandModal && data.tenant_id === activeIslandModal.tenant_id && data.island_id === activeIslandModal.island.id) {
-        scheduleReload("ws-modal", () => loadIslands(true).then(() => renderIslandClientsTab()));
+      if (activeSpokeModal && data.tenant_id === activeSpokeModal.tenant_id && data.island_id === activeSpokeModal.spoke.id) {
+        scheduleReload("ws-modal", () => loadSpokes(true).then(() => renderSpokeClientsTab()));
       }
     } else if (data.type === "heartbeat_update") {
       updateOnlineBadges(data.island_online);
@@ -1276,9 +1276,9 @@ function connectWebSocket() {
       if (activeTab === "settings") loadAcmeSettings();
     } else if (data.type === "task_result") {
       showToast(`Spoke ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
-      if (activeIslandModal && data.island_id === activeIslandModal.island.id) {
-        loadIslandCommands();
-        loadIslandAudit();
+      if (activeSpokeModal && data.island_id === activeSpokeModal.spoke.id) {
+        loadSpokeCommands();
+        loadSpokeAudit();
       }
     }
   };
@@ -1321,14 +1321,14 @@ function bindEvents() {
       return;
     }
 
-    const islandSubtab = event.target.closest(".island-subtab");
-    if (islandSubtab) {
-      activateIslandSubtab(islandSubtab.dataset.subtab);
+    const spokeSubtab = event.target.closest(".spoke-subtab");
+    if (spokeSubtab) {
+      activateSpokeSubtab(spokeSubtab.dataset.subtab);
       return;
     }
 
-    if (event.target.matches("[data-approve-id]")) approvePendingIsland(event.target.dataset.approveId);
-    if (event.target.matches("[data-reject-id]")) rejectPendingIsland(event.target.dataset.rejectId);
+    if (event.target.matches("[data-approve-id]")) approvePendingSpoke(event.target.dataset.approveId);
+    if (event.target.matches("[data-reject-id]")) rejectPendingSpoke(event.target.dataset.rejectId);
     if (event.target.matches("[data-delete-tenant]")) deleteTenant(event.target.dataset.deleteTenant);
     if (event.target.matches("[data-delete-user]")) deleteUser(event.target.dataset.deleteUser);
     if (event.target.matches("[data-assign-role]")) assignRole(event.target.dataset.assignRole);
@@ -1346,24 +1346,24 @@ function bindEvents() {
   $("#login-modal")?.addEventListener("click", event => { if (event.target === event.currentTarget) closeLoginModal(); });
   $("#login-password")?.addEventListener("keydown", event => { if (event.key === "Enter") submitLogin(); });
   $("#refresh-dashboard-btn")?.addEventListener("click", loadDashboard);
-  $("#refresh-islands-btn")?.addEventListener("click", () => loadIslands(true));
+  $("#refresh-spokes-btn")?.addEventListener("click", () => loadSpokes(true));
   $("#refresh-commands-btn")?.addEventListener("click", loadCommands);
   $("#auto-refresh-toggle")?.addEventListener("change", startAutoRefresh);
   $("#auto-refresh-interval")?.addEventListener("change", startAutoRefresh);
   $("#send-command-btn")?.addEventListener("click", sendCommandFromForm);
-  $("#collapse-all-btn")?.addEventListener("click", () => { getExpandedSet().clear(); loadIslands(); });
+  $("#collapse-all-btn")?.addEventListener("click", () => { getExpandedSet().clear(); loadSpokes(); });
   $("#expand-all-btn")?.addEventListener("click", async () => {
-    const islands = await ensureIslands();
-    islandUiState.expandedByTenant[currentTenantId] = new Set(islands.filter(island => island.status === "approved").map(island => island.id));
-    loadIslands();
+    const spokes = await ensureSpokes();
+    spokeUiState.expandedByTenant[currentTenantId] = new Set(spokes.filter(spoke => spoke.status === "approved").map(spoke => spoke.id));
+    loadSpokes();
   });
-  $("#island-search")?.addEventListener("input", event => {
-    islandUiState.search = event.target.value || "";
-    scheduleReload("island-search", () => loadIslands(), 120);
+  $("#spoke-search")?.addEventListener("input", event => {
+    spokeUiState.search = event.target.value || "";
+    scheduleReload("spoke-search", () => loadSpokes(), 120);
   });
-  $("#island-modal-close")?.addEventListener("click", closeIslandModal);
-  $("#island-modal")?.addEventListener("click", event => { if (event.target === event.currentTarget) closeIslandModal(); });
-  $("#mode-save-btn")?.addEventListener("click", saveIslandProcessingMode);
+  $("#spoke-modal-close")?.addEventListener("click", closeSpokeModal);
+  $("#spoke-modal")?.addEventListener("click", event => { if (event.target === event.currentTarget) closeSpokeModal(); });
+  $("#mode-save-btn")?.addEventListener("click", saveSpokeProcessingMode);
   $("#pw-save-btn")?.addEventListener("click", savePassword);
   $("#aruba-save-btn")?.addEventListener("click", saveArubaSettings);
   $("#notif-save-btn")?.addEventListener("click", saveNotificationSettings);
@@ -1379,7 +1379,7 @@ function bindEvents() {
   await pingApi();
   if (authToken) await loadUserContext();
   connectWebSocket();
-  if (currentUser && currentTenantId) await ensureIslands(true);
+  if (currentUser && currentTenantId) await ensureSpokes(true);
   await loadDashboard();
   startAutoRefresh();
 })();

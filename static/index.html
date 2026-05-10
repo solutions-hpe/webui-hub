@@ -62,7 +62,7 @@
   <!-- ── Tab nav ── -->
   <nav id="tab-nav" class="tab-nav" role="tablist">
     <button class="tab active" data-tab="dashboard" type="button">Dashboard</button>
-    <button class="tab auth-tab hidden" data-tab="islands" type="button">🔗 Spokes</button>
+    <button class="tab auth-tab hidden" data-tab="spokes" type="button">🔗 Spokes</button>
     <button class="tab auth-tab hidden" data-tab="commands" type="button">⌨ Commands</button>
     <button class="tab auth-tab hidden" data-tab="settings" type="button">⚙ Settings</button>
     <button class="tab superadmin-tab hidden" data-tab="superadmin" type="button">🔑 Superadmin</button>
@@ -72,7 +72,7 @@
   <main id="tab-dashboard" class="page tab-content">
     <div class="page-toolbar">
       <div class="toolbar-stats">
-        <span class="stat-pill" id="dash-islands-pill">— spokes</span>
+        <span class="stat-pill" id="dash-spokes-pill">— spokes</span>
         <span class="stat-pill" id="dash-clients-pill">— clients</span>
         <span class="stat-pill" id="dash-online-pill">— online</span>
       </div>
@@ -80,27 +80,27 @@
         <button id="refresh-dashboard-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
       </div>
     </div>
-    <div id="dashboard-grid" class="island-grid"></div>
+    <div id="dashboard-grid" class="spoke-grid"></div>
     <div id="dashboard-empty" class="empty-state hidden">No spokes registered yet.</div>
   </main>
 
   <!-- ── Islands tab (auth required) ── -->
-  <main id="tab-islands" class="page tab-content hidden">
+  <main id="tab-spokes" class="page tab-content hidden">
     <div class="page-toolbar">
       <div class="toolbar-stats">
-        <span class="stat-pill" id="islands-count-pill">— spokes</span>
-        <span class="stat-pill" id="islands-online-pill">— online</span>
-        <span class="stat-pill" id="islands-clients-pill">— clients</span>
+        <span class="stat-pill" id="spokes-count-pill">— spokes</span>
+        <span class="stat-pill" id="spokes-online-pill">— online</span>
+        <span class="stat-pill" id="spokes-clients-pill">— clients</span>
       </div>
       <div class="toolbar-actions">
-        <input id="island-search" type="search" class="form-input form-input-sm" placeholder="Search spokes…">
+        <input id="spoke-search" type="search" class="form-input form-input-sm" placeholder="Search spokes…">
         <button id="collapse-all-btn" class="btn btn-secondary btn-small" type="button">Collapse All</button>
         <button id="expand-all-btn" class="btn btn-secondary btn-small" type="button">Expand All</button>
-        <button id="refresh-islands-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
+        <button id="refresh-spokes-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
       </div>
     </div>
-    <div id="islands-list"></div>
-    <div id="islands-empty" class="empty-state hidden">No spokes in this tenant.</div>
+    <div id="spokes-list"></div>
+    <div id="spokes-empty" class="empty-state hidden">No spokes in this tenant.</div>
   </main>
 
   <!-- ── Commands tab ── -->
@@ -113,8 +113,8 @@
       <div class="setup-card-header"><h2>Send Command</h2></div>
       <div class="setup-form">
         <div class="form-group">
-          <label class="form-label" for="cmd-island">Spoke</label>
-          <select id="cmd-island" class="form-input"></select>
+          <label class="form-label" for="cmd-spoke">Spoke</label>
+          <select id="cmd-spoke" class="form-input"></select>
         </div>
         <div class="form-group">
           <label class="form-label" for="cmd-type">Command</label>
@@ -364,41 +364,41 @@
   </main>
 
   <!-- ── Island Detail Modal ── -->
-  <div id="island-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+  <div id="spoke-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
     <div class="modal-box modal-box-large">
       <div class="modal-header">
-        <h2 id="island-modal-title">Spoke Detail</h2>
-        <button id="island-modal-close" class="btn btn-secondary btn-small" type="button">✕ Close</button>
+        <h2 id="spoke-modal-title">Spoke Detail</h2>
+        <button id="spoke-modal-close" class="btn btn-secondary btn-small" type="button">✕ Close</button>
       </div>
       <nav class="setup-subnav" style="margin-top:12px;">
-        <button class="setup-subtab island-subtab active" data-subtab="island-clients" type="button">Clients</button>
-        <button class="setup-subtab island-subtab" data-subtab="island-commands" type="button">Commands</button>
-        <button class="setup-subtab island-subtab" data-subtab="island-mode" type="button">Processing Mode</button>
-        <button class="setup-subtab island-subtab" data-subtab="island-audit" type="button">Audit Log</button>
+        <button class="setup-subtab spoke-subtab active" data-subtab="spoke-clients" type="button">Clients</button>
+        <button class="setup-subtab spoke-subtab" data-subtab="spoke-commands" type="button">Commands</button>
+        <button class="setup-subtab spoke-subtab" data-subtab="spoke-mode" type="button">Processing Mode</button>
+        <button class="setup-subtab spoke-subtab" data-subtab="spoke-audit" type="button">Audit Log</button>
       </nav>
 
-      <div id="island-clients" class="setup-subpanel" style="margin-top:12px;">
-        <div class="island-action-bar">
-          <button class="btn btn-danger btn-small" onclick="sendIslandCommand('kill_switch')" type="button">⚡ Kill Switch</button>
-          <button class="btn btn-secondary btn-small" onclick="sendIslandCommand('restart_sim')" type="button">↺ Restart Sim</button>
-          <button class="btn btn-secondary btn-small" onclick="sendIslandCommand('reclone')" type="button">🔄 Reclone</button>
-          <button class="btn btn-secondary btn-small" onclick="sendIslandCommand('reboot')" type="button">🔁 Reboot</button>
-          <button class="btn btn-secondary btn-small" onclick="sendIslandCommand('repo_sync')" type="button">📥 Repo Sync</button>
+      <div id="spoke-clients" class="setup-subpanel" style="margin-top:12px;">
+        <div class="spoke-action-bar">
+          <button class="btn btn-danger btn-small" onclick="sendSpokeCommand('kill_switch')" type="button">⚡ Kill Switch</button>
+          <button class="btn btn-secondary btn-small" onclick="sendSpokeCommand('restart_sim')" type="button">↺ Restart Sim</button>
+          <button class="btn btn-secondary btn-small" onclick="sendSpokeCommand('reclone')" type="button">🔄 Reclone</button>
+          <button class="btn btn-secondary btn-small" onclick="sendSpokeCommand('reboot')" type="button">🔁 Reboot</button>
+          <button class="btn btn-secondary btn-small" onclick="sendSpokeCommand('repo_sync')" type="button">📥 Repo Sync</button>
         </div>
-        <table class="data-table" id="island-clients-table">
+        <table class="data-table" id="spoke-clients-table">
           <thead><tr><th>Client ID</th><th>Hostname</th><th>Status</th><th>Last Seen</th><th>IP</th></tr></thead>
-          <tbody id="island-clients-tbody"></tbody>
+          <tbody id="spoke-clients-tbody"></tbody>
         </table>
       </div>
 
-      <div id="island-commands" class="setup-subpanel hidden" style="margin-top:12px;">
-        <table class="data-table" id="island-cmds-table">
+      <div id="spoke-commands" class="setup-subpanel hidden" style="margin-top:12px;">
+        <table class="data-table" id="spoke-cmds-table">
           <thead><tr><th>Command</th><th>Status</th><th>Created</th><th>Expires</th></tr></thead>
-          <tbody id="island-cmds-tbody"></tbody>
+          <tbody id="spoke-cmds-tbody"></tbody>
         </table>
       </div>
 
-      <div id="island-mode" class="setup-subpanel hidden" style="margin-top:12px;">
+      <div id="spoke-mode" class="setup-subpanel hidden" style="margin-top:12px;">
         <div class="setup-card">
           <div class="setup-card-header"><h3>Processing Mode</h3><p>Choose whether this spoke executes tasks locally (distributed) or the Hub executes centrally.</p></div>
           <div class="form-group">
@@ -417,10 +417,10 @@
         </div>
       </div>
 
-      <div id="island-audit" class="setup-subpanel hidden" style="margin-top:12px;">
-        <table class="data-table" id="island-audit-table">
+      <div id="spoke-audit" class="setup-subpanel hidden" style="margin-top:12px;">
+        <table class="data-table" id="spoke-audit-table">
           <thead><tr><th>Time</th><th>Task</th><th>Mode</th><th>Status</th><th>Detail</th></tr></thead>
-          <tbody id="island-audit-tbody"></tbody>
+          <tbody id="spoke-audit-tbody"></tbody>
         </table>
       </div>
     </div>

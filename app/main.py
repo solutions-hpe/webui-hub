@@ -70,10 +70,10 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 from .routers import auth as auth_router
-from .routers import checks, commands, islands, settings as settings_router, sites, superadmin, workspaces
+from .routers import checks, commands, settings as settings_router, sites, spokes, superadmin, workspaces
 
 app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
-app.include_router(islands.router, prefix="/api", tags=["islands"])
+app.include_router(spokes.router, prefix="/api", tags=["spokes"])
 app.include_router(sites.router, prefix="/api", tags=["sites"])
 app.include_router(superadmin.router, prefix="/api", tags=["superadmin"])
 app.include_router(workspaces.router, prefix="/api", tags=["workspaces"])

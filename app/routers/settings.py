@@ -60,8 +60,8 @@ def _get_tenant(tenant_id: str) -> Tenant:
     return tenant
 
 
-def _get_island(tenant_id: str, island_id: str) -> Island:
-    island = store.get_island(tenant_id, island_id)
+def _get_spoke(tenant_id: str, island_id: str) -> Island:
+    island = store.get_spoke(tenant_id, island_id)
     if not island:
         raise HTTPException(status_code=404, detail="Island not found")
     return island
@@ -97,14 +97,14 @@ def _merge_dns_credentials(existing: dict[str, Any], incoming: dict[str, Any]) -
 
 def _serialize_processing_summary(tenant: Tenant) -> dict[str, Any]:
     islands = []
-    for island in store.list_islands(tenant.id):
-        feature_overrides = {feature: getattr(island.processing_mode, feature) for feature in PROCESSING_FEATURES}
-        effective_modes = {feature: island.processing_mode.resolve(feature) for feature in PROCESSING_FEATURES}
+    for spoke in store.list_spokes(tenant.id):
+        feature_overrides = {feature: getattr(spoke.processing_mode, feature) for feature in PROCESSING_FEATURES}
+        effective_modes = {feature: spoke.processing_mode.resolve(feature) for feature in PROCESSING_FEATURES}
         islands.append(
             {
-                "island_id": island.id,
-                "hostname": island.hostname,
-                "global_mode": island.processing_mode.global_mode,
+                "island_id": spoke.id,
+                "hostname": spoke.hostname,
+                "global_mode": spoke.processing_mode.global_mode,
                 "feature_overrides": feature_overrides,
                 "effective_modes": effective_modes,
             }
@@ -247,17 +247,17 @@ def update_default_processing_mode(
 
 
 @router.patch("/{tenant_id}/islands/{island_id}/processing-mode")
-def update_island_processing_mode(
+def update_spoke_processing_mode(
     tenant_id: str,
     island_id: str,
     payload: ProcessingModeUpdateRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
     _require_tenant_admin(tenant_id, current_user)
-    island = _get_island(tenant_id, island_id)
-    island.processing_mode = _processing_mode_from_payload(payload)
-    store.save_island(island)
-    return island.processing_mode.model_dump()
+    spoke = _get_spoke(tenant_id, island_id)
+    spoke.processing_mode = _processing_mode_from_payload(payload)
+    store.save_spoke(spoke)
+    return spoke.processing_mode.model_dump()
 
 
 @router.get("/{tenant_id}/processing-summary")

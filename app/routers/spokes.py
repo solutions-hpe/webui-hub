@@ -19,18 +19,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _auth_island(tenant_id: str, island_id: str, api_key: str):
-    island = store.get_island(tenant_id, island_id)
-    if not island or island.status != "approved" or not island.api_key_enc:
+def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
+    spoke = store.get_spoke(tenant_id, spoke_id)
+    if not spoke or spoke.status != "approved" or not spoke.api_key_enc:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     try:
-        if decrypt_str(island.api_key_enc) != api_key:
+        if decrypt_str(spoke.api_key_enc) != api_key:
             raise HTTPException(status_code=401, detail="Invalid credentials")
     except Exception as exc:
         if isinstance(exc, HTTPException):
             raise exc
         raise HTTPException(status_code=401, detail="Invalid credentials") from exc
-    return island
+    return spoke
 
 
 class RegisterPayload(BaseModel):
@@ -40,15 +40,15 @@ class RegisterPayload(BaseModel):
 
 
 @router.post("/islands/register", status_code=201)
-def register_island(payload: RegisterPayload):
-    approved = store.get_approved_island_by_hostname(payload.hostname)
+def register_spoke(payload: RegisterPayload):
+    approved = store.get_approved_spoke_by_hostname(payload.hostname)
     if approved:
-        tenant_id, island = approved
+        tenant_id, spoke = approved
         return {
-            "island_id": island.id,
+            "island_id": spoke.id,
             "status": "approved",
             "tenant_id": tenant_id,
-            "api_key": decrypt_str(island.api_key_enc) if island.api_key_enc else "",
+            "api_key": decrypt_str(spoke.api_key_enc) if spoke.api_key_enc else "",
         }
 
     existing = store.get_pending_by_hostname(payload.hostname)
@@ -64,7 +64,7 @@ def register_island(payload: RegisterPayload):
         label=payload.label,
         seed_config=payload.config,
     )
-    store.save_pending_island(pending)
+    store.save_pending_spoke(pending)
     return {
         "island_id": pending.id,
         "status": "pending",
@@ -79,8 +79,8 @@ async def post_telemetry(
     payload: dict[str, Any],
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_island(tenant_id, island_id, x_api_key)
-    store.update_island_telemetry(tenant_id, island_id, payload)
+    _auth_spoke(tenant_id, island_id, x_api_key)
+    store.update_spoke_telemetry(tenant_id, island_id, payload)
     await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "island_id": island_id})
     return {"status": "ok"}
 
@@ -91,7 +91,7 @@ def get_inbox(
     island_id: str,
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_island(tenant_id, island_id, x_api_key)
+    _auth_spoke(tenant_id, island_id, x_api_key)
     commands = store.get_queued_commands(tenant_id, island_id)
     return [{"id": c.id, "target": c.target, "type": c.type, "payload": c.payload} for c in commands]
 
@@ -117,20 +117,20 @@ async def ack_command_endpoint(
     payload: AckPayload,
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_island(tenant_id, island_id, x_api_key)
+    _auth_spoke(tenant_id, island_id, x_api_key)
     result = payload.result.model_dump(exclude_none=True) if payload.result else None
     store.ack_command(tenant_id, island_id, payload.command_id, result)
     if result and result.get("task_type"):
         task_status = "success" if result.get("success") else "failure"
         store.append_audit(
             AuditEntry(
-                island_id=island_id,
+                spoke_id=island_id,
                 tenant_id=tenant_id,
                 task_type=result.get("task_type", "command_ack"),
                 execution_mode="distributed",
                 status=task_status,
                 detail=result.get("detail", ""),
-                initiated_by="island",
+                initiated_by="spoke",
                 result=result,
             )
         )

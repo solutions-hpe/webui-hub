@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 def _now() -> datetime:
@@ -95,10 +95,12 @@ class PendingIsland(BaseModel):
 
 
 class Command(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(default_factory=_uuid)
-    island_id: str
+    spoke_id: str = Field(validation_alias="island_id", serialization_alias="island_id")
     tenant_id: str
-    target: str = "island"
+    target: str = "spoke"
     type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     status: str = "queued"
@@ -110,8 +112,10 @@ class Command(BaseModel):
 
 
 class AuditEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str = Field(default_factory=_uuid)
-    island_id: str
+    spoke_id: str = Field(validation_alias="island_id", serialization_alias="island_id")
     tenant_id: str
     task_type: str
     execution_mode: str
