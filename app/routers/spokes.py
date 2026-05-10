@@ -53,7 +53,7 @@ class RegisterPayload(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
-@router.post("/islands/register", status_code=201)
+@router.post("/spokes/register", status_code=201)
 def register_spoke(payload: RegisterPayload, request: Request):
     spoke_name = payload.spoke_name.strip() or payload.hostname
     tenant_hint = payload.tenant_id_hint.strip()
@@ -72,7 +72,7 @@ def register_spoke(payload: RegisterPayload, request: Request):
         _reg_log_append("already_approved", hostname=payload.hostname,
                         spoke_name=spoke_name, tenant_id=tenant_id, ip=client_ip)
         return {
-            "island_id": spoke.id,
+            "spoke_id": spoke.id,
             "status": "approved",
             "tenant_id": tenant_id,
             "api_key": decrypt_str(spoke.api_key_enc) if spoke.api_key_enc else "",
@@ -119,10 +119,10 @@ def register_spoke(payload: RegisterPayload, request: Request):
         if changed:
             store.save_pending_spoke(existing)
         _reg_log_append("already_pending", hostname=payload.hostname,
-                        spoke_name=spoke_name, island_id=existing.id,
+                        spoke_name=spoke_name, spoke_id=existing.id,
                         tenant_hint=existing.tenant_hint, ip=client_ip)
         return {
-            "island_id": existing.id,
+            "spoke_id": existing.id,
             "status": "pending",
             "tenant_hint": existing.tenant_hint,
             "message": "Registration already pending approval.",
@@ -137,7 +137,7 @@ def register_spoke(payload: RegisterPayload, request: Request):
     )
     store.save_pending_spoke(pending)
     _reg_log_append("new_pending", hostname=payload.hostname, spoke_name=spoke_name,
-                    island_id=pending.id, tenant_hint=tenant_hint, ip=client_ip)
+                    spoke_id=pending.id, tenant_hint=tenant_hint, ip=client_ip)
     ws_broadcast({
         "type": "pending_spoke_registered",
         "hostname": payload.hostname,
@@ -150,7 +150,7 @@ def register_spoke(payload: RegisterPayload, request: Request):
         else "Registration received. Awaiting superadmin approval and tenant assignment."
     )
     return {
-        "island_id": pending.id,
+        "spoke_id": pending.id,
         "status": "pending",
         "tenant_hint": tenant_hint,
         "message": msg,
@@ -166,27 +166,27 @@ def spokes_diag(current_user: auth.User = Depends(auth.require_superadmin)):
     }
 
 
-@router.post("/{tenant_id}/islands/{island_id}/telemetry")
+@router.post("/{tenant_id}/spokes/{spoke_id}/telemetry")
 async def post_telemetry(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     payload: dict[str, Any],
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_spoke(tenant_id, island_id, x_api_key)
-    store.update_spoke_telemetry(tenant_id, island_id, payload)
-    await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "island_id": island_id})
+    _auth_spoke(tenant_id, spoke_id, x_api_key)
+    store.update_spoke_telemetry(tenant_id, spoke_id, payload)
+    await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "spoke_id": spoke_id})
     return {"status": "ok"}
 
 
-@router.get("/{tenant_id}/islands/{island_id}/inbox")
+@router.get("/{tenant_id}/spokes/{spoke_id}/inbox")
 def get_inbox(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_spoke(tenant_id, island_id, x_api_key)
-    commands = store.get_queued_commands(tenant_id, island_id)
+    _auth_spoke(tenant_id, spoke_id, x_api_key)
+    commands = store.get_queued_commands(tenant_id, spoke_id)
     return [{"id": c.id, "target": c.target, "type": c.type, "payload": c.payload} for c in commands]
 
 
@@ -204,21 +204,21 @@ class AckPayload(BaseModel):
     result: Optional[AckResultPayload] = None
 
 
-@router.post("/{tenant_id}/islands/{island_id}/ack")
+@router.post("/{tenant_id}/spokes/{spoke_id}/ack")
 async def ack_command_endpoint(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     payload: AckPayload,
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_spoke(tenant_id, island_id, x_api_key)
+    _auth_spoke(tenant_id, spoke_id, x_api_key)
     result = payload.result.model_dump(exclude_none=True) if payload.result else None
-    store.ack_command(tenant_id, island_id, payload.command_id, result)
+    store.ack_command(tenant_id, spoke_id, payload.command_id, result)
     if result and result.get("task_type"):
         task_status = "success" if result.get("success") else "failure"
         store.append_audit(
             AuditEntry(
-                spoke_id=island_id,
+                spoke_id=spoke_id,
                 tenant_id=tenant_id,
                 task_type=result.get("task_type", "command_ack"),
                 execution_mode="distributed",
@@ -232,7 +232,7 @@ async def ack_command_endpoint(
             {
                 "type": "task_result",
                 "tenant_id": tenant_id,
-                "island_id": island_id,
+                "spoke_id": spoke_id,
                 "task_type": result.get("task_type", "command_ack"),
                 "status": task_status,
             }

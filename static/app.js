@@ -429,7 +429,7 @@ async function loadDashboard() {
 async function ensureSpokes(force = false) {
   if (!currentTenantId) return [];
   if (!force && spokeCache[currentTenantId]) return spokeCache[currentTenantId];
-  const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/islands`);
+  const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/spokes`);
   if (!res || !res.ok) return [];
   const spokes = await res.json();
   spokeCache[currentTenantId] = spokes;
@@ -607,10 +607,10 @@ async function loadCommands() {
     return;
   }
   tbody.innerHTML = commands.map(command => {
-    const spoke = getTenantSpokes().find(item => item.id === command.island_id);
+    const spoke = getTenantSpokes().find(item => item.id === command.spoke_id);
     return `
       <tr>
-        <td>${escHtml(spoke?.hostname || command.island_id)}</td>
+        <td>${escHtml(spoke?.hostname || command.spoke_id)}</td>
         <td>${escHtml(command.type)}</td>
         <td><span class="badge cmd-status-${escHtml(command.status)}">${escHtml(command.status)}</span></td>
         <td>${escHtml(fmtDate(command.created_at))}</td>
@@ -666,7 +666,7 @@ async function loadSpokeCommands() {
 async function loadSpokeAudit() {
   if (!activeSpokeModal) return;
   const { tenant_id: tenantId, spoke } = activeSpokeModal;
-  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/islands/${encodeURIComponent(spoke.id)}/audit`);
+  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/spokes/${encodeURIComponent(spoke.id)}/audit`);
   if (!res || !res.ok) return;
   const audit = (await res.json()).slice(-20).reverse();
   const tbody = $("#spoke-audit-tbody");
@@ -688,7 +688,7 @@ async function loadSpokeProcessingMode() {
   const res = await apiFetch(`/api/${encodeURIComponent(activeSpokeModal.tenant_id)}/processing-summary`);
   if (!res || !res.ok) return;
   const summary = await res.json();
-  const spokeSummary = summary.islands.find(item => item.island_id === activeSpokeModal.spoke.id);
+  const spokeSummary = summary.islands.find(item => item.spoke_id === activeSpokeModal.spoke.id);
   if (!spokeSummary) return;
   $("#mode-global") && ($("#mode-global").value = spokeSummary.global_mode || "centralized");
   const grid = $("#mode-features-grid");
@@ -719,7 +719,7 @@ async function saveSpokeProcessingMode() {
     const value = $(`#mode-${feature}`)?.value || "inherit";
     payload[feature] = value === "inherit" ? null : value;
   });
-  const res = await apiFetch(`/api/${encodeURIComponent(activeSpokeModal.tenant_id)}/islands/${encodeURIComponent(activeSpokeModal.spoke.id)}/processing-mode`, {
+  const res = await apiFetch(`/api/${encodeURIComponent(activeSpokeModal.tenant_id)}/spokes/${encodeURIComponent(activeSpokeModal.spoke.id)}/processing-mode`, {
     method: "PATCH",
     body: payload,
   });
@@ -771,8 +771,8 @@ window.sendSpokeCommand = sendSpokeCommand;
 
 async function loadSettings() {
   if (!currentTenantId) return;
-  const apiBase = `${window.location.origin}/api/${currentTenantId}/islands/{id}`;
-  $("#api-register-url") && ($("#api-register-url").textContent = `${window.location.origin}/api/islands/register`);
+  const apiBase = `${window.location.origin}/api/${currentTenantId}/spokes/{id}`;
+  $("#api-register-url") && ($("#api-register-url").textContent = `${window.location.origin}/api/spokes/register`);
   $("#api-telemetry-url") && ($("#api-telemetry-url").textContent = `POST ${apiBase}/telemetry`);
   $("#api-inbox-url") && ($("#api-inbox-url").textContent = `GET ${apiBase}/inbox`);
   $("#api-ack-url") && ($("#api-ack-url").textContent = `POST ${apiBase}/ack`);
@@ -990,7 +990,7 @@ async function loadSuperadmin() {
   if (!currentUser?.is_superadmin) return;
   const [tenantsRes, pendingRes, usersRes] = await Promise.all([
     apiFetch("/api/superadmin/tenants"),
-    apiFetch("/api/superadmin/pending-islands"),
+    apiFetch("/api/superadmin/pending-spokes"),
     apiFetch("/api/superadmin/users"),
   ]);
   if (tenantsRes?.ok) {
@@ -1163,7 +1163,7 @@ async function approvePendingSpoke(id) {
   const select = $(`.sa-tenant-assign[data-pending-id="${CSS.escape(id)}"]`);
   const tenantId = select?.value;
   if (!tenantId) return;
-  const res = await apiFetch(`/api/superadmin/pending-islands/${encodeURIComponent(id)}/approve`, {
+  const res = await apiFetch(`/api/superadmin/pending-spokes/${encodeURIComponent(id)}/approve`, {
     method: "POST",
     body: { tenant_id: tenantId },
   });
@@ -1173,13 +1173,13 @@ async function approvePendingSpoke(id) {
     return;
   }
   const data = await res.json();
-  showKeyBanner(data.api_key, data.island_id);
+  showKeyBanner(data.api_key, data.spoke_id);
   showToast("Spoke approved.", "ok");
   await Promise.all([loadSuperadmin(), loadSpokes(true), loadDashboard()]);
 }
 
 async function rejectPendingSpoke(id) {
-  const res = await apiFetch(`/api/superadmin/pending-islands/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const res = await apiFetch(`/api/superadmin/pending-spokes/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res || !res.ok) {
     showToast("Failed to reject spoke.", "err");
     return;
@@ -1337,7 +1337,7 @@ function connectWebSocket() {
     if (data.type === "telemetry") {
       if (activeTab === "spokes") scheduleReload("ws-spokes", () => loadSpokes(true));
       if (activeTab === "dashboard") scheduleReload("ws-dashboard", () => loadDashboard());
-      if (activeSpokeModal && data.tenant_id === activeSpokeModal.tenant_id && data.island_id === activeSpokeModal.spoke.id) {
+      if (activeSpokeModal && data.tenant_id === activeSpokeModal.tenant_id && data.spoke_id === activeSpokeModal.spoke.id) {
         scheduleReload("ws-modal", () => loadSpokes(true).then(() => renderSpokeClientsTab()));
       }
     } else if (data.type === "heartbeat_update") {
@@ -1356,8 +1356,8 @@ function connectWebSocket() {
         showToast(`New spoke '${data.spoke_name || data.hostname}' is pending approval.`, "ok");
       }
     } else if (data.type === "task_result") {
-      showToast(`Spoke ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
-      if (activeSpokeModal && data.island_id === activeSpokeModal.spoke.id) {
+      showToast(`Spoke ${data.spoke_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
+      if (activeSpokeModal && data.spoke_id === activeSpokeModal.spoke.id) {
         loadSpokeCommands();
         loadSpokeAudit();
       }

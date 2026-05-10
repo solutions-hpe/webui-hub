@@ -42,7 +42,7 @@ def _serialize_spoke(spoke: Island, include_config: bool = True) -> dict[str, An
 def _get_spoke(tenant_id: str, spoke_id: str) -> Island:
     spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke:
-        raise HTTPException(status_code=404, detail="Island not found")
+        raise HTTPException(status_code=404, detail="Spoke not found")
     return spoke
 
 
@@ -76,43 +76,43 @@ def list_sites_legacy():
     return results
 
 
-@router.get("/{tenant_id}/islands")
+@router.get("/{tenant_id}/spokes")
 def list_tenant_spokes(tenant_id: str, current_user: User = Depends(auth.get_current_user)):
     auth.require_tenant_access(tenant_id, current_user)
     return [_serialize_spoke(spoke) for spoke in store.list_spokes(tenant_id)]
 
 
-@router.get("/{tenant_id}/islands/{island_id}")
-def get_spoke_detail(tenant_id: str, island_id: str, current_user: User = Depends(auth.get_current_user)):
+@router.get("/{tenant_id}/spokes/{spoke_id}")
+def get_spoke_detail(tenant_id: str, spoke_id: str, current_user: User = Depends(auth.get_current_user)):
     auth.require_tenant_access(tenant_id, current_user)
-    return _serialize_spoke(_get_spoke(tenant_id, island_id))
+    return _serialize_spoke(_get_spoke(tenant_id, spoke_id))
 
 
-@router.post("/{tenant_id}/islands/{island_id}/revoke")
-def revoke_spoke(tenant_id: str, island_id: str, current_user: User = Depends(auth.get_current_user)):
+@router.post("/{tenant_id}/spokes/{spoke_id}/revoke")
+def revoke_spoke(tenant_id: str, spoke_id: str, current_user: User = Depends(auth.get_current_user)):
     _require_tenant_admin(tenant_id, current_user)
-    _get_spoke(tenant_id, island_id)
-    store.revoke_spoke(tenant_id, island_id)
+    _get_spoke(tenant_id, spoke_id)
+    store.revoke_spoke(tenant_id, spoke_id)
     return {"status": "revoked"}
 
 
-@router.delete("/{tenant_id}/islands/{island_id}")
-def delete_spoke(tenant_id: str, island_id: str, current_user: User = Depends(auth.get_current_user)):
+@router.delete("/{tenant_id}/spokes/{spoke_id}")
+def delete_spoke(tenant_id: str, spoke_id: str, current_user: User = Depends(auth.get_current_user)):
     _require_tenant_admin(tenant_id, current_user)
-    _get_spoke(tenant_id, island_id)
-    store.delete_spoke(tenant_id, island_id)
+    _get_spoke(tenant_id, spoke_id)
+    store.delete_spoke(tenant_id, spoke_id)
     return {"status": "deleted"}
 
 
-@router.patch("/{tenant_id}/islands/{island_id}/config")
+@router.patch("/{tenant_id}/spokes/{spoke_id}/config")
 def update_spoke_config(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     payload: ConfigUpdateRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
     _require_tenant_admin(tenant_id, current_user)
-    spoke = _get_spoke(tenant_id, island_id)
+    spoke = _get_spoke(tenant_id, spoke_id)
     if spoke.status != "approved":
         raise HTTPException(status_code=409, detail="Island is not approved")
 
@@ -130,15 +130,15 @@ def update_spoke_config(
     return _serialize_spoke(spoke)
 
 
-@router.patch("/{tenant_id}/islands/{island_id}/label")
+@router.patch("/{tenant_id}/spokes/{spoke_id}/label")
 def update_spoke_label(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     payload: LabelUpdateRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
     _require_tenant_admin(tenant_id, current_user)
-    spoke = _get_spoke(tenant_id, island_id)
+    spoke = _get_spoke(tenant_id, spoke_id)
     spoke.label = payload.label
     store.save_spoke(spoke)
     return _serialize_spoke(spoke)

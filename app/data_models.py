@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 def _now() -> datetime:
@@ -101,7 +101,7 @@ class Command(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str = Field(default_factory=_uuid)
-    spoke_id: str = Field(validation_alias="island_id", serialization_alias="island_id")
+    spoke_id: str = Field(validation_alias=AliasChoices("spoke_id", "island_id"), serialization_alias="spoke_id")
     tenant_id: str
     target: str = "spoke"
     type: str
@@ -118,7 +118,7 @@ class AuditEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str = Field(default_factory=_uuid)
-    spoke_id: str = Field(validation_alias="island_id", serialization_alias="island_id")
+    spoke_id: str = Field(validation_alias=AliasChoices("spoke_id", "island_id"), serialization_alias="spoke_id")
     tenant_id: str
     task_type: str
     execution_mode: str

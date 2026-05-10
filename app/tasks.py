@@ -314,7 +314,7 @@ async def aruba_poller() -> None:
                         {
                             "type": "aruba_update",
                             "tenant_id": tenant.id,
-                            "island_id": spoke.id,
+                            "spoke_id": spoke.id,
                             "findings": finding_payload,
                         }
                     )

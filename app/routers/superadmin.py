@@ -242,12 +242,12 @@ def get_auth_provider_status(_: User = Depends(auth.require_superadmin)):
     }
 
 
-@router.get("/superadmin/pending-islands")
+@router.get("/superadmin/pending-spokes")
 def list_pending_spokes(_: User = Depends(auth.require_superadmin)):
     return store.list_pending_spokes()
 
 
-@router.post("/superadmin/pending-islands/{spoke_id}/approve")
+@router.post("/superadmin/pending-spokes/{spoke_id}/approve")
 def approve_pending_spoke(
     spoke_id: str,
     payload: ApprovePendingIslandRequest,
@@ -285,7 +285,7 @@ def approve_pending_spoke(
             tenant_id=payload.tenant_id,
             type="config_update",
             payload={
-                "relay_island_id": spoke.id,
+                "relay_spoke_id": spoke.id,
                 "relay_api_key": plain_key,
                 "relay_tenant_id": payload.tenant_id,
                 "relay_server_url": relay_server_url,
@@ -295,13 +295,13 @@ def approve_pending_spoke(
     )
 
     return {
-        "island_id": spoke.id,
+        "spoke_id": spoke.id,
         "api_key": plain_key,
         "message": "Spoke approved. API key shown once.",
     }
 
 
-@router.delete("/superadmin/pending-islands/{spoke_id}")
+@router.delete("/superadmin/pending-spokes/{spoke_id}")
 def delete_pending_spoke(spoke_id: str, _: User = Depends(auth.require_superadmin)):
     pending = store.get_pending_spoke(spoke_id)
     if not pending:
@@ -368,7 +368,7 @@ def tenant_approve_pending_spoke(
             tenant_id=tenant_id,
             type="config_update",
             payload={
-                "relay_island_id": spoke.id,
+                "relay_spoke_id": spoke.id,
                 "relay_api_key": plain_key,
                 "relay_tenant_id": tenant_id,
                 "relay_server_url": relay_server_url,
@@ -378,7 +378,7 @@ def tenant_approve_pending_spoke(
     )
 
     return {
-        "island_id": spoke.id,
+        "spoke_id": spoke.id,
         "api_key": plain_key,
         "message": "Spoke approved and assigned to your tenant.",
     }

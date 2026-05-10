@@ -3,7 +3,7 @@
 The application does not use PostgreSQL, SQLite, or any ORM. Instead, all
 persistent state is stored as JSON files under ``DATA_DIR`` and accessed through
 this module. Callers should treat this file as the single read/write boundary
-for users, tenants, islands, command queues, and audit history. A process-local
+for users, tenants, spokes, command queues, and audit history. A process-local
 re-entrant lock protects multi-step file operations so concurrent FastAPI
 requests and background tasks do not corrupt on-disk state.
 """
@@ -201,7 +201,7 @@ def get_pending_by_hostname(hostname: str) -> Optional[PendingIsland]:
     return None
 
 
-def get_island_by_hostname(hostname: str) -> Optional[PendingIsland]:
+def get_spoke_by_pending_hostname(hostname: str) -> Optional[PendingIsland]:
     return get_pending_by_hostname(hostname)
 
 
@@ -238,8 +238,8 @@ def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Island]:
     return None
 
 
-def get_island_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
-    """Return the approved island whose encrypted API key matches the plaintext key."""
+def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
+    """Return the approved spoke whose encrypted API key matches the plaintext key."""
     with _lock:
         for i in _load_spokes(tenant_id):
             if i.api_key_enc:
@@ -275,7 +275,7 @@ def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Island]]:
 
 
 def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingIsland]:
-    """Return first pending island matching spoke_name."""
+    """Return first pending spoke matching spoke_name."""
     name = spoke_name.strip().lower()
     if not name:
         return None
@@ -309,7 +309,7 @@ def get_processing_stats(tenant_id: str) -> dict:
         for feature in features:
             mode = spoke.processing_mode.resolve(feature)
             stats[feature][mode] += 1
-    return {"total_islands": len(approved_spokes), "by_feature": stats}
+    return {"total_spokes": len(approved_spokes), "by_feature": stats}
 
 
 def get_spoke_processing_stats(tenant_id: str) -> dict:
@@ -331,7 +331,7 @@ def delete_spoke(tenant_id: str, spoke_id: str) -> None:
 
 
 def approve_spoke(tenant_id: str, spoke_id: str) -> Optional[str]:
-    """Approve an island, persist a newly encrypted API key, and return it once."""
+    """Approve a spoke, persist a newly encrypted API key, and return it once."""
     with _lock:
         spokes = _load_spokes(tenant_id)
         for i in spokes:
@@ -474,7 +474,7 @@ def get_audit(tenant_id: str, spoke_id: str) -> list[AuditEntry]:
 
 
 def purge_old_audit() -> int:
-    """Trim per-island audit logs to the rolling 7-day retention window."""
+    """Trim per-spoke audit logs to the rolling 7-day retention window."""
     total = 0
     cutoff = _now() - timedelta(days=7)
     base = _data_dir()

@@ -66,5 +66,5 @@ def decrypt_dict(ciphertext: str) -> dict:
 
 
 def generate_api_key() -> str:
-    """Generate a URL-safe random island relay API key for one-time approval flows."""
+    """Generate a URL-safe random spoke relay API key for one-time approval flows."""
     return base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
