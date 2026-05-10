@@ -1,4 +1,4 @@
-"""Tenant-scoped island management endpoints."""
+"""Tenant-scoped spoke management endpoints."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import auth, store
-from ..data_models import Command, Island, User
+from ..data_models import Command, Spoke, User
 
 router = APIRouter()
 
@@ -21,7 +21,7 @@ class LabelUpdateRequest(BaseModel):
     label: str
 
 
-def _serialize_spoke(spoke: Island, include_config: bool = True) -> dict[str, Any]:
+def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any]:
     data = {
         "id": spoke.id,
         "tenant_id": spoke.tenant_id,
@@ -39,7 +39,7 @@ def _serialize_spoke(spoke: Island, include_config: bool = True) -> dict[str, An
     return data
 
 
-def _get_spoke(tenant_id: str, spoke_id: str) -> Island:
+def _get_spoke(tenant_id: str, spoke_id: str) -> Spoke:
     spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke:
         raise HTTPException(status_code=404, detail="Spoke not found")
@@ -114,7 +114,7 @@ def update_spoke_config(
     _require_tenant_admin(tenant_id, current_user)
     spoke = _get_spoke(tenant_id, spoke_id)
     if spoke.status != "approved":
-        raise HTTPException(status_code=409, detail="Island is not approved")
+        raise HTTPException(status_code=409, detail="Spoke is not approved")
 
     spoke.config = payload.config
     store.save_spoke(spoke)

@@ -534,7 +534,7 @@ All persistent state lives under `DATA_DIR`.
 ├── users.json
 ├── tenants.json
 ├── pending/
-│   └── <pending-island-id>.json
+│   └── <pending-spoke-id>.json
 ├── tls/
 │   ├── cert.pem
 │   └── key.pem

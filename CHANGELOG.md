@@ -6,14 +6,14 @@
 - **No database** — PostgreSQL/SQLite replaced with JSON file store. No migration path from v1.x.
 - **Port changed** — now runs on 8443 (HTTPS) instead of 8000 (HTTP).
 - **Renamed** — repo renamed from `webui` to `webui-hub`.
-- **API routes changed** — island relay endpoints are now tenant-scoped: `/api/{tenant_id}/islands/...`
+- **API routes changed** — spoke relay endpoints are now tenant-scoped: `/api/{tenant_id}/spokes/...`
 
 ### Added
 - Multi-tenant architecture with superadmin, admin, and operator roles
 - Tenant IDs sourced from Aruba Central CID or manually created
-- Centralized/distributed processing mode toggle per island and per feature
+- Centralized/distributed processing mode toggle per spoke and per feature
 - Task result reporting from islands back to hub via extended `/ack` endpoint
-- 7-day rolling audit log per island (JSON files)
+- 7-day rolling audit log per spoke (JSON files)
 - 24-hour command queue TTL with auto-purge
 - Fernet encryption for all secrets at rest (API keys, Aruba tokens, SMTP credentials, webhooks)
 - Self-signed TLS certificate auto-generated at startup
@@ -22,11 +22,11 @@
 - Multi-stage Docker build, non-root user
 - OIDC / LDAP / AD / RADIUS auth provider stubs (inactive, ready for implementation)
 - GKill switch poller (GitHub → all islands)
-- Per-island heartbeat monitor with online/offline WebSocket broadcasts
+- Per-spoke heartbeat monitor with online/offline WebSocket broadcasts
 - Auto-recovery check for offline islands
-- Per-island schedule check (reclone cron)
+- Per-spoke schedule check (reclone cron)
 - Aruba Central MSP tenant discovery endpoint
-- Full UI overhaul: tenant tabs, collapsible island groups, island detail modal, processing mode panel, audit log viewer, superadmin panel
+- Full UI overhaul: tenant tabs, collapsible spoke groups, spoke detail modal, processing mode panel, audit log viewer, superadmin panel
 
 ### Changed
 - Auth module rewritten to use JSON store instead of SQLAlchemy

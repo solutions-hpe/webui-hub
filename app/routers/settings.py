@@ -12,7 +12,7 @@ from .. import acme as acme_manager
 from .. import auth, store
 from ..config import get_settings
 from ..crypto import decrypt_dict, encrypt_dict
-from ..data_models import Island, ProcessingMode, Tenant, User
+from ..data_models import Spoke, ProcessingMode, Tenant, User
 
 router = APIRouter()
 
@@ -60,11 +60,11 @@ def _get_tenant(tenant_id: str) -> Tenant:
     return tenant
 
 
-def _get_spoke(tenant_id: str, island_id: str) -> Island:
-    island = store.get_spoke(tenant_id, island_id)
-    if not island:
-        raise HTTPException(status_code=404, detail="Island not found")
-    return island
+def _get_spoke(tenant_id: str, spoke_id: str) -> Spoke:
+    spoke = store.get_spoke(tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    return spoke
 
 
 def _require_tenant_admin(tenant_id: str, user: User) -> User:
@@ -102,7 +102,7 @@ def _serialize_processing_summary(tenant: Tenant) -> dict[str, Any]:
         effective_modes = {feature: spoke.processing_mode.resolve(feature) for feature in PROCESSING_FEATURES}
         islands.append(
             {
-                "island_id": spoke.id,
+                "spoke_id": spoke.id,
                 "hostname": spoke.hostname,
                 "global_mode": spoke.processing_mode.global_mode,
                 "feature_overrides": feature_overrides,
@@ -246,15 +246,15 @@ def update_default_processing_mode(
     return tenant.default_processing_mode.model_dump()
 
 
-@router.patch("/{tenant_id}/islands/{island_id}/processing-mode")
+@router.patch("/{tenant_id}/spokes/{spoke_id}/processing-mode")
 def update_spoke_processing_mode(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     payload: ProcessingModeUpdateRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
     _require_tenant_admin(tenant_id, current_user)
-    spoke = _get_spoke(tenant_id, island_id)
+    spoke = _get_spoke(tenant_id, spoke_id)
     spoke.processing_mode = _processing_mode_from_payload(payload)
     store.save_spoke(spoke)
     return spoke.processing_mode.model_dump()

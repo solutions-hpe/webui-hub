@@ -11,7 +11,7 @@ from .. import auth, store
 from ..aruba import ArubaClient
 from ..config import get_settings
 from ..crypto import encrypt_dict, encrypt_str, generate_api_key
-from ..data_models import Command, Island, Tenant, User
+from ..data_models import Command, Spoke, Tenant, User
 
 router = APIRouter()
 
@@ -262,7 +262,7 @@ def approve_pending_spoke(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    spoke = Island(
+    spoke = Spoke(
         id=pending.id,
         tenant_id=payload.tenant_id,
         hostname=pending.hostname,
@@ -344,7 +344,7 @@ def tenant_approve_pending_spoke(
         raise HTTPException(status_code=404, detail="Tenant not found")
 
     label = label if label is not None else pending.label
-    spoke = Island(
+    spoke = Spoke(
         id=pending.id,
         tenant_id=tenant_id,
         hostname=pending.hostname,

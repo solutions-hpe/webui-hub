@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from .config import get_settings
 from .crypto import decrypt_str, encrypt_str, generate_api_key
-from .data_models import AuditEntry, Command, Island, PendingIsland, Tenant, User
+from .data_models import AuditEntry, Command, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
 
@@ -221,16 +221,16 @@ def _spoke_path(tenant_id: str) -> Path:
     return _data_dir() / tenant_id / "islands.json"
 
 
-def _load_spokes(tenant_id: str) -> list[Island]:
+def _load_spokes(tenant_id: str) -> list[Spoke]:
     raw = _read_json(_spoke_path(tenant_id)) or []
-    return [Island(**i) for i in raw]
+    return [Spoke(**i) for i in raw]
 
 
-def _save_spokes(tenant_id: str, spokes: list[Island]) -> None:
+def _save_spokes(tenant_id: str, spokes: list[Spoke]) -> None:
     _write_json(_spoke_path(tenant_id), [i.model_dump(mode="json") for i in spokes])
 
 
-def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Island]:
+def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Spoke]:
     with _lock:
         for i in _load_spokes(tenant_id):
             if i.id == spoke_id:
@@ -238,7 +238,7 @@ def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Island]:
     return None
 
 
-def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
+def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Spoke]:
     """Return the approved spoke whose encrypted API key matches the plaintext key."""
     with _lock:
         for i in _load_spokes(tenant_id):
@@ -251,8 +251,8 @@ def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
     return None
 
 
-def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Island]]:
-    """Return (tenant_id, island) for the first approved island matching hostname across all tenants."""
+def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for the first approved spoke matching hostname across all tenants."""
     with _lock:
         for tenant in _load_tenants():
             for spoke in _load_spokes(tenant.id):
@@ -261,8 +261,8 @@ def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Island]
     return None
 
 
-def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Island]]:
-    """Return (tenant_id, island) for the first approved island matching spoke_name across all tenants."""
+def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for the first approved spoke matching spoke_name across all tenants."""
     name = spoke_name.strip().lower()
     if not name:
         return None
@@ -291,7 +291,7 @@ def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingIsland]:
         return _load_spokes(tenant_id)
 
 
-def save_spoke(spoke: Island) -> None:
+def save_spoke(spoke: Spoke) -> None:
     with _lock:
         spokes = _load_spokes(spoke.tenant_id)
         spokes = [i for i in spokes if i.id != spoke.id]

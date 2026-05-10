@@ -4,9 +4,9 @@ These coroutines are started from the FastAPI lifespan hook and run on fixed
 intervals: gkill polling every 5 minutes, heartbeat checks every 30 seconds,
 auto-recovery every 30 minutes, schedule evaluation every minute, Aruba polling
 every 5 minutes, state-transition notifications every minute, and maintenance
-purges every 5 minutes. Each worker evaluates tenant and island processing
+purges every 5 minutes. Each worker evaluates tenant and spoke processing
 mode so Hub either executes centrally or queues work for distributed spoke
-execution through the island inbox/ack relay.
+execution through the spoke inbox/ack relay.
 """
 from __future__ import annotations
 
@@ -103,7 +103,7 @@ async def _broadcast_gkill(value: str) -> None:
 
 
 async def heartbeat_monitor() -> None:
-    """Check island last_seen every 30 seconds. Update online state, broadcast changes."""
+    """Check spoke last_seen every 30 seconds. Update online state, broadcast changes."""
     await asyncio.sleep(30)
     while True:
         try:
@@ -119,7 +119,7 @@ async def heartbeat_monitor() -> None:
                         tenant_state[spoke.id] = online
                         changed = True
                         logger.info(
-                            "Island %s (%s) went %s",
+                            "Spoke %s (%s) went %s",
                             spoke.hostname,
                             spoke.id,
                             "online" if online else "offline",
@@ -158,7 +158,7 @@ async def auto_recovery_check() -> None:
                                 spoke.id,
                                 tenant.id,
                                 "auto_recovery",
-                                {"reason": f"Island offline for {offline_secs / 3600:.1f}h"},
+                                {"reason": f"Spoke offline for {offline_secs / 3600:.1f}h"},
                             )
                         )
                         store.append_audit(
@@ -190,7 +190,7 @@ _last_schedule_trigger: dict[str, str] = {}
 
 
 async def schedule_check() -> None:
-    """Check per-island schedules every 60 seconds."""
+    """Check per-spoke schedules every 60 seconds."""
     await asyncio.sleep(60)
     while True:
         try:
@@ -226,7 +226,7 @@ async def schedule_check() -> None:
                     mode = spoke.processing_mode.resolve("schedules")
                     store.enqueue_command(_cmd(spoke.id, tenant.id, "reclone_schedule", {}))
                     store.append_audit(_audit(spoke.id, tenant.id, "schedule", mode, "pending", f"Scheduled reclone: {cron}"))
-                    logger.info("Schedule triggered reclone for island %s (%s)", spoke.hostname, spoke.id)
+                    logger.info("Schedule triggered reclone for spoke %s (%s)", spoke.hostname, spoke.id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -326,7 +326,7 @@ async def aruba_poller() -> None:
 
 
 async def send_notification(tenant_id: str, spoke_id: str, title: str, message: str, mode: str = "centralized") -> None:
-    """Send notifications centrally or queue island-side delivery based on feature mode."""
+    """Send notifications centrally or queue spoke-side delivery based on feature mode."""
     from .notifications import send_email, send_teams_webhook
 
     cfg = get_notification_config(tenant_id)
@@ -423,7 +423,7 @@ async def acme_renewal_check() -> None:
 
 
 async def check_state_engine() -> None:
-    """Evaluate island online/offline status and fire notifications on transitions."""
+    """Evaluate spoke online/offline status and fire notifications on transitions."""
     await asyncio.sleep(60)
     prev_online: dict[str, bool] = {}
     while True:

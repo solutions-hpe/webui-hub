@@ -1,0 +1,201 @@
+/*
+ * shared.css — HPE Client-Sim shared UI styles
+ *
+ * Loaded by both webui-hub (at /shared/shared.css) and webui-spoke
+ * (copied to /static/shared.css by the installer at deploy time).
+ *
+ * Contains ONLY styles for the render functions defined in shared.js.
+ * Does NOT duplicate base styles that already exist in each app's style.css.
+ */
+
+/* ── Node stats bar ──────────────────────────────────────────────────────── */
+
+.node-stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 6px;
+  align-items: center;
+}
+
+.node-stats-disconnected {
+  padding: 8px 0;
+}
+
+.node-stat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.stat-pill-ok {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.stat-pill-warn {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.stat-pill-crit {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* ── Shared VM table (read-only) ─────────────────────────────────────────── */
+
+.shared-vm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.shared-vm-table th,
+.shared-vm-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.shared-vm-table th {
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-alt, #f9fafb);
+}
+
+.shared-vm-table tbody tr:hover {
+  background: var(--surface-alt, #f9fafb);
+}
+
+/* ── Reclone compact panel ───────────────────────────────────────────────── */
+
+.reclone-compact-panel {
+  padding: 8px 0;
+}
+
+.reclone-compact-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.reclone-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.reclone-progress-bar-outer {
+  flex: 1;
+  height: 8px;
+  background: var(--border, #e5e7eb);
+  border-radius: 4px;
+  overflow: hidden;
+  min-width: 80px;
+}
+
+.reclone-progress-bar-inner {
+  height: 100%;
+  background: var(--hpe-green, #01a982);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+
+.reclone-progress-label {
+  font-size: 0.78rem;
+  color: var(--text-muted, #6b7280);
+  white-space: nowrap;
+}
+
+/* ── Simulation distribution table ──────────────────────────────────────── */
+
+.shared-sim-dist-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.shared-sim-dist-table th,
+.shared-sim-dist-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+
+.shared-sim-dist-table th {
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #6b7280);
+  background: var(--surface-alt, #f9fafb);
+}
+
+/* ── Client table enrichments ────────────────────────────────────────────── */
+
+.hw-type-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 0.73rem;
+  font-weight: 600;
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.client-error-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 0.73rem;
+  font-weight: 700;
+  background: #fee2e2;
+  color: #991b1b;
+  cursor: default;
+}
+
+.check-yes {
+  color: var(--hpe-green, #01a982);
+  font-weight: 700;
+}
+
+.check-no {
+  color: var(--hpe-red, #c00);
+  font-weight: 700;
+}
+
+/* ── Relay status ────────────────────────────────────────────────────────── */
+
+.relay-error-label {
+  font-size: 0.78rem;
+  color: var(--hpe-red, #c00);
+}
+
+/* ── Shared text helpers ──────────────────────────────────────────────────── */
+
+.muted-label {
+  font-size: 0.78rem;
+  color: var(--text-muted, #6b7280);
+}
+
+.empty-state {
+  padding: 12px;
+  color: var(--text-muted, #6b7280);
+  font-size: 0.85rem;
+  font-style: italic;
+  text-align: center;
+}

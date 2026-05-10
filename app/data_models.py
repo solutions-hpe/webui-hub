@@ -68,7 +68,7 @@ class Tenant(BaseModel):
     created_by: str = ""
 
 
-class Island(BaseModel):
+class Spoke(BaseModel):
     id: str = Field(default_factory=_uuid)
     tenant_id: str
     hostname: str
@@ -84,8 +84,8 @@ class Island(BaseModel):
     created_at: datetime = Field(default_factory=_now)
 
 
-class PendingIsland(BaseModel):
-    """Island registration before tenant assignment."""
+class PendingSpoke(BaseModel):
+    """Spoke registration before tenant assignment."""
 
     id: str = Field(default_factory=_uuid)
     hostname: str

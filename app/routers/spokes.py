@@ -1,4 +1,4 @@
-"""Island relay endpoints — used by spoke servers."""
+"""Spoke relay endpoints — used by spoke servers."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
