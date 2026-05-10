@@ -50,7 +50,8 @@ jobs:
 
       - name: Print image URL
         run: |
-          echo "✅ Image pushed:"
+          VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
+          echo "✅ Pushed version ${VERSION}:"
           echo "   ghcr.io/${{ github.repository }}:latest"
           echo ""
           echo "Deploy from Azure Portal → Container Instances → Create"
