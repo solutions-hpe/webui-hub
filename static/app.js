@@ -778,6 +778,8 @@ async function loadSettings() {
   $("#api-ack-url") && ($("#api-ack-url").textContent = `POST ${apiBase}/ack`);
   const disabled = !canManageTenant();
   ["aruba-save-btn", "notif-save-btn", "acme-request-btn"].forEach(id => { const btn = document.getElementById(id); if (btn) btn.disabled = disabled; });
+  // Load tenant admin pending spokes whenever settings tab opens
+  if (canManageTenant() && !currentUser?.is_superadmin) loadTenantPendingSpokes();
   const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/settings`);
   if (!res || !res.ok) return;
   const data = await res.json();
@@ -1008,17 +1010,20 @@ function renderPendingSpokes(items) {
   const tbody = $("#sa-pending-tbody");
   if (!tbody) return;
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No pending spokes.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No pending spokes.</td></tr>';
     return;
   }
   tbody.innerHTML = items.map(item => `
     <tr>
       <td><strong>${escHtml(item.spoke_name || item.hostname)}</strong></td>
       <td><code>${escHtml(item.hostname)}</code></td>
+      <td>${item.tenant_hint
+        ? `<span class="role-badge" style="background:var(--hpe-green,#01a982)">${escHtml(tenantName(item.tenant_hint))}</span>`
+        : '<span class="muted">—</span>'}</td>
       <td>${escHtml(fmtDate(item.registered_at))}</td>
       <td>
         <select class="form-input form-input-sm sa-tenant-assign" data-pending-id="${escHtml(item.id)}">
-          ${tenants.map(tenant => `<option value="${escHtml(tenant.id)}">${escHtml(tenant.name)}</option>`).join("")}
+          ${tenants.map(tenant => `<option value="${escHtml(tenant.id)}"${item.tenant_hint === tenant.id ? ' selected' : ''}>${escHtml(tenant.name)}</option>`).join("")}
         </select>
       </td>
       <td>
@@ -1028,6 +1033,68 @@ function renderPendingSpokes(items) {
     </tr>
   `).join("");
 }
+
+// ── Tenant admin pending spokes ──────────────────────────────────────────────
+async function loadTenantPendingSpokes() {
+  if (!currentTenantId || !canManageTenant()) return;
+  try {
+    const res = await fetch(`/api/tenant/${currentTenantId}/pending-spokes`,
+      { headers: { Authorization: `Bearer ${authToken}` } });
+    if (!res.ok) return;
+    const items = await res.json();
+    renderTenantPendingSpokes(items);
+  } catch (_) { /* silent */ }
+}
+
+function renderTenantPendingSpokes(items) {
+  const btn = document.getElementById("settings-pending-tab-btn");
+  const countEl = document.getElementById("settings-pending-count");
+  if (btn) btn.style.display = items.length > 0 ? "" : "none";
+  if (countEl) countEl.textContent = String(items.length);
+  const tbody = document.getElementById("settings-pending-tbody");
+  if (!tbody) return;
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No pending spokes for this tenant.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map(item => `
+    <tr>
+      <td><strong>${escHtml(item.spoke_name || item.hostname)}</strong></td>
+      <td><code>${escHtml(item.hostname)}</code></td>
+      <td>${escHtml(fmtDate(item.registered_at))}</td>
+      <td>
+        <button class="btn btn-primary btn-small" data-tenant-approve-id="${escHtml(item.id)}" type="button">Approve</button>
+        <button class="btn btn-danger btn-small" data-tenant-reject-id="${escHtml(item.id)}" type="button">Reject</button>
+      </td>
+    </tr>
+  `).join("");
+  // wire approve/reject
+  tbody.querySelectorAll("[data-tenant-approve-id]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.tenantApproveId;
+      const res = await fetch(`/api/tenant/${currentTenantId}/pending-spokes/${id}/approve`,
+        { method: "POST", headers: { Authorization: `Bearer ${authToken}` } });
+      if (!res.ok) { alert("Approval failed: " + (await res.text())); return; }
+      const data = await res.json();
+      const banner = document.getElementById("settings-pending-key-banner");
+      if (banner && data.api_key) {
+        banner.textContent = `✅ Spoke approved. API Key (shown once): ${data.api_key}`;
+        banner.classList.remove("hidden");
+        setTimeout(() => banner.classList.add("hidden"), 30000);
+      }
+      loadTenantPendingSpokes();
+    });
+  });
+  tbody.querySelectorAll("[data-tenant-reject-id]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.tenantRejectId;
+      await fetch(`/api/tenant/${currentTenantId}/pending-spokes/${id}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${authToken}` } });
+      loadTenantPendingSpokes();
+    });
+  });
+}
+
 
 function renderSuperadminTenants(items) {
   $("#sa-tenants-count") && ($("#sa-tenants-count").textContent = String(items.length));
@@ -1282,7 +1349,13 @@ function connectWebSocket() {
     } else if (data.type === "cert_renewed") {
       showToast(`TLS certificate renewed — expires ${data.expires || "unknown"}`, "ok");
       if (activeTab === "settings") loadAcmeSettings();
-    } else if (data.type === "task_result") {
+    } else if (data.type === "pending_spoke_registered") {
+      if (currentUser?.is_superadmin && activeTab === "superadmin") loadSuperadmin();
+      if (canManageTenant() && !currentUser?.is_superadmin && data.tenant_hint === currentTenantId) {
+        loadTenantPendingSpokes();
+        showToast(`New spoke '${data.spoke_name || data.hostname}' is pending approval.`, "ok");
+      }
+    }
       showToast(`Spoke ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
       if (activeSpokeModal && data.island_id === activeSpokeModal.spoke.id) {
         loadSpokeCommands();

@@ -310,6 +310,96 @@ def delete_pending_spoke(spoke_id: str, _: User = Depends(auth.require_superadmi
     return {"status": "deleted"}
 
 
+# ── Tenant-admin pending spoke endpoints ─────────────────────────────────────
+# Tenant admins can list and approve spokes that pre-registered with their
+# tenant_id_hint.  Superadmins also have access via these endpoints.
+
+@router.get("/tenant/{tenant_id}/pending-spokes")
+def list_tenant_pending_spokes(
+    tenant_id: str,
+    current_user: User = Depends(auth.require_tenant_access),
+):
+    """Return pending spokes that pre-registered for this tenant."""
+    all_pending = store.list_pending_spokes()
+    return [p for p in all_pending if p.get("tenant_hint") == tenant_id]
+
+
+@router.post("/tenant/{tenant_id}/pending-spokes/{spoke_id}/approve", status_code=201)
+def tenant_approve_pending_spoke(
+    tenant_id: str,
+    spoke_id: str,
+    request: Request,
+    current_user: User = Depends(auth.require_tenant_access),
+    label: Optional[str] = None,
+):
+    """Tenant admin approves a spoke pre-registered for their tenant."""
+    pending = store.get_pending_spoke(spoke_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending spoke not found")
+    if pending.tenant_hint != tenant_id:
+        raise HTTPException(status_code=403, detail="This spoke was not pre-registered for your tenant")
+
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    label = label if label is not None else pending.label
+    spoke = Island(
+        id=pending.id,
+        tenant_id=tenant_id,
+        hostname=pending.hostname,
+        label=label,
+        spoke_name=pending.spoke_name,
+        seed_config=pending.seed_config,
+        config=pending.seed_config.copy(),
+        processing_mode=tenant.default_processing_mode.model_copy(deep=True),
+        status="approved",
+        last_seen=pending.last_seen,
+    )
+    plain_key = generate_api_key()
+    spoke.api_key_enc = encrypt_str(plain_key)
+    store.save_spoke(spoke)
+    store.delete_pending_spoke(spoke_id)
+
+    relay_server_url = str(request.base_url).rstrip("/") + f"/api/{tenant_id}"
+    store.enqueue_command(
+        Command(
+            spoke_id=spoke.id,
+            tenant_id=tenant_id,
+            type="config_update",
+            payload={
+                "relay_island_id": spoke.id,
+                "relay_api_key": plain_key,
+                "relay_tenant_id": tenant_id,
+                "relay_server_url": relay_server_url,
+            },
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+    )
+
+    return {
+        "island_id": spoke.id,
+        "api_key": plain_key,
+        "message": "Spoke approved and assigned to your tenant.",
+    }
+
+
+@router.delete("/tenant/{tenant_id}/pending-spokes/{spoke_id}")
+def tenant_reject_pending_spoke(
+    tenant_id: str,
+    spoke_id: str,
+    current_user: User = Depends(auth.require_tenant_access),
+):
+    """Tenant admin rejects/removes a spoke pre-registered for their tenant."""
+    pending = store.get_pending_spoke(spoke_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending spoke not found")
+    if pending.tenant_hint != tenant_id:
+        raise HTTPException(status_code=403, detail="This spoke was not pre-registered for your tenant")
+    store.delete_pending_spoke(spoke_id)
+    return {"status": "rejected"}
+
+
 @router.get("/superadmin/users")
 def list_users(_: User = Depends(auth.require_superadmin)):
     return [_user_response(user) for user in store.list_users()]

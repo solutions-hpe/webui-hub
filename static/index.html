@@ -149,6 +149,7 @@
       <button class="setup-subtab settings-subtab" data-subtab="settings-notifications" type="button">Notifications</button>
       <button class="setup-subtab settings-subtab" data-subtab="settings-api" type="button">API Info</button>
       <button class="setup-subtab settings-subtab" data-subtab="settings-tls" type="button">TLS Certificate</button>
+      <button class="setup-subtab settings-subtab" data-subtab="settings-pending-spokes" id="settings-pending-tab-btn" type="button" style="display:none;">Pending Spokes <span id="settings-pending-count" class="badge-count">0</span></button>
     </nav>
 
     <div id="settings-account" class="setup-subpanel" style="margin-top:16px;">
@@ -286,9 +287,22 @@
         </div>
       </div>
     </div>
-  </main>
 
-  <!-- ── Superadmin tab ── -->
+    <!-- Tenant admin: pending spokes pre-registered for this tenant -->
+    <div id="settings-pending-spokes" class="setup-subpanel hidden" style="margin-top:16px;">
+      <div class="setup-card">
+        <div class="setup-card-header">
+          <h2>Pending Spoke Registrations</h2>
+          <p>Spokes that pre-registered with your Tenant ID. Approve to bring them online in your tenant.</p>
+        </div>
+        <div id="settings-pending-key-banner" class="key-once-banner hidden"></div>
+        <table class="data-table" id="settings-pending-table">
+          <thead><tr><th>Spoke Name</th><th>Hostname</th><th>Registered</th><th></th></tr></thead>
+          <tbody id="settings-pending-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
   <main id="tab-superadmin" class="page tab-content hidden">
     <nav class="setup-subnav">
       <button class="setup-subtab sa-subtab active" data-subtab="sa-pending" type="button">Pending Spokes</button>
@@ -305,7 +319,7 @@
         </div>
         <div id="sa-key-banner" class="key-once-banner hidden"></div>
         <table class="data-table" id="sa-pending-table">
-          <thead><tr><th>Spoke Name</th><th>Hostname</th><th>Registered</th><th>Assign to Tenant</th><th></th></tr></thead>
+          <thead><tr><th>Spoke Name</th><th>Hostname</th><th>Tenant Hint</th><th>Registered</th><th>Assign to Tenant</th><th></th></tr></thead>
           <tbody id="sa-pending-tbody"></tbody>
         </table>
       </div>

@@ -91,6 +91,7 @@ class PendingIsland(BaseModel):
     hostname: str
     label: str = ""
     spoke_name: str = ""
+    tenant_hint: str = ""  # Tenant ID the spoke pre-registered for (may be empty)
     seed_config: dict[str, Any] = Field(default_factory=dict)
     registered_at: datetime = Field(default_factory=_now)
     last_seen: Optional[datetime] = None

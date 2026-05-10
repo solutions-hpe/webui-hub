@@ -4,15 +4,27 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .. import store
+from .. import auth, store
 from ..crypto import decrypt_str
 from ..data_models import AuditEntry, PendingIsland
 from ..ws import ws_broadcast
 
 router = APIRouter()
+
+# In-memory registration log — last 100 attempts (survives until container restart)
+_REG_LOG_MAX = 100
+_registration_log: list[dict[str, Any]] = []
+
+
+def _reg_log_append(event: str, **kwargs: Any) -> None:
+    entry = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+             "event": event, **kwargs}
+    _registration_log.append(entry)
+    if len(_registration_log) > _REG_LOG_MAX:
+        del _registration_log[:-_REG_LOG_MAX]
 
 
 def _now() -> datetime:
@@ -37,17 +49,28 @@ class RegisterPayload(BaseModel):
     hostname: str
     label: str = ""
     spoke_name: str = ""
+    tenant_id_hint: str = ""  # Optional: tenant ID pre-entered on spoke
     config: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/islands/register", status_code=201)
-def register_spoke(payload: RegisterPayload):
+def register_spoke(payload: RegisterPayload, request: Request):
     spoke_name = payload.spoke_name.strip() or payload.hostname
+    tenant_hint = payload.tenant_id_hint.strip()
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Validate tenant hint if provided
+    if tenant_hint and not store.get_tenant(tenant_hint):
+        _reg_log_append("invalid_tenant_hint", hostname=payload.hostname,
+                        spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip)
+        tenant_hint = ""  # Silently ignore invalid tenant IDs
 
     # If already approved by hostname, return credentials regardless of name
     approved = store.get_approved_spoke_by_hostname(payload.hostname)
     if approved:
         tenant_id, spoke = approved
+        _reg_log_append("already_approved", hostname=payload.hostname,
+                        spoke_name=spoke_name, tenant_id=tenant_id, ip=client_ip)
         return {
             "island_id": spoke.id,
             "status": "approved",
@@ -60,6 +83,8 @@ def register_spoke(payload: RegisterPayload):
     if name_conflict_approved:
         _, conflict_spoke = name_conflict_approved
         if conflict_spoke.hostname != payload.hostname:
+            _reg_log_append("name_conflict_approved", hostname=payload.hostname,
+                            spoke_name=spoke_name, ip=client_ip)
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -71,6 +96,8 @@ def register_spoke(payload: RegisterPayload):
     # Check for spoke_name conflicts in pending spokes
     name_conflict_pending = store.get_pending_spoke_by_name(spoke_name)
     if name_conflict_pending and name_conflict_pending.hostname != payload.hostname:
+        _reg_log_append("name_conflict_pending", hostname=payload.hostname,
+                        spoke_name=spoke_name, ip=client_ip)
         raise HTTPException(
             status_code=409,
             detail={
@@ -81,13 +108,23 @@ def register_spoke(payload: RegisterPayload):
 
     existing = store.get_pending_by_hostname(payload.hostname)
     if existing:
-        # Update spoke_name if it changed
+        # Update spoke_name/tenant_hint if they changed
+        changed = False
         if existing.spoke_name != spoke_name:
             existing.spoke_name = spoke_name
+            changed = True
+        if tenant_hint and existing.tenant_hint != tenant_hint:
+            existing.tenant_hint = tenant_hint
+            changed = True
+        if changed:
             store.save_pending_spoke(existing)
+        _reg_log_append("already_pending", hostname=payload.hostname,
+                        spoke_name=spoke_name, island_id=existing.id,
+                        tenant_hint=existing.tenant_hint, ip=client_ip)
         return {
             "island_id": existing.id,
             "status": "pending",
+            "tenant_hint": existing.tenant_hint,
             "message": "Registration already pending approval.",
         }
 
@@ -95,14 +132,37 @@ def register_spoke(payload: RegisterPayload):
         hostname=payload.hostname,
         label=payload.label,
         spoke_name=spoke_name,
+        tenant_hint=tenant_hint,
         seed_config=payload.config,
     )
     store.save_pending_spoke(pending)
-    ws_broadcast({"type": "pending_spoke_registered", "hostname": payload.hostname, "spoke_name": spoke_name})
+    _reg_log_append("new_pending", hostname=payload.hostname, spoke_name=spoke_name,
+                    island_id=pending.id, tenant_hint=tenant_hint, ip=client_ip)
+    ws_broadcast({
+        "type": "pending_spoke_registered",
+        "hostname": payload.hostname,
+        "spoke_name": spoke_name,
+        "tenant_hint": tenant_hint,
+    })
+    msg = (
+        f"Registration received. Pending approval by tenant '{tenant_hint}'."
+        if tenant_hint
+        else "Registration received. Awaiting superadmin approval and tenant assignment."
+    )
     return {
         "island_id": pending.id,
         "status": "pending",
-        "message": "Registration received. Awaiting superadmin approval and tenant assignment.",
+        "tenant_hint": tenant_hint,
+        "message": msg,
+    }
+
+
+@router.get("/spokes/diag")
+def spokes_diag(current_user: auth.User = Depends(auth.require_superadmin)):
+    """Return hub-side registration diagnostics log."""
+    return {
+        "registration_log": list(reversed(_registration_log)),
+        "pending_count": len(store.list_pending_spokes()),
     }
 
 
