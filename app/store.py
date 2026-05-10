@@ -94,13 +94,26 @@ def delete_user(user_id: str) -> None:
         _save_users(users)
 
 
-def ensure_admin(username: str, hashed_password: str) -> None:
-    """Create the bootstrap superadmin only when the store has no users yet."""
+def ensure_admin(username: str, hashed_password: str, force_password: bool = False) -> None:
+    """Create or update the bootstrap superadmin.
+
+    If the store has no users, create the superadmin unconditionally.
+    If ``force_password`` is True (i.e. ADMIN_PASSWORD was explicitly set in
+    the environment), always update the superadmin's password so operators can
+    reset credentials by changing the env var and restarting the container.
+    """
     with _lock:
         users = _load_users()
         if not users:
             admin = User(username=username, hashed_password=hashed_password, is_superadmin=True)
             _save_users([admin])
+            return
+        if force_password:
+            for user in users:
+                if user.username == username and user.is_superadmin:
+                    user.hashed_password = hashed_password
+                    _save_users(users)
+                    break
 
 
 def _tenants_path() -> Path:

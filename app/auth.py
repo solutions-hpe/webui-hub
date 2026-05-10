@@ -92,8 +92,13 @@ def require_tenant_access(tenant_id: str, user: User = Depends(get_current_user)
 
 def ensure_admin() -> None:
     """Bootstrap superadmin user on first start."""
+    import os
     settings = get_settings()
+    # force_password=True when ADMIN_PASSWORD was explicitly set in the environment
+    # so operators can reset credentials by changing the env var and restarting.
+    force_password = bool(os.environ.get("ADMIN_PASSWORD") or os.environ.get("FIRST_ADMIN_PASSWORD"))
     store.ensure_admin(
         username=settings.first_admin_username,
         hashed_password=hash_password(settings.first_admin_password),
+        force_password=force_password,
     )
