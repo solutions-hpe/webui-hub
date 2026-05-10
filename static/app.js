@@ -197,7 +197,9 @@ function buildTenantSelector() {
   if (!wrap || !select) return;
   select.innerHTML = tenants.map(tenant => `<option value="${escHtml(tenant.id)}">${escHtml(tenant.name)}</option>`).join("");
   if (currentTenantId) select.value = currentTenantId;
-  wrap.classList.toggle("hidden", !(currentUser && (currentUser.is_superadmin || tenants.length > 1)));
+  // Show the dropdown whenever there are multiple tenants or the user is a superadmin with any tenant.
+  const show = currentUser && tenants.length > 0 && (tenants.length > 1 || currentUser.is_superadmin);
+  wrap.classList.toggle("hidden", !show);
 }
 
 function clearDynamicTenantTabs() {
@@ -206,23 +208,10 @@ function clearDynamicTenantTabs() {
 
 function buildSuperadminTenantTabs() {
   clearDynamicTenantTabs();
+  // No per-tenant tabs — tenant is selected via the dropdown in the header.
+  // Ensure the Spokes tab is always visible for authenticated users.
   const spokesTab = $('.tab[data-tab="spokes"]');
-  const superTab = $('.tab[data-tab="superadmin"]');
-  if (!currentUser?.is_superadmin || !spokesTab || !superTab) {
-    if (spokesTab) spokesTab.classList.remove("hidden");
-    return;
-  }
-  spokesTab.classList.add("hidden");
-  superTab.textContent = "⚙ Admin";
-  tenants.forEach(tenant => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "tab auth-tab dynamic-tenant-tab";
-    button.dataset.tab = "spokes";
-    button.dataset.tenantId = tenant.id;
-    button.textContent = tenant.name;
-    superTab.parentNode.insertBefore(button, superTab);
-  });
+  if (spokesTab) spokesTab.classList.remove("hidden");
 }
 
 function applyAuthUI() {
@@ -333,7 +322,7 @@ async function setCurrentTenant(tenantId, reload = true) {
   syncRoleBadge();
   applyAuthUI();
   populateCommandSpokeSelect();
-  if (reload && ["spokes", "commands", "settings"].includes(activeTab)) await refreshCurrentView(true);
+  if (reload && ["dashboard", "spokes", "commands", "settings"].includes(activeTab)) await refreshCurrentView(true);
 }
 
 function showTab(tabId, opts = {}) {
@@ -348,9 +337,6 @@ function showTab(tabId, opts = {}) {
   $$("#tab-nav .tab").forEach(button => button.classList.remove("active"));
   if (opts.button) {
     opts.button.classList.add("active");
-  } else if (currentUser?.is_superadmin && tabId === "spokes" && currentTenantId) {
-    const tenantButton = $(`.dynamic-tenant-tab[data-tenant-id="${CSS.escape(currentTenantId)}"]`);
-    if (tenantButton) tenantButton.classList.add("active");
   } else {
     $(`#tab-nav .tab[data-tab="${tabId}"]`)?.classList.add("active");
   }
