@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Hub — Client-Sim Central</title>
+  <title>Client Simulator — Central Hub</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -18,7 +18,7 @@
             <path fill="currentColor" d="M276.67 180h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V180H504v27.27H391.2v13.36ZM151.2 180v144h-28.8v-59.02H28.8V324H0V180h28.8v57.38h93.6V180h28.8Z"/>
           </svg>
           <span class="brand-divider" aria-hidden="true"></span>
-          Hub
+          Client Simulator
         </h1>
       </div>
       <div class="topbar-center">
@@ -32,6 +32,19 @@
           <span id="api-dot" class="status-dot offline"></span>
           <span class="repo-label">API:</span>
           <span id="api-text">Connecting…</span>
+        </div>
+        <div id="auto-refresh-ctrl" class="auto-refresh-ctrl">
+          <label class="auto-refresh-label">
+            <input id="auto-refresh-toggle" type="checkbox" checked>
+            Auto-refresh
+          </label>
+          <select id="auto-refresh-interval" class="form-input form-input-sm" style="width:auto;padding:2px 6px;">
+            <option value="5">5s</option>
+            <option value="10" selected>10s</option>
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+          </select>
+          <span id="auto-refresh-countdown" class="auto-refresh-countdown">10s</span>
         </div>
         <div id="gkill-badge" class="gkill-badge hidden" title="Global Kill Switch is ON">⚠ GKILL ON</div>
         <div id="topbar-user" class="topbar-user hidden">
@@ -47,8 +60,8 @@
 
   <!-- ── Tab nav ── -->
   <nav id="tab-nav" class="tab-nav" role="tablist">
-    <button class="tab active" data-tab="dashboard" type="button">⚡ Dashboard</button>
-    <button class="tab auth-tab hidden" data-tab="islands" type="button">🏝 Islands</button>
+    <button class="tab active" data-tab="dashboard" type="button">Dashboard</button>
+    <button class="tab auth-tab hidden" data-tab="islands" type="button">🔗 Spokes</button>
     <button class="tab auth-tab hidden" data-tab="commands" type="button">⌨ Commands</button>
     <button class="tab auth-tab hidden" data-tab="settings" type="button">⚙ Settings</button>
     <button class="tab superadmin-tab hidden" data-tab="superadmin" type="button">🔑 Superadmin</button>
@@ -58,7 +71,7 @@
   <main id="tab-dashboard" class="page tab-content">
     <div class="page-toolbar">
       <div class="toolbar-stats">
-        <span class="stat-pill" id="dash-islands-pill">— islands</span>
+        <span class="stat-pill" id="dash-islands-pill">— spokes</span>
         <span class="stat-pill" id="dash-clients-pill">— clients</span>
         <span class="stat-pill" id="dash-online-pill">— online</span>
       </div>
@@ -67,26 +80,26 @@
       </div>
     </div>
     <div id="dashboard-grid" class="island-grid"></div>
-    <div id="dashboard-empty" class="empty-state hidden">No islands registered yet.</div>
+    <div id="dashboard-empty" class="empty-state hidden">No spokes registered yet.</div>
   </main>
 
   <!-- ── Islands tab (auth required) ── -->
   <main id="tab-islands" class="page tab-content hidden">
     <div class="page-toolbar">
       <div class="toolbar-stats">
-        <span class="stat-pill" id="islands-count-pill">— islands</span>
+        <span class="stat-pill" id="islands-count-pill">— spokes</span>
         <span class="stat-pill" id="islands-online-pill">— online</span>
         <span class="stat-pill" id="islands-clients-pill">— clients</span>
       </div>
       <div class="toolbar-actions">
-        <input id="island-search" type="search" class="form-input form-input-sm" placeholder="Search islands…">
+        <input id="island-search" type="search" class="form-input form-input-sm" placeholder="Search spokes…">
         <button id="collapse-all-btn" class="btn btn-secondary btn-small" type="button">Collapse All</button>
         <button id="expand-all-btn" class="btn btn-secondary btn-small" type="button">Expand All</button>
         <button id="refresh-islands-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
       </div>
     </div>
     <div id="islands-list"></div>
-    <div id="islands-empty" class="empty-state hidden">No islands in this tenant.</div>
+    <div id="islands-empty" class="empty-state hidden">No spokes in this tenant.</div>
   </main>
 
   <!-- ── Commands tab ── -->
@@ -271,7 +284,7 @@
   <!-- ── Superadmin tab ── -->
   <main id="tab-superadmin" class="page tab-content hidden">
     <nav class="setup-subnav">
-      <button class="setup-subtab sa-subtab active" data-subtab="sa-pending" type="button">Pending Islands</button>
+      <button class="setup-subtab sa-subtab active" data-subtab="sa-pending" type="button">Pending Spokes</button>
       <button class="setup-subtab sa-subtab" data-subtab="sa-tenants" type="button">Tenants</button>
       <button class="setup-subtab sa-subtab" data-subtab="sa-users" type="button">Users</button>
       <button class="setup-subtab sa-subtab" data-subtab="sa-gkill" type="button">GKill</button>
@@ -298,7 +311,7 @@
           <button id="sa-add-tenant-btn" class="btn btn-primary btn-small" type="button">+ New Tenant</button>
         </div>
         <table class="data-table" id="sa-tenants-table">
-          <thead><tr><th>Name</th><th>ID / CID</th><th>Aruba Linked</th><th>Islands</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>ID / CID</th><th>Aruba Linked</th><th>Spokes</th><th></th></tr></thead>
           <tbody id="sa-tenants-tbody"></tbody>
         </table>
         <div id="sa-tenant-form" class="setup-form hidden" style="max-width:460px;margin-top:20px;padding-top:16px;border-top:1px solid var(--border);">
@@ -353,7 +366,7 @@
   <div id="island-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
     <div class="modal-box modal-box-large">
       <div class="modal-header">
-        <h2 id="island-modal-title">Island Detail</h2>
+        <h2 id="island-modal-title">Spoke Detail</h2>
         <button id="island-modal-close" class="btn btn-secondary btn-small" type="button">✕ Close</button>
       </div>
       <nav class="setup-subnav" style="margin-top:12px;">
@@ -415,7 +428,7 @@
   <!-- ── Login modal ── -->
   <div id="login-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
     <div class="modal-box">
-      <h2 class="modal-title">Sign in to Hub</h2>
+      <h2 class="modal-title">Sign in to Client Simulator</h2>
       <div class="setup-form">
         <div class="form-group"><label class="form-label" for="login-username">Username</label><input id="login-username" type="text" class="form-input" autocomplete="username" placeholder="admin"></div>
         <div class="form-group"><label class="form-label" for="login-password">Password</label><input id="login-password" type="password" class="form-input" autocomplete="current-password"></div>

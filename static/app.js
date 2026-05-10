@@ -9,6 +9,9 @@ let activeIslandModal = null;
 let ws = null;
 let wsReconnectTimer = null;
 let activeTab = "dashboard";
+let autoRefreshTimer = null;
+let autoRefreshCountdownTimer = null;
+let autoRefreshSecondsLeft = 10;
 
 const PROCESSING_FEATURES = ["aruba_polling", "teams_webhook", "email", "heartbeat", "gkill", "schedules", "repo_sync"];
 const islandUiState = { expandedByTenant: {}, search: "" };
@@ -163,7 +166,7 @@ function renderInBatches(key, container, items, renderItem, batchSize = 40) {
 }
 
 async function pingApi() {
-  const res = await fetch("/api/auth/providers").catch(() => null);
+  const res = await fetch("/api/health").catch(() => null);
   updateApiStatus(Boolean(res && res.ok), res && res.ok ? "Connected" : "Disconnected");
 }
 
@@ -363,11 +366,15 @@ function getTenantIslands() {
   return currentTenantId ? (islandCache[currentTenantId] || []) : [];
 }
 
+function spokeLabel(count) {
+  return `${count} ${count === 1 ? "spoke" : "spokes"}`;
+}
+
 function updateIslandStatPills(islands) {
   const approved = islands.filter(island => island.status === "approved");
   const onlineCount = approved.filter(island => isOnline(island.last_seen)).length;
   const clientCount = approved.reduce((sum, island) => sum + ((island.telemetry?.clients || []).length), 0);
-  $("#islands-count-pill") && ($("#islands-count-pill").textContent = `${approved.length} islands`);
+  $("#islands-count-pill") && ($("#islands-count-pill").textContent = spokeLabel(approved.length));
   $("#islands-online-pill") && ($("#islands-online-pill").textContent = `${onlineCount} online`);
   $("#islands-clients-pill") && ($("#islands-clients-pill").textContent = `${clientCount} clients`);
 }
@@ -380,7 +387,7 @@ async function loadDashboard() {
   const empty = $("#dashboard-empty");
   const onlineCount = sites.filter(site => isOnline(site.last_seen)).length;
   const clientCount = sites.reduce((sum, site) => sum + ((site.telemetry?.clients || []).length), 0);
-  $("#dash-islands-pill") && ($("#dash-islands-pill").textContent = `${sites.length} islands`);
+  $("#dash-islands-pill") && ($("#dash-islands-pill").textContent = spokeLabel(sites.length));
   $("#dash-clients-pill") && ($("#dash-clients-pill").textContent = `${clientCount} clients`);
   $("#dash-online-pill") && ($("#dash-online-pill").textContent = `${onlineCount} online`);
   empty?.classList.toggle("hidden", sites.length > 0);
@@ -849,7 +856,7 @@ function showKeyBanner(apiKey, islandId) {
     <strong>⚠ Save this API key — it will not be shown again.</strong>
     <div class="api-key-display">${escHtml(apiKey)}</div>
     <div class="row">
-      <span>Island ${escHtml(islandId)} approved.</span>
+      <span>Spoke ${escHtml(islandId)} approved.</span>
       <button class="btn btn-secondary btn-small" id="sa-key-dismiss" type="button">Dismiss</button>
     </div>
   `;
@@ -984,7 +991,7 @@ function renderPendingIslands(items) {
   const tbody = $("#sa-pending-tbody");
   if (!tbody) return;
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No pending islands.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No pending spokes.</td></tr>';
     return;
   }
   tbody.innerHTML = items.map(item => `
@@ -1078,22 +1085,22 @@ async function approvePendingIsland(id) {
   });
   if (!res || !res.ok) {
     const err = await readJson(res);
-    showToast(err?.detail || "Failed to approve island.", "err");
+    showToast(err?.detail || "Failed to approve spoke.", "err");
     return;
   }
   const data = await res.json();
   showKeyBanner(data.api_key, data.island_id);
-  showToast("Island approved.", "ok");
+  showToast("Spoke approved.", "ok");
   await Promise.all([loadSuperadmin(), loadIslands(true), loadDashboard()]);
 }
 
 async function rejectPendingIsland(id) {
   const res = await apiFetch(`/api/superadmin/pending-islands/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res || !res.ok) {
-    showToast("Failed to reject island.", "err");
+    showToast("Failed to reject spoke.", "err");
     return;
   }
-  showToast("Pending island rejected.", "ok");
+  showToast("Pending spoke rejected.", "ok");
   loadSuperadmin();
 }
 
@@ -1198,6 +1205,40 @@ function updateOnlineBadges(islandOnline) {
   });
 }
 
+function stopAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  if (autoRefreshCountdownTimer) {
+    clearInterval(autoRefreshCountdownTimer);
+    autoRefreshCountdownTimer = null;
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh();
+  const toggle = $("#auto-refresh-toggle");
+  const intervalSelect = $("#auto-refresh-interval");
+  const countdown = $("#auto-refresh-countdown");
+  if (!toggle?.checked) {
+    if (countdown) countdown.textContent = "—";
+    return;
+  }
+  const seconds = parseInt(intervalSelect?.value || "10", 10);
+  autoRefreshSecondsLeft = seconds;
+  if (countdown) countdown.textContent = `${autoRefreshSecondsLeft}s`;
+  autoRefreshCountdownTimer = setInterval(() => {
+    autoRefreshSecondsLeft = Math.max(0, autoRefreshSecondsLeft - 1);
+    if (countdown) countdown.textContent = `${autoRefreshSecondsLeft}s`;
+  }, 1000);
+  autoRefreshTimer = setInterval(async () => {
+    autoRefreshSecondsLeft = seconds;
+    if (countdown) countdown.textContent = `${autoRefreshSecondsLeft}s`;
+    await refreshCurrentView(false);
+  }, seconds * 1000);
+}
+
 function connectWebSocket() {
   if (ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(ws.readyState)) return;
   if (wsReconnectTimer) {
@@ -1225,7 +1266,7 @@ function connectWebSocket() {
       showToast(`TLS certificate renewed — expires ${data.expires || "unknown"}`, "ok");
       if (activeTab === "settings") loadAcmeSettings();
     } else if (data.type === "task_result") {
-      showToast(`Island ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
+      showToast(`Spoke ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
       if (activeIslandModal && data.island_id === activeIslandModal.island.id) {
         loadIslandCommands();
         loadIslandAudit();
@@ -1233,7 +1274,7 @@ function connectWebSocket() {
     }
   };
   ws.onclose = () => {
-    updateApiStatus(false, "Reconnecting…");
+    updateApiStatus(false, "Disconnected");
     ws = null;
     wsReconnectTimer = window.setTimeout(connectWebSocket, 3000);
   };
@@ -1298,6 +1339,8 @@ function bindEvents() {
   $("#refresh-dashboard-btn")?.addEventListener("click", loadDashboard);
   $("#refresh-islands-btn")?.addEventListener("click", () => loadIslands(true));
   $("#refresh-commands-btn")?.addEventListener("click", loadCommands);
+  $("#auto-refresh-toggle")?.addEventListener("change", startAutoRefresh);
+  $("#auto-refresh-interval")?.addEventListener("change", startAutoRefresh);
   $("#send-command-btn")?.addEventListener("click", sendCommandFromForm);
   $("#collapse-all-btn")?.addEventListener("click", () => { getExpandedSet().clear(); loadIslands(); });
   $("#expand-all-btn")?.addEventListener("click", async () => {
@@ -1329,6 +1372,7 @@ function bindEvents() {
   connectWebSocket();
   if (currentUser && currentTenantId) await ensureIslands(true);
   await loadDashboard();
+  startAutoRefresh();
 })();
 
 document.getElementById("acme-challenge")?.addEventListener("change", toggleAcmeDnsSection);

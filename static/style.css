@@ -1460,14 +1460,14 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,0.45);
-  z-index: 300;
   display: flex;
   align-items: center;
   justify-content: center;
+  background: rgba(0,0,0,0.5);
+  z-index: 1000;
 }
 
-.modal-overlay.hidden { display: none; }
+.modal-overlay.hidden { display: none !important; }
 
 .modal-box {
   background: var(--panel);
@@ -1598,6 +1598,27 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 .island-section-header:hover { background: var(--hover-bg); }
 .island-section-body { padding: 0 14px 14px; display: none; }
 .island-section-body.expanded { display: block; }
+
+.auto-refresh-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted, #aaa);
+}
+.auto-refresh-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.auto-refresh-countdown {
+  min-width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
 .island-toggle { font-size: 12px; color: var(--text-muted); transition: transform 0.15s; }
 .island-toggle.open { transform: rotate(90deg); }
 .island-hostname { font-weight: 600; font-size: 14px; }
