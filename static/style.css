@@ -1719,12 +1719,9 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 }
 
 .build-version {
-  font-size: 0.7rem;
-  font-family: monospace;
-  color: var(--text-muted, #888);
-  opacity: 0.7;
-  padding: 2px 6px;
-  border: 1px solid var(--border, #333);
-  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.5);
+  letter-spacing: 0.04em;
   white-space: nowrap;
 }
