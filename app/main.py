@@ -84,7 +84,11 @@ app.include_router(settings_router.router, prefix="/api", tags=["settings"])
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    import os
+    sha = os.getenv("APP_VERSION", "dev")
+    branch = os.getenv("APP_BRANCH", "local")
+    short = sha[:7] if len(sha) > 7 else sha
+    return {"status": "ok", "version": short, "branch": branch, "sha": sha}
 
 
 @app.get("/{full_path:path}")

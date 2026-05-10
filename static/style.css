@@ -1717,3 +1717,14 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
   .setup-card .data-table { margin: 0 -20px; width: calc(100% + 40px); }
   .data-table th, .data-table td { padding-left: 20px; padding-right: 20px; }
 }
+
+.build-version {
+  font-size: 0.7rem;
+  font-family: monospace;
+  color: var(--text-muted, #888);
+  opacity: 0.7;
+  padding: 2px 6px;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  white-space: nowrap;
+}

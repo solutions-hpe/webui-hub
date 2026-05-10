@@ -10,6 +10,11 @@ FROM python:3.12-slim
 LABEL org.opencontainers.image.title="Hub — Client-Sim Central Platform"
 LABEL org.opencontainers.image.description="Multi-tenant spoke management platform"
 
+ARG BUILD_SHA=dev
+ARG BUILD_REF=local
+ENV APP_VERSION=${BUILD_SHA}
+ENV APP_BRANCH=${BUILD_REF}
+
 WORKDIR /app
 
 COPY --from=builder /install /usr/local

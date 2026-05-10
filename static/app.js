@@ -167,7 +167,16 @@ function renderInBatches(key, container, items, renderItem, batchSize = 40) {
 
 async function pingApi() {
   const res = await fetch("/api/health").catch(() => null);
-  updateApiStatus(Boolean(res && res.ok), res && res.ok ? "Connected" : "Disconnected");
+  const ok = Boolean(res && res.ok);
+  updateApiStatus(ok, ok ? "Connected" : "Disconnected");
+  if (ok) {
+    const data = await res.json().catch(() => null);
+    const badge = $("#build-version");
+    if (badge && data?.version) {
+      badge.textContent = `v${data.version}`;
+      badge.title = `Branch: ${data.branch || "?"} | SHA: ${data.sha || "?"}`;
+    }
+  }
 }
 
 function getExpandedSet(tenantId = currentTenantId) {
