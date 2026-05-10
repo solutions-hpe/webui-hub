@@ -1355,7 +1355,7 @@ function connectWebSocket() {
         loadTenantPendingSpokes();
         showToast(`New spoke '${data.spoke_name || data.hostname}' is pending approval.`, "ok");
       }
-    }
+    } else if (data.type === "task_result") {
       showToast(`Spoke ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
       if (activeSpokeModal && data.island_id === activeSpokeModal.spoke.id) {
         loadSpokeCommands();

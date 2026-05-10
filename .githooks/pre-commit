@@ -1,0 +1,126 @@
+#!/bin/bash
+# Pre-commit hook: syntax checks for Python, Bash, and JavaScript.
+
+set -euo pipefail
+
+fail=0
+
+# ── Python ────────────────────────────────────────────────────────────────────
+staged_py=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+for f in $staged_py; do
+    if ! py_err=$(python3 -m py_compile "$f" 2>&1); then
+        echo "[pre-commit] ✗ Python syntax error in $f:"
+        echo "$py_err"
+        fail=1
+    fi
+done
+
+# ── Bash ──────────────────────────────────────────────────────────────────────
+staged_sh=$(git diff --cached --name-only --diff-filter=ACM | grep '\.sh$' || true)
+for f in $staged_sh; do
+    if ! sh_err=$(bash -n "$f" 2>&1); then
+        echo "[pre-commit] ✗ Bash syntax error in $f:"
+        echo "$sh_err"
+        fail=1
+    fi
+done
+
+# ── JavaScript: brace/paren balance ──────────────────────────────────────────
+staged_js=$(git diff --cached --name-only --diff-filter=ACM | grep '\.js$' || true)
+for f in $staged_js; do
+    python3 - "$f" <<'PY'
+import sys
+path = sys.argv[1]
+src  = open(path, encoding='utf-8', errors='replace').read()
+
+# Tokenizer: strips comments and string literals before counting,
+# so // inside a URL string doesn't count as a comment.
+out = []
+i, n = 0, len(src)
+# Track last non-whitespace char to detect regex vs division
+last_tok = ';'  # treat start-of-file like after a statement
+while i < n:
+    c = src[i]
+    # // line comment
+    if c == '/' and i + 1 < n and src[i+1] == '/':
+        while i < n and src[i] != '\n':
+            i += 1
+    # /* block comment */
+    elif c == '/' and i + 1 < n and src[i+1] == '*':
+        i += 2
+        while i < n - 1 and not (src[i] == '*' and src[i+1] == '/'):
+            i += 1
+        i += 2
+    # regex literal: / after operator/open-delimiter = regex, not division
+    elif c == '/' and last_tok in set('=(:,!&|?;{[~^%+-><'):
+        i += 1
+        while i < n and src[i] != '/':
+            if src[i] == '\\': i += 1  # escape
+            i += 1
+        i += 1  # skip closing /
+        # skip flags (g, i, m, s, u, y)
+        while i < n and src[i].isalpha():
+            i += 1
+        last_tok = '/'
+        continue
+    # double-quoted string
+    elif c == '"':
+        out.append('"')
+        i += 1
+        while i < n and src[i] != '"':
+            if src[i] == '\\': i += 1
+            i += 1
+        out.append('"')
+        i += 1
+    # single-quoted string
+    elif c == "'":
+        out.append("'")
+        i += 1
+        while i < n and src[i] != "'":
+            if src[i] == '\\': i += 1
+            i += 1
+        out.append("'")
+        i += 1
+    # template literal — skip entirely (handles nested ${} and nested ` `)
+    elif c == '`':
+        i += 1
+        depth = 0  # ${} nesting depth
+        while i < n:
+            tc = src[i]
+            if tc == '\\':
+                i += 2  # skip escape sequence
+            elif tc == '$' and i + 1 < n and src[i+1] == '{':
+                depth += 1; i += 2
+            elif tc == '{' and depth > 0:
+                depth += 1; i += 1
+            elif tc == '}' and depth > 0:
+                depth -= 1; i += 1
+            elif tc == '`' and depth == 0:
+                i += 1; break  # end of template literal
+            else:
+                i += 1
+    else:
+        out.append(c)
+        i += 1
+    if not c.isspace():
+        last_tok = c
+
+stripped = ''.join(out)
+ob, cb = stripped.count('{'), stripped.count('}')
+op, cp = stripped.count('('), stripped.count(')')
+errors = []
+if ob != cb: errors.append(f'braces: {ob} open vs {cb} close (delta {ob-cb:+d})')
+if op != cp: errors.append(f'parens: {op} open vs {cp} close (delta {op-cp:+d})')
+if errors:
+    print(f"[pre-commit] ✗ JS balance error in {path}: {'; '.join(errors)}")
+    sys.exit(1)
+PY
+    if [[ $? -ne 0 ]]; then fail=1; fi
+done
+
+if [[ $fail -ne 0 ]]; then
+    echo "[pre-commit] Commit blocked — fix the errors above and re-stage."
+    exit 1
+fi
+
+echo "[pre-commit] Syntax checks passed ✓"
