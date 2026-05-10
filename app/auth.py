@@ -18,11 +18,12 @@ oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fa
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    # bcrypt truncates at 72 bytes — enforce explicitly to avoid ValueError
+    return pwd_context.hash(password.encode()[:72])
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return pwd_context.verify(plain.encode()[:72], hashed)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
