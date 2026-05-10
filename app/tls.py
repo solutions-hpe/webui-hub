@@ -17,25 +17,30 @@ logger = logging.getLogger(__name__)
 
 def generate_self_signed(cert_path: Path, key_path: Path) -> None:
     """Generate a self-signed TLS certificate valid for 10 years."""
+    import os
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.parent.mkdir(parents=True, exist_ok=True)
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     hostname = socket.gethostname()
 
+    # HUB_HOSTNAME allows comma-separated FQDNs (e.g. ACI public DNS name)
+    extra_hostnames = [h.strip() for h in os.environ.get("HUB_HOSTNAME", "").split(",") if h.strip()]
+    cn = extra_hostnames[0] if extra_hostnames else hostname
+
     subject = x509.Name(
         [
-            x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+            x509.NameAttribute(NameOID.COMMON_NAME, cn),
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, "HPE Hub"),
         ]
     )
 
+    dns_names = [x509.DNSName(hostname), x509.DNSName("localhost")]
+    for h in extra_hostnames:
+        dns_names.append(x509.DNSName(h))
+
     san = x509.SubjectAlternativeName(
-        [
-            x509.DNSName(hostname),
-            x509.DNSName("localhost"),
-            x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
-        ]
+        dns_names + [x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))]
     )
 
     now = datetime.datetime.utcnow()
