@@ -1,12 +1,16 @@
 """Tenant settings management endpoints."""
 from __future__ import annotations
 
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Literal, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from .. import acme as acme_manager
 from .. import auth, store
+from ..config import get_settings
 from ..crypto import decrypt_dict, encrypt_dict
 from ..data_models import Island, ProcessingMode, Tenant, User
 
@@ -70,6 +74,25 @@ def _require_tenant_admin(tenant_id: str, user: User) -> User:
     if user.get_role(tenant_id) != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
     return user
+
+
+def _require_any_admin(user: User) -> User:
+    if user.is_superadmin or any(role.get("role") == "admin" for role in user.tenant_roles):
+        return user
+    raise HTTPException(status_code=403, detail="Admin role required")
+
+
+def _masked_dns_credentials(credentials: dict[str, Any]) -> dict[str, str]:
+    return {key: ("***" if value else "") for key, value in (credentials or {}).items()}
+
+
+def _merge_dns_credentials(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if value in (None, "", "***"):
+            continue
+        merged[key] = value
+    return merged
 
 
 def _serialize_processing_summary(tenant: Tenant) -> dict[str, Any]:
@@ -242,3 +265,43 @@ def get_processing_summary(tenant_id: str, current_user: User = Depends(auth.get
     auth.require_tenant_access(tenant_id, current_user)
     tenant = _get_tenant(tenant_id)
     return _serialize_processing_summary(tenant)
+
+
+@router.get("/settings/acme")
+def get_acme_settings(current_user: User = Depends(auth.get_current_user)):
+    _require_any_admin(current_user)
+    cfg = acme_manager.load_acme_config()
+    data = asdict(cfg)
+    data["dns_credentials"] = _masked_dns_credentials(cfg.dns_credentials)
+    data["cert_info"] = acme_manager.get_cert_info()
+    return data
+
+
+@router.post("/settings/acme")
+def save_acme_settings(payload: dict[str, Any], current_user: User = Depends(auth.get_current_user)):
+    _require_any_admin(current_user)
+    existing = acme_manager.load_acme_config()
+    cfg = acme_manager.AcmeConfig(
+        enabled=bool(payload.get("enabled", existing.enabled)),
+        domain=str(payload.get("domain", existing.domain) or "").strip(),
+        email=str(payload.get("email", existing.email) or "").strip(),
+        challenge=str(payload.get("challenge", existing.challenge) or existing.challenge),
+        ca=str(payload.get("ca", existing.ca) or existing.ca),
+        dns_provider=str(payload.get("dns_provider", existing.dns_provider) or "").strip(),
+        dns_credentials=_merge_dns_credentials(existing.dns_credentials, payload.get("dns_credentials") or {}),
+        last_renewed=existing.last_renewed,
+        last_error=existing.last_error,
+        cert_expiry=existing.cert_expiry,
+    )
+    acme_manager.save_acme_config(cfg)
+    data = asdict(cfg)
+    data["dns_credentials"] = _masked_dns_credentials(cfg.dns_credentials)
+    data["cert_info"] = acme_manager.get_cert_info()
+    return data
+
+
+@router.post("/settings/acme/request")
+async def request_acme_certificate(current_user: User = Depends(auth.get_current_user)):
+    _require_any_admin(current_user)
+    cfg = acme_manager.load_acme_config()
+    return await acme_manager.request_certificate(cfg, Path(get_settings().data_dir))

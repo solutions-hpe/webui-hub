@@ -6,8 +6,8 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import store
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(tasks.aruba_poller()),
         asyncio.create_task(tasks.check_state_engine()),
         asyncio.create_task(tasks.maintenance_loop()),
+        asyncio.create_task(tasks.acme_renewal_check()),
     ]
     try:
         yield
@@ -49,6 +50,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hub — Client-Sim Central Platform", lifespan=lifespan)
+_acme_challenges: dict[str, str] = {}
+
+
+@app.get("/.well-known/acme-challenge/{token}", include_in_schema=False)
+async def acme_http_challenge(token: str):
+    key_authorization = _acme_challenges.get(token)
+    if not key_authorization:
+        raise HTTPException(status_code=404)
+    return PlainTextResponse(key_authorization)
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 

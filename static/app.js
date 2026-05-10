@@ -761,7 +761,7 @@ async function loadSettings() {
   $("#api-inbox-url") && ($("#api-inbox-url").textContent = `GET ${apiBase}/inbox`);
   $("#api-ack-url") && ($("#api-ack-url").textContent = `POST ${apiBase}/ack`);
   const disabled = !canManageTenant();
-  ["aruba-save-btn", "notif-save-btn"].forEach(id => { const btn = document.getElementById(id); if (btn) btn.disabled = disabled; });
+  ["aruba-save-btn", "notif-save-btn", "acme-request-btn"].forEach(id => { const btn = document.getElementById(id); if (btn) btn.disabled = disabled; });
   const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/settings`);
   if (!res || !res.ok) return;
   const data = await res.json();
@@ -777,6 +777,7 @@ async function loadSettings() {
   $("#notif-smtp-port") && ($("#notif-smtp-port").value = notifications.smtp_port || 587);
   $("#notif-smtp-user") && ($("#notif-smtp-user").value = notifications.smtp_user || "");
   $("#notif-to-emails") && ($("#notif-to-emails").value = (notifications.to_emails || []).join(", "));
+  await loadAcmeSettings();
 }
 
 async function savePassword() {
@@ -855,6 +856,109 @@ function showKeyBanner(apiKey, islandId) {
   banner.classList.remove("hidden");
   $("#sa-key-dismiss")?.addEventListener("click", () => banner.classList.add("hidden"), { once: true });
 }
+
+
+
+function acmeBadgeClass(daysRemaining) {
+  if (typeof daysRemaining !== "number" || Number.isNaN(daysRemaining)) return "badge-grey";
+  if (daysRemaining > 30) return "badge-green";
+  if (daysRemaining >= 10) return "badge-yellow";
+  return "badge-red";
+}
+
+function toggleAcmeDnsSection() {
+  const challenge = $("#acme-challenge")?.value || "http-01";
+  $("#acme-dns-section")?.classList.toggle("hidden", challenge !== "dns-01");
+}
+
+function renderAcmeStatus(certInfo = {}, cfg = {}) {
+  const container = $("#acme-cert-status");
+  if (!container) return;
+  if (!certInfo || certInfo.source === "none") {
+    container.innerHTML = `
+      <div class="setup-status-item"><span class="setup-status-label">Certificate</span><span class="setup-status-value">Not configured</span></div>
+      <div class="setup-status-item"><span class="setup-status-label">Challenge</span><span class="setup-status-value">${escHtml(cfg.challenge || "http-01")}</span></div>
+      <div class="setup-status-item"><span class="setup-status-label">Authority</span><span class="setup-status-value">${escHtml(cfg.ca || "letsencrypt")}</span></div>
+      <div class="setup-status-item"><span class="setup-status-label">Last Error</span><span class="setup-status-value muted">${escHtml(cfg.last_error || "—")}</span></div>
+    `;
+    return;
+  }
+  const days = Number(certInfo.days_remaining ?? 0);
+  container.innerHTML = `
+    <div class="setup-status-item"><span class="setup-status-label">Domain</span><span class="setup-status-value">${escHtml(certInfo.domain || cfg.domain || "—")}</span></div>
+    <div class="setup-status-item"><span class="setup-status-label">Expires</span><span class="setup-status-value">${escHtml(certInfo.expires || "—")} <span class="badge ${acmeBadgeClass(days)}">${Number.isFinite(days) ? `${days} days` : "unknown"}</span></span></div>
+    <div class="setup-status-item"><span class="setup-status-label">Issuer</span><span class="setup-status-value">${escHtml(certInfo.issuer || "—")}</span></div>
+    <div class="setup-status-item"><span class="setup-status-label">Source</span><span class="setup-status-value">${escHtml(certInfo.source || "—")}</span></div>
+  `;
+}
+
+async function loadAcmeSettings() {
+  const res = await apiFetch("/api/settings/acme");
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  $("#acme-domain") && ($("#acme-domain").value = data.domain || "");
+  $("#acme-email") && ($("#acme-email").value = data.email || "");
+  $("#acme-ca") && ($("#acme-ca").value = data.ca || "letsencrypt");
+  $("#acme-challenge") && ($("#acme-challenge").value = data.challenge || "http-01");
+  $("#acme-dns-provider") && ($("#acme-dns-provider").value = data.dns_provider || "cloudflare");
+  $("#acme-enabled") && ($("#acme-enabled").checked = Boolean(data.enabled));
+  $("#acme-cf-token") && ($("#acme-cf-token").value = "");
+  toggleAcmeDnsSection();
+  renderAcmeStatus(data.cert_info || {}, data);
+}
+
+async function saveAcmeConfig() {
+  const payload = {
+    enabled: Boolean($("#acme-enabled")?.checked),
+    domain: $("#acme-domain")?.value.trim() || "",
+    email: $("#acme-email")?.value.trim() || "",
+    ca: $("#acme-ca")?.value || "letsencrypt",
+    challenge: $("#acme-challenge")?.value || "http-01",
+    dns_provider: $("#acme-dns-provider")?.value || "",
+    dns_credentials: {
+      cf_api_token: $("#acme-cf-token")?.value || "",
+    },
+  };
+  const res = await apiFetch("/api/settings/acme", { method: "POST", body: payload });
+  if (!res || !res.ok) {
+    const err = await readJson(res);
+    setFormMessage("acme-msg", err?.detail || "Unable to save ACME settings.", false);
+    return;
+  }
+  const data = await res.json();
+  setFormMessage("acme-msg", "TLS certificate settings saved.", true);
+  renderAcmeStatus(data.cert_info || {}, data);
+  $("#acme-cf-token") && ($("#acme-cf-token").value = "");
+}
+
+async function requestAcmeCert() {
+  const button = $("#acme-request-btn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Requesting certificate…";
+  }
+  setFormMessage("acme-msg", "Requesting certificate… (this may take 60-90 seconds)", true);
+  try {
+    const res = await apiFetch("/api/settings/acme/request", { method: "POST" });
+    const data = await readJson(res);
+    if (!res || !res.ok || !data?.success) {
+      setFormMessage("acme-msg", data?.error || data?.detail || "Certificate request failed.", false);
+      return;
+    }
+    setFormMessage("acme-msg", `Certificate issued for ${data.domain} — expires ${data.expires || "unknown"}.`, true);
+    await loadAcmeSettings();
+  } catch (error) {
+    setFormMessage("acme-msg", error.message || "Certificate request failed.", false);
+  } finally {
+    if (button) {
+      button.disabled = !canManageTenant();
+      button.textContent = "Request Certificate Now";
+    }
+  }
+}
+
+window.saveAcmeConfig = saveAcmeConfig;
+window.requestAcmeCert = requestAcmeCert;
 
 async function loadSuperadmin() {
   if (!currentUser?.is_superadmin) return;
@@ -1117,6 +1221,9 @@ function connectWebSocket() {
       updateGkillBadge(data.value);
     } else if (data.type === "notification") {
       showToast(data.message, data.level === "warning" ? "warn" : "ok");
+    } else if (data.type === "cert_renewed") {
+      showToast(`TLS certificate renewed — expires ${data.expires || "unknown"}`, "ok");
+      if (activeTab === "settings") loadAcmeSettings();
     } else if (data.type === "task_result") {
       showToast(`Island ${data.island_id}: ${data.task_type} ${data.status}`, data.status === "success" ? "ok" : "err");
       if (activeIslandModal && data.island_id === activeIslandModal.island.id) {
@@ -1148,7 +1255,7 @@ function bindEvents() {
     if (setupButton) {
       const subtab = setupButton.dataset.subtab;
       $$(".settings-subtab").forEach(button => button.classList.toggle("active", button.dataset.subtab === subtab));
-      ["settings-account", "settings-aruba", "settings-notifications", "settings-api"].forEach(panelId => {
+      ["settings-account", "settings-aruba", "settings-notifications", "settings-api", "settings-tls"].forEach(panelId => {
         document.getElementById(panelId)?.classList.toggle("hidden", panelId !== subtab);
       });
       return;
@@ -1223,3 +1330,5 @@ function bindEvents() {
   if (currentUser && currentTenantId) await ensureIslands(true);
   await loadDashboard();
 })();
+
+document.getElementById("acme-challenge")?.addEventListener("change", toggleAcmeDnsSection);

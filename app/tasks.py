@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,6 +24,7 @@ from . import store
 from .aruba import ArubaClient
 from .crypto import decrypt_dict
 from .data_models import AuditEntry, Command
+from .config import get_settings
 from .notifications import get_notification_config
 from .ws import ws_broadcast
 
@@ -399,6 +401,25 @@ async def maintenance_loop() -> None:
                 logger.info("Maintenance: purged %s expired commands, %s old audit entries", purged_cmds, purged_audit)
         except Exception as exc:
             logger.warning("Maintenance error: %s", exc)
+
+
+async def acme_renewal_check() -> None:
+    """Check ACME certificates on startup and every 24 hours thereafter."""
+    settings = get_settings()
+    from .acme import get_cert_info, renew_if_needed
+
+    while True:
+        try:
+            renewed = await renew_if_needed(Path(settings.data_dir))
+            if renewed:
+                cert_info = get_cert_info()
+                logger.info("ACME certificate renewed; expires %s", cert_info.get("expires", ""))
+                await ws_broadcast({"type": "cert_renewed", "expires": cert_info.get("expires", "")})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("ACME renewal check error: %s", exc)
+        await asyncio.sleep(86400)
 
 
 async def check_state_engine() -> None:

@@ -6,3 +6,5 @@ passlib[bcrypt]>=1.7
 pydantic-settings>=2.0
 httpx>=0.27
 python-multipart>=0.0.9
+acme>=2.7.0
+josepy>=1.13.0

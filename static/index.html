@@ -136,6 +136,7 @@
       <button class="setup-subtab settings-subtab" data-subtab="settings-aruba" type="button">Aruba Central</button>
       <button class="setup-subtab settings-subtab" data-subtab="settings-notifications" type="button">Notifications</button>
       <button class="setup-subtab settings-subtab" data-subtab="settings-api" type="button">API Info</button>
+      <button class="setup-subtab settings-subtab" data-subtab="settings-tls" type="button">TLS Certificate</button>
     </nav>
 
     <div id="settings-account" class="setup-subpanel" style="margin-top:16px;">
@@ -201,6 +202,67 @@
           <div class="setup-status-item"><span class="setup-status-label">Telemetry</span><span class="setup-status-value" id="api-telemetry-url">—</span></div>
           <div class="setup-status-item"><span class="setup-status-label">Inbox</span><span class="setup-status-value" id="api-inbox-url">—</span></div>
           <div class="setup-status-item"><span class="setup-status-label">Ack</span><span class="setup-status-value" id="api-ack-url">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-tls" class="setup-subpanel hidden" style="margin-top:16px;">
+      <div class="setup-card" id="settings-tls-card" style="max-width:700px;">
+        <div class="setup-card-header">
+          <h2>TLS Certificate</h2>
+          <p>Configure automatic certificate management via ACME (Let's Encrypt / ZeroSSL).</p>
+        </div>
+        <div id="acme-cert-status" class="setup-status-grid"></div>
+        <div class="setup-form" style="margin-top:16px;">
+          <div class="form-group">
+            <label class="form-label">Domain</label>
+            <input id="acme-domain" type="text" class="form-input" placeholder="hub.example.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Contact Email</label>
+            <input id="acme-email" type="email" class="form-input" placeholder="admin@example.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Certificate Authority</label>
+            <select id="acme-ca" class="form-input">
+              <option value="letsencrypt">Let's Encrypt (Production)</option>
+              <option value="letsencrypt_staging">Let's Encrypt (Staging)</option>
+              <option value="zerossl">ZeroSSL</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Challenge Type</label>
+            <select id="acme-challenge" class="form-input">
+              <option value="http-01">HTTP-01 (port 80 must be open)</option>
+              <option value="dns-01">DNS-01 (requires DNS provider)</option>
+            </select>
+          </div>
+          <div id="acme-dns-section" class="hidden">
+            <div class="form-group">
+              <label class="form-label">DNS Provider</label>
+              <select id="acme-dns-provider" class="form-input">
+                <option value="cloudflare">Cloudflare</option>
+                <option value="azure_dns">Azure DNS (coming soon)</option>
+                <option value="route53">AWS Route53 (coming soon)</option>
+              </select>
+            </div>
+            <div id="acme-cloudflare-fields">
+              <div class="form-group">
+                <label class="form-label">Cloudflare API Token</label>
+                <input id="acme-cf-token" type="password" class="form-input" placeholder="Leave blank to keep existing">
+              </div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input id="acme-enabled" type="checkbox"> Enable automatic renewal
+            </label>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:12px;">
+            <button class="btn btn-primary" onclick="saveAcmeConfig()">Save</button>
+            <button class="btn btn-secondary" onclick="requestAcmeCert()" id="acme-request-btn">Request Certificate Now</button>
+          </div>
+          <p id="acme-msg" class="form-msg"></p>
         </div>
       </div>
     </div>
