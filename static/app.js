@@ -1079,7 +1079,7 @@ async function loadGkillState() {
   if (!res || !res.ok) return;
   const data = await res.json();
   $("#sa-gkill-value") && ($("#sa-gkill-value").textContent = String(data.value || "—"));
-  $("#sa-gkill-fetched") && ($("#sa-gkill-fetched").textContent = data.last_fetched ? fmtDate(new Date(data.last_fetched * 1000).toISOString()) : "—"));
+  $("#sa-gkill-fetched") && ($("#sa-gkill-fetched").textContent = data.last_fetched ? fmtDate(new Date(data.last_fetched * 1000).toISOString()) : "—");
   $("#sa-gkill-error") && ($("#sa-gkill-error").textContent = data.error || "—");
   updateGkillBadge(data.value);
 }
