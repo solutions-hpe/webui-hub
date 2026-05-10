@@ -21,12 +21,6 @@
           Client Simulator
         </h1>
       </div>
-      <div class="topbar-center">
-        <div id="tenant-selector" class="tenant-selector hidden">
-          <label for="tenant-select">Tenant:</label>
-          <select id="tenant-select" class="form-input form-input-sm"></select>
-        </div>
-      </div>
       <div class="topbar-right">
         <span id="build-version" class="build-version" title="Build version"></span>
         <div id="api-status" class="ws-status">
@@ -48,6 +42,10 @@
           <span id="auto-refresh-countdown" class="auto-refresh-countdown">10s</span>
         </div>
         <div id="gkill-badge" class="gkill-badge hidden" title="Global Kill Switch is ON">⚠ GKILL ON</div>
+        <div id="tenant-selector" class="tenant-selector hidden">
+          <label for="tenant-select" class="tenant-selector-label">Tenant:</label>
+          <select id="tenant-select" class="form-input form-input-sm tenant-selector-select"></select>
+        </div>
         <div id="topbar-user" class="topbar-user hidden">
           <span>👤</span>
           <span id="topbar-username" class="topbar-username"></span>
