@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import store
@@ -94,6 +94,9 @@ def health():
     return {"status": "ok", "version": app_version, "branch": branch, "sha": sha}
 
 
-@app.get("/{full_path:path}")
+@app.get("/{full_path:path}", response_class=HTMLResponse)
 async def spa_fallback(full_path: str):
-    return FileResponse(STATIC_DIR / "index.html")
+    index = STATIC_DIR / "index.html"
+    html = index.read_text()
+    html = html.replace("{{WEBUI_MODE}}", "hub")
+    return HTMLResponse(content=html)
