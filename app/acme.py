@@ -12,7 +12,13 @@ Challenge types:
   http-01  — Hub temporarily serves challenge tokens at /.well-known/acme-challenge/
               via an in-process asyncio HTTP server on port 80.
   dns-01   — Hub calls DNS provider API to create TXT record.
-              Supported: cloudflare (full), azure_dns (stub), route53 (stub).
+              Supported: cloudflare (full), hurricane_electric (full),
+              azure_dns (stub), route53 (stub).
+
+Hurricane Electric DNS setup:
+  1. In dns.he.net, create a TXT record for _acme-challenge.<domain>
+  2. Enable DDNS on that record and note the generated DDNS key
+  3. Enter the DDNS key as the credential — the hostname is derived automatically
 """
 from __future__ import annotations
 
@@ -41,6 +47,7 @@ _CA_DIRECTORY = {
     "zerossl": "https://acme.zerossl.com/v2/DV90",
 }
 _cloudflare_records: dict[tuple[str, str], tuple[str, str, dict[str, str]]] = {}
+_he_records: dict[tuple[str, str], str] = {}  # (domain, txt_record) → acme-challenge hostname
 
 
 @dataclass
@@ -278,6 +285,52 @@ async def _cleanup_cloudflare_record(domain: str, txt_record: str) -> None:
             )
 
 
+async def _dns01_hurricane_electric(domain: str, txt_record: str, credentials: dict) -> None:
+    """Set _acme-challenge TXT record via Hurricane Electric DDNS API.
+
+    Prerequisites (one-time setup in dns.he.net):
+      1. Create a TXT record named _acme-challenge.<domain>
+      2. Enable DDNS on that record — HE generates a DDNS key
+      3. Supply that key as ``he_ddns_key`` in credentials
+    """
+    import httpx
+
+    ddns_key = (credentials or {}).get("he_ddns_key", "").strip()
+    if not ddns_key:
+        raise ValueError("Hurricane Electric DNS requires he_ddns_key credential")
+
+    challenge_hostname = f"_acme-challenge.{domain}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            "https://dyn.dns.he.net/nic/update",
+            data={"hostname": challenge_hostname, "password": ddns_key, "txt": txt_record},
+        )
+        body = response.text.strip()
+        if response.status_code not in (200, 204) or body.startswith("badauth"):
+            raise ValueError(f"HE DNS update failed ({response.status_code}): {body}")
+        if not (body.startswith("good") or body.startswith("nochg")):
+            raise ValueError(f"HE DNS unexpected response: {body}")
+
+    _he_records[(domain, txt_record)] = challenge_hostname
+    # Allow time for DNS propagation before CA checks
+    await asyncio.sleep(15)
+
+
+async def _cleanup_he_record(domain: str, txt_record: str, ddns_key: str = "") -> None:
+    """Clear the _acme-challenge TXT record after validation."""
+    import httpx
+
+    entry = _he_records.pop((domain, txt_record), None)
+    if not entry or not ddns_key:
+        return
+    async with httpx.AsyncClient(timeout=20) as client:
+        with contextlib.suppress(Exception):
+            await client.post(
+                "https://dyn.dns.he.net/nic/update",
+                data={"hostname": entry, "password": ddns_key, "txt": ""},
+            )
+
+
 async def _dns01_azure(domain: str, txt_record: str, credentials: dict) -> None:
     logger.warning("Azure DNS provider not yet implemented")
     raise NotImplementedError("Azure DNS provider not yet implemented")
@@ -294,7 +347,7 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
     tls_dir.mkdir(parents=True, exist_ok=True)
     account_key_path = tls_dir / "acme_account.pem"
     server: asyncio.AbstractServer | None = None
-    dns_cleanup: tuple[str, str] | None = None
+    dns_cleanup: tuple[str, str, str] | None = None
     token: str | None = None
     new_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     key_pem = new_key.private_bytes(
@@ -359,7 +412,10 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
             validation = challenge_body.validation(account_key) if hasattr(challenge_body, "validation") else challenge_obj.validation(account_key)
             if cfg.dns_provider == "cloudflare":
                 await _dns01_cloudflare(authz_domain, validation, cfg.dns_credentials)
-                dns_cleanup = (authz_domain, validation)
+                dns_cleanup = (authz_domain, validation, "cloudflare")
+            elif cfg.dns_provider == "hurricane_electric":
+                await _dns01_hurricane_electric(authz_domain, validation, cfg.dns_credentials)
+                dns_cleanup = (authz_domain, validation, "hurricane_electric")
             elif cfg.dns_provider == "azure_dns":
                 await _dns01_azure(authz_domain, validation, cfg.dns_credentials)
             elif cfg.dns_provider == "route53":
@@ -398,7 +454,11 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
         if token:
             _challenge_store().pop(token, None)
         if dns_cleanup:
-            await _cleanup_cloudflare_record(*dns_cleanup)
+            domain_c, txt_c, provider_c = dns_cleanup
+            if provider_c == "hurricane_electric":
+                await _cleanup_he_record(domain_c, txt_c, (cfg.dns_credentials or {}).get("he_ddns_key", ""))
+            else:
+                await _cleanup_cloudflare_record(domain_c, txt_c)
 
 
 async def renew_if_needed(data_dir: Path) -> bool:

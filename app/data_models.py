@@ -73,6 +73,7 @@ class Island(BaseModel):
     tenant_id: str
     hostname: str
     label: str = ""
+    spoke_name: str = ""
     status: str = "pending"
     api_key_enc: Optional[str] = None
     seed_config: dict[str, Any] = Field(default_factory=dict)
@@ -89,6 +90,7 @@ class PendingIsland(BaseModel):
     id: str = Field(default_factory=_uuid)
     hostname: str
     label: str = ""
+    spoke_name: str = ""
     seed_config: dict[str, Any] = Field(default_factory=dict)
     registered_at: datetime = Field(default_factory=_now)
     last_seen: Optional[datetime] = None

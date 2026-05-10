@@ -256,6 +256,7 @@
               <label class="form-label">DNS Provider</label>
               <select id="acme-dns-provider" class="form-input">
                 <option value="cloudflare">Cloudflare</option>
+                <option value="hurricane_electric">Hurricane Electric DNS</option>
                 <option value="azure_dns">Azure DNS (coming soon)</option>
                 <option value="route53">AWS Route53 (coming soon)</option>
               </select>
@@ -264,6 +265,13 @@
               <div class="form-group">
                 <label class="form-label">Cloudflare API Token</label>
                 <input id="acme-cf-token" type="password" class="form-input" placeholder="Leave blank to keep existing">
+              </div>
+            </div>
+            <div id="acme-he-fields" class="hidden">
+              <div class="form-group">
+                <label class="form-label">HE DDNS Key</label>
+                <input id="acme-he-ddns-key" type="password" class="form-input" placeholder="Leave blank to keep existing">
+                <p class="form-hint">In dns.he.net: create a TXT record for <code>_acme-challenge.yourdomain</code>, enable DDNS on it, then paste the generated key here.</p>
               </div>
             </div>
           </div>
@@ -299,7 +307,7 @@
         </div>
         <div id="sa-key-banner" class="key-once-banner hidden"></div>
         <table class="data-table" id="sa-pending-table">
-          <thead><tr><th>Hostname</th><th>Label</th><th>Registered</th><th>Assign to Tenant</th><th></th></tr></thead>
+          <thead><tr><th>Spoke Name</th><th>Hostname</th><th>Registered</th><th>Assign to Tenant</th><th></th></tr></thead>
           <tbody id="sa-pending-tbody"></tbody>
         </table>
       </div>

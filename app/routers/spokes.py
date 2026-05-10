@@ -36,11 +36,15 @@ def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
 class RegisterPayload(BaseModel):
     hostname: str
     label: str = ""
+    spoke_name: str = ""
     config: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/islands/register", status_code=201)
 def register_spoke(payload: RegisterPayload):
+    spoke_name = payload.spoke_name.strip() or payload.hostname
+
+    # If already approved by hostname, return credentials regardless of name
     approved = store.get_approved_spoke_by_hostname(payload.hostname)
     if approved:
         tenant_id, spoke = approved
@@ -51,8 +55,36 @@ def register_spoke(payload: RegisterPayload):
             "api_key": decrypt_str(spoke.api_key_enc) if spoke.api_key_enc else "",
         }
 
+    # Check for spoke_name conflicts in approved spokes
+    name_conflict_approved = store.get_spoke_by_name(spoke_name)
+    if name_conflict_approved:
+        _, conflict_spoke = name_conflict_approved
+        if conflict_spoke.hostname != payload.hostname:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "conflict": "name_in_use",
+                    "message": f"Spoke name '{spoke_name}' is already in use by an approved spoke. Choose a different name.",
+                },
+            )
+
+    # Check for spoke_name conflicts in pending spokes
+    name_conflict_pending = store.get_pending_spoke_by_name(spoke_name)
+    if name_conflict_pending and name_conflict_pending.hostname != payload.hostname:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": "name_in_use",
+                "message": f"Spoke name '{spoke_name}' is already registered and pending approval. Choose a different name.",
+            },
+        )
+
     existing = store.get_pending_by_hostname(payload.hostname)
     if existing:
+        # Update spoke_name if it changed
+        if existing.spoke_name != spoke_name:
+            existing.spoke_name = spoke_name
+            store.save_pending_spoke(existing)
         return {
             "island_id": existing.id,
             "status": "pending",
@@ -62,9 +94,11 @@ def register_spoke(payload: RegisterPayload):
     pending = PendingIsland(
         hostname=payload.hostname,
         label=payload.label,
+        spoke_name=spoke_name,
         seed_config=payload.config,
     )
     store.save_pending_spoke(pending)
+    ws_broadcast({"type": "pending_spoke_registered", "hostname": payload.hostname, "spoke_name": spoke_name})
     return {
         "island_id": pending.id,
         "status": "pending",

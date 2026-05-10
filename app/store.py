@@ -261,7 +261,32 @@ def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Island]
     return None
 
 
-def list_spokes(tenant_id: str) -> list[Island]:
+def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Island]]:
+    """Return (tenant_id, island) for the first approved island matching spoke_name across all tenants."""
+    name = spoke_name.strip().lower()
+    if not name:
+        return None
+    with _lock:
+        for tenant in _load_tenants():
+            for spoke in _load_spokes(tenant.id):
+                if spoke.status == "approved" and spoke.spoke_name.strip().lower() == name:
+                    return tenant.id, spoke
+    return None
+
+
+def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingIsland]:
+    """Return first pending island matching spoke_name."""
+    name = spoke_name.strip().lower()
+    if not name:
+        return None
+    with _lock:
+        for p in list_pending_spokes():
+            if p.spoke_name.strip().lower() == name:
+                return p
+    return None
+
+
+
     with _lock:
         return _load_spokes(tenant_id)
 

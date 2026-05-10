@@ -884,7 +884,13 @@ function acmeBadgeClass(daysRemaining) {
 
 function toggleAcmeDnsSection() {
   const challenge = $("#acme-challenge")?.value || "http-01";
-  $("#acme-dns-section")?.classList.toggle("hidden", challenge !== "dns-01");
+  const isDns = challenge === "dns-01";
+  $("#acme-dns-section")?.classList.toggle("hidden", !isDns);
+  if (isDns) {
+    const provider = $("#acme-dns-provider")?.value || "cloudflare";
+    $("#acme-cloudflare-fields")?.classList.toggle("hidden", provider !== "cloudflare");
+    $("#acme-he-fields")?.classList.toggle("hidden", provider !== "hurricane_electric");
+  }
 }
 
 function renderAcmeStatus(certInfo = {}, cfg = {}) {
@@ -933,6 +939,7 @@ async function saveAcmeConfig() {
     dns_provider: $("#acme-dns-provider")?.value || "",
     dns_credentials: {
       cf_api_token: $("#acme-cf-token")?.value || "",
+      he_ddns_key: $("#acme-he-ddns-key")?.value || "",
     },
   };
   const res = await apiFetch("/api/settings/acme", { method: "POST", body: payload });
@@ -945,6 +952,7 @@ async function saveAcmeConfig() {
   setFormMessage("acme-msg", "TLS certificate settings saved.", true);
   renderAcmeStatus(data.cert_info || {}, data);
   $("#acme-cf-token") && ($("#acme-cf-token").value = "");
+  $("#acme-he-ddns-key") && ($("#acme-he-ddns-key").value = "");
 }
 
 async function requestAcmeCert() {
@@ -1005,8 +1013,8 @@ function renderPendingSpokes(items) {
   }
   tbody.innerHTML = items.map(item => `
     <tr>
+      <td><strong>${escHtml(item.spoke_name || item.hostname)}</strong></td>
       <td><code>${escHtml(item.hostname)}</code></td>
-      <td>${escHtml(item.label || "—")}</td>
       <td>${escHtml(fmtDate(item.registered_at))}</td>
       <td>
         <select class="form-input form-input-sm sa-tenant-assign" data-pending-id="${escHtml(item.id)}">
@@ -1385,3 +1393,4 @@ function bindEvents() {
 })();
 
 document.getElementById("acme-challenge")?.addEventListener("change", toggleAcmeDnsSection);
+document.getElementById("acme-dns-provider")?.addEventListener("change", toggleAcmeDnsSection);
