@@ -174,13 +174,13 @@ def _pending_dir() -> Path:
     return _data_dir() / "pending"
 
 
-def get_pending_spoke(spoke_id: str) -> Optional[PendingIsland]:
+def get_pending_spoke(spoke_id: str) -> Optional[PendingSpoke]:
     with _lock:
         raw = _read_json(_pending_dir() / f"{spoke_id}.json")
-        return PendingIsland(**raw) if raw else None
+        return PendingSpoke(**raw) if raw else None
 
 
-def list_pending_spokes() -> list[PendingIsland]:
+def list_pending_spokes() -> list[PendingSpoke]:
     with _lock:
         d = _pending_dir()
         if not d.exists():
@@ -189,11 +189,11 @@ def list_pending_spokes() -> list[PendingIsland]:
         for f in d.glob("*.json"):
             raw = _read_json(f)
             if raw:
-                results.append(PendingIsland(**raw))
+                results.append(PendingSpoke(**raw))
         return results
 
 
-def get_pending_by_hostname(hostname: str) -> Optional[PendingIsland]:
+def get_pending_by_hostname(hostname: str) -> Optional[PendingSpoke]:
     with _lock:
         for p in list_pending_spokes():
             if p.hostname == hostname:
@@ -201,11 +201,11 @@ def get_pending_by_hostname(hostname: str) -> Optional[PendingIsland]:
     return None
 
 
-def get_spoke_by_pending_hostname(hostname: str) -> Optional[PendingIsland]:
+def get_spoke_by_pending_hostname(hostname: str) -> Optional[PendingSpoke]:
     return get_pending_by_hostname(hostname)
 
 
-def save_pending_spoke(spoke: PendingIsland) -> None:
+def save_pending_spoke(spoke: PendingSpoke) -> None:
     with _lock:
         _write_json(_pending_dir() / f"{spoke.id}.json", spoke.model_dump(mode="json"))
 
@@ -274,7 +274,7 @@ def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Spoke]]:
     return None
 
 
-def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingIsland]:
+def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingSpoke]:
     """Return first pending spoke matching spoke_name."""
     name = spoke_name.strip().lower()
     if not name:

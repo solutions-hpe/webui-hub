@@ -46,7 +46,7 @@ class NotificationConfigRequest(BaseModel):
     enabled: bool = False
 
 
-class ApprovePendingIslandRequest(BaseModel):
+class ApprovePendingSpokeRequest(BaseModel):
     tenant_id: str
     label: Optional[str] = None
 
@@ -250,7 +250,7 @@ def list_pending_spokes(_: User = Depends(auth.require_superadmin)):
 @router.post("/superadmin/pending-spokes/{spoke_id}/approve")
 def approve_pending_spoke(
     spoke_id: str,
-    payload: ApprovePendingIslandRequest,
+    payload: ApprovePendingSpokeRequest,
     request: Request,
     _: User = Depends(auth.require_superadmin),
 ):

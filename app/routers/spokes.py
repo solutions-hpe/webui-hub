@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from .. import auth, store
 from ..crypto import decrypt_str
-from ..data_models import AuditEntry, PendingIsland
+from ..data_models import AuditEntry, PendingSpoke
 from ..ws import ws_broadcast
 
 router = APIRouter()
@@ -128,7 +128,7 @@ def register_spoke(payload: RegisterPayload, request: Request):
             "message": "Registration already pending approval.",
         }
 
-    pending = PendingIsland(
+    pending = PendingSpoke(
         hostname=payload.hostname,
         label=payload.label,
         spoke_name=spoke_name,
