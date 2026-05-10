@@ -5,7 +5,7 @@
 ![Docker](https://img.shields.io/badge/deployment-Docker%20%7C%20ACI%20%7C%20BYOD-2496ED)
 ![TLS](https://img.shields.io/badge/TLS-self--signed%20by%20default-success)
 
-Hub is the central management plane for HPE Client-Sim spoke networks. It replaces the legacy `webui` application and its PostgreSQL/SQLAlchemy stack with a FastAPI-based, multi-tenant platform that stores all operational state in JSON under `/data/`.
+Hub is the central management plane for the HPE Client-Sim hub-and-spoke platform. It replaces the legacy `webui` application and its PostgreSQL/SQLAlchemy stack with a FastAPI-based, multi-tenant backend that stores operational state in JSON under `/data/`. The browser UI is now sourced from the shared `cs-webui` repository instead of being maintained directly in `webui-hub`; Hub serves that frontend and injects `WEBUI_MODE=hub` at runtime.
 
 ## Overview
 
@@ -25,12 +25,12 @@ Hub is designed for operators who need to manage many spoke environments from on
 
 ## Architecture
 
-Hub sits in the center, with webui-spoke servers polling for work and reporting telemetry.
+Hub sits in the center of the platform, serving the shared `cs-webui` frontend in hub mode while approved spokes poll for work and report telemetry.
 
 ```text
                            +-----------------------------------+
                            |               Hub                 |
-                           | FastAPI + Static UI + JSON Store  |
+                           | FastAPI + cs-webui frontend + JSON Store |
                            | /data users, tenants, queue, audit|
                            +-----------------+-----------------+
                                              |
@@ -52,6 +52,16 @@ Hub sits in the center, with webui-spoke servers polling for work and reporting 
 ```
 
 **Target scale:** up to **420 spokes** and roughly **10,000 simulation clients** across multiple tenants.
+
+## Frontend dependency (`cs-webui`)
+
+Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webui` for the shared browser assets used by both hub and spoke deployments.
+
+- `app/main.py` serves `index.html` and replaces `{{WEBUI_MODE}}` with `hub` before returning the page.
+- `templates/index.html`, `static/app.js`, and `static/style.css` are sourced from `cs-webui`.
+- Branch alignment matters: `lrb` is the development branch and `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
+- For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
+
 
 ## Quick Start (Docker)
 
@@ -99,6 +109,7 @@ https://localhost:8443
 
 - Docker Engine with Compose support
 - A persistent Docker volume or bind mount for `/data`
+- Access to the matching `cs-webui` branch (`lrb` for development, `main` for production)
 - Secure values for `WEBUI_SECRET_KEY`, `SECRET_KEY`, and `ADMIN_PASSWORD`
 
 #### Steps
@@ -145,7 +156,7 @@ TLS_KEY_PATH=/data/tls/key.pem
 
 ### Azure Container Instance (ACI)
 
-`deploy-azure.sh` builds the image in Azure Container Registry, provisions Azure File Share storage for `/data`, and creates an Azure Container Instance.
+`deploy-azure.sh` builds the image in Azure Container Registry, provisions Azure File Share storage for `/data`, and creates an Azure Container Instance. Many local deployments use `~/Documents/deploy-hub-azure.sh` as a wrapper around the same rollout flow.
 
 #### Prerequisites
 
@@ -195,6 +206,16 @@ Resulting endpoint format:
 ```text
 https://<dns-label>.<region>.azurecontainer.io:8443
 ```
+
+### GitHub Actions image build
+
+`.github/workflows/build-push.yml` runs on pushes to `main` and `lrb`. The workflow:
+
+1. checks out `webui-hub`
+2. clones `cs-webui` from the matching branch, falling back to `main` if that branch does not exist
+3. copies `static/` and `templates/index.html` from `cs-webui` into the Docker build context
+4. builds and pushes `ghcr.io/solutions-hpe/webui-hub:latest` plus SHA-based tags
+
 
 ### BYOD Linux
 
@@ -298,7 +319,7 @@ The spoke registration flow is intentionally two-stage so a superadmin can verif
 The spoke POSTs to:
 
 ```text
-POST /api/islands/register
+POST /api/spokes/register
 ```
 
 Example payload:
@@ -318,20 +339,20 @@ Response:
 
 - `201 Created`
 - Status is `pending`
-- Hub stores the registration in `/data/pending/<island_id>.json`
+- Hub stores the registration in `/data/pending/<spoke_id>.json`
 
 ### Step 2 — superadmin approves and assigns a tenant
 
 The superadmin reviews:
 
 ```text
-GET /api/superadmin/pending-islands
+GET /api/superadmin/pending-spokes
 ```
 
 Then approves:
 
 ```text
-POST /api/superadmin/pending-islands/{island_id}/approve
+POST /api/superadmin/pending-spokes/{spoke_id}/approve
 ```
 
 With a body like:
@@ -349,7 +370,7 @@ Approval performs four actions:
 2. Generates a new API key and stores it encrypted at rest
 3. Deletes the pending registration file
 4. Queues a `config_update` command containing:
-   - `relay_island_id`
+   - `relay_spoke_id`
    - `relay_api_key`
    - `relay_tenant_id`
    - `relay_server_url`
@@ -359,7 +380,7 @@ Approval performs four actions:
 The spoke polls its tenant-scoped inbox using the new route pattern:
 
 ```text
-GET /api/{tenant_id}/islands/{island_id}/inbox
+GET /api/{tenant_id}/spokes/{spoke_id}/inbox
 ```
 
 Hub returns queued commands, including the one-time registration payload with the API key. The spoke must persist those relay settings locally for all future telemetry, inbox, and ack calls.
@@ -379,32 +400,32 @@ Hub returns queued commands, including the one-time registration payload with th
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `POST` | `/api/islands/register` | None | Register a spoke and create a pending spoke record |
-| `POST` | `/api/{tenant_id}/islands/{island_id}/telemetry` | `X-API-Key` | Push telemetry and heartbeat data |
-| `GET` | `/api/{tenant_id}/islands/{island_id}/inbox` | `X-API-Key` | Pull queued commands and config updates |
-| `POST` | `/api/{tenant_id}/islands/{island_id}/ack` | `X-API-Key` | Acknowledge command execution and optionally report task results |
+| `POST` | `/api/spokes/register` | None | Register a spoke and create a pending spoke record |
+| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/telemetry` | `X-API-Key` | Push telemetry and heartbeat data |
+| `GET` | `/api/{tenant_id}/spokes/{spoke_id}/inbox` | `X-API-Key` | Pull queued commands and config updates |
+| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/ack` | `X-API-Key` | Acknowledge command execution and optionally report task results |
 
 ### Tenant-scoped management (JWT)
 
 | Category | Method | Path | Role |
 |---|---|---|---|
-| Spokes | `GET` | `/api/{tenant_id}/islands` | superadmin, admin, operator |
-| Spoke detail | `GET` | `/api/{tenant_id}/islands/{island_id}` | superadmin, admin, operator |
-| Spoke revoke | `POST` | `/api/{tenant_id}/islands/{island_id}/revoke` | superadmin, admin |
-| Spoke delete | `DELETE` | `/api/{tenant_id}/islands/{island_id}` | superadmin, admin |
-| Spoke config | `PATCH` | `/api/{tenant_id}/islands/{island_id}/config` | superadmin, admin |
-| Spoke label | `PATCH` | `/api/{tenant_id}/islands/{island_id}/label` | superadmin, admin |
+| Spokes | `GET` | `/api/{tenant_id}/spokes` | superadmin, admin, operator |
+| Spoke detail | `GET` | `/api/{tenant_id}/spokes/{spoke_id}` | superadmin, admin, operator |
+| Spoke revoke | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/revoke` | superadmin, admin |
+| Spoke delete | `DELETE` | `/api/{tenant_id}/spokes/{spoke_id}` | superadmin, admin |
+| Spoke config | `PATCH` | `/api/{tenant_id}/spokes/{spoke_id}/config` | superadmin, admin |
+| Spoke label | `PATCH` | `/api/{tenant_id}/spokes/{spoke_id}/label` | superadmin, admin |
 | Commands | `POST` | `/api/commands` | superadmin, admin, operator with tenant access |
 | Commands list | `GET` | `/api/{tenant_id}/commands` | superadmin, admin, operator |
-| Repo sync | `POST` | `/api/{tenant_id}/islands/{island_id}/repo-sync` | superadmin, admin, operator |
+| Repo sync | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/repo-sync` | superadmin, admin, operator |
 | Settings | `GET` | `/api/{tenant_id}/settings` | superadmin, admin |
 | Aruba settings | `POST` | `/api/{tenant_id}/settings/aruba` | superadmin, admin |
 | Notification settings | `POST` | `/api/{tenant_id}/settings/notifications` | superadmin, admin |
 | Processing mode | `GET` | `/api/{tenant_id}/settings/processing-mode` | superadmin, admin |
 | Processing mode | `POST` | `/api/{tenant_id}/settings/processing-mode` | superadmin, admin |
-| Per-spoke processing mode | `PATCH` | `/api/{tenant_id}/islands/{island_id}/processing-mode` | superadmin, admin |
+| Per-spoke processing mode | `PATCH` | `/api/{tenant_id}/spokes/{spoke_id}/processing-mode` | superadmin, admin |
 | Processing summary | `GET` | `/api/{tenant_id}/processing-summary` | superadmin, admin, operator |
-| Audit | `GET` | `/api/{tenant_id}/islands/{island_id}/audit` | superadmin, admin, operator |
+| Audit | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/audit` | superadmin, admin, operator |
 
 ### Superadmin (JWT + superadmin role)
 
@@ -417,9 +438,9 @@ Hub returns queued commands, including the one-time registration payload with th
 | Aruba config | `POST` | `/api/superadmin/tenants/{tenant_id}/aruba` | Save Aruba config |
 | Aruba discovery | `POST` | `/api/superadmin/aruba/discover-tenants` | Discover Aruba MSP customer tenants |
 | Notifications | `POST` | `/api/superadmin/tenants/{tenant_id}/notification-config` | Save notification config |
-| Pending spokes | `GET` | `/api/superadmin/pending-islands` | Review waiting spoke registrations |
-| Approve spoke | `POST` | `/api/superadmin/pending-islands/{island_id}/approve` | Approve + assign tenant |
-| Delete pending spoke | `DELETE` | `/api/superadmin/pending-islands/{island_id}` | Reject registration |
+| Pending spokes | `GET` | `/api/superadmin/pending-spokes` | Review waiting spoke registrations |
+| Approve spoke | `POST` | `/api/superadmin/pending-spokes/{spoke_id}/approve` | Approve + assign tenant |
+| Delete pending spoke | `DELETE` | `/api/superadmin/pending-spokes/{spoke_id}` | Reject registration |
 | Users | `GET` | `/api/superadmin/users` | List all users |
 | Users | `POST` | `/api/superadmin/users` | Create user |
 | Users | `DELETE` | `/api/superadmin/users/{user_id}` | Delete user |
@@ -464,7 +485,7 @@ If a feature override is not set, Hub falls back to the spoke's `global_mode`.
 
 1. Admin updates tenant or spoke config in Hub.
 2. Hub stores the new JSON payload under `/data`.
-3. Hub queues a command in `/data/{tenant_id}/queue/{island_id}.json`.
+3. Hub queues a command in `/data/{tenant_id}/queue/{spoke_id}.json`.
 4. The spoke polls `/inbox`, receives the command, applies it, and POSTs `/ack`.
 5. Hub records the result in the queue and optionally appends an audit entry.
 
@@ -539,11 +560,11 @@ All persistent state lives under `DATA_DIR`.
 │   ├── cert.pem
 │   └── key.pem
 └── <tenant_id>/
-    ├── islands.json
+    ├── spokes.json
     ├── queue/
-    │   └── <island_id>.json
+    │   └── <spoke_id>.json
     └── audit/
-        └── <island_id>.json
+        └── <spoke_id>.json
 ```
 
 ### What each file stores
@@ -553,7 +574,7 @@ All persistent state lives under `DATA_DIR`.
 | `/data/users.json` | All Hub user accounts, bcrypt password hashes, superadmin flag, and tenant role assignments |
 | `/data/tenants.json` | Tenant metadata plus encrypted Aruba and notification settings |
 | `/data/pending/*.json` | Spoke registrations waiting for superadmin approval |
-| `/data/{tenant_id}/islands.json` | Approved spokes, labels, runtime config, processing mode, telemetry, last seen timestamps |
+| `/data/{tenant_id}/spokes.json` | Approved spokes, labels, runtime config, processing mode, telemetry, last seen timestamps |
 | `/data/{tenant_id}/queue/*.json` | Pending, delivered, and executed commands with 24-hour TTL |
 | `/data/{tenant_id}/audit/*.json` | Rolling 7-day task and action history per spoke |
 | `/data/tls/*` | Generated self-signed cert and key unless overridden |
@@ -574,11 +595,11 @@ All persistent state lives under `DATA_DIR`.
 The `client-sim/webui-spoke/server.py` integration work for Hub is complete. The five spoke behaviors below have been implemented and are kept here as a reference.
 
 1. **Implemented: use the new registration flow**
-   - POST `hostname`, `label`, and `config` to `/api/islands/register`.
+   - POST `hostname`, `label`, and `config` to `/api/spokes/register`.
 2. **Implemented: persist relay credentials from the approval command**
-   - Read `relay_tenant_id`, `relay_island_id`, `relay_api_key`, and `relay_server_url` from the first `config_update` message.
+   - Read `relay_tenant_id`, `relay_spoke_id`, `relay_api_key`, and `relay_server_url` from the first `config_update` message.
 3. **Implemented: move all relay traffic to tenant-scoped routes**
-   - Use `/api/{tenant_id}/islands/{island_id}/telemetry`, `/inbox`, and `/ack` with `X-API-Key`.
+   - Use `/api/{tenant_id}/spokes/{spoke_id}/telemetry`, `/inbox`, and `/ack` with `X-API-Key`.
 4. **Implemented: handle Hub-driven command types**
    - Support `config_update`, `aruba_config_update`, `notification_push`, `gkill_update`, `reclone_schedule`, `repo_sync`, and `auto_recovery` as inbox items.
 5. **Implemented: send richer ACK payloads back to Hub**
