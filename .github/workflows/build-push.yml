@@ -53,7 +53,37 @@ jobs:
           VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
           echo "✅ Pushed version ${VERSION}:"
           echo "   ghcr.io/${{ github.repository }}:latest"
-          echo ""
-          echo "Deploy from Azure Portal → Container Instances → Create"
-          echo "Image source: Other registry"
-          echo "Image:  ghcr.io/${{ github.repository }}:latest"
+
+  cleanup-old-runs:
+    name: Delete old workflow runs
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Delete old runs (keep last 5)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRuns,
+              {
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                workflow_id: 'build-push.yml',
+                per_page: 100,
+              }
+            );
+            const completed = runs.filter(r => r.status === 'completed');
+            const toDelete  = completed.slice(5);   // keep 5 most recent
+            for (const run of toDelete) {
+              await github.rest.actions.deleteWorkflowRun({
+                owner:  context.repo.owner,
+                repo:   context.repo.repo,
+                run_id: run.id,
+              });
+              console.log(`Deleted run #${run.run_number} (${run.id})`);
+            }
+            console.log(`Kept ${Math.min(completed.length, 5)}, deleted ${toDelete.length}`);
+
