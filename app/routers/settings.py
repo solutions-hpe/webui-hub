@@ -180,6 +180,12 @@ def _processing_mode_from_payload(payload: ProcessingModeUpdateRequest) -> Proce
     return ProcessingMode(**payload.model_dump())
 
 
+@router.get("/acme/status")
+def get_acme_status(current_user: User = Depends(auth.get_current_user)):
+    _require_any_admin(current_user)
+    return acme_manager.get_acme_status()
+
+
 @router.get("/{tenant_id}/settings")
 def get_tenant_settings(tenant_id: str, current_user: User = Depends(auth.get_current_user)):
     _require_tenant_admin(tenant_id, current_user)
@@ -292,6 +298,8 @@ def save_acme_settings(payload: dict[str, Any], current_user: User = Depends(aut
         last_renewed=existing.last_renewed,
         last_error=existing.last_error,
         cert_expiry=existing.cert_expiry,
+        last_log=existing.last_log,
+        last_log_at=existing.last_log_at,
     )
     acme_manager.save_acme_config(cfg)
     data = asdict(cfg)

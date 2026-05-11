@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -48,6 +49,66 @@ _CA_DIRECTORY = {
 }
 _cloudflare_records: dict[tuple[str, str], tuple[str, str, dict[str, str]]] = {}
 _he_records: dict[tuple[str, str], str] = {}  # (domain, txt_record) → acme-challenge hostname
+_acme_status: dict[str, Any] = {
+    "running": False,
+    "status": "idle",
+    "last_result": None,
+    "last_error": None,
+    "last_log": "",
+    "last_log_at": "",
+}
+
+
+class AcmeLogCapture:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def append(self, message: str) -> None:
+        line = f"[{_iso(_utcnow())}] {message}"
+        self.lines.append(line)
+        _set_acme_status(last_log=self.text(), last_log_at=_iso(_utcnow()))
+
+    def append_exception(self, exc: Exception) -> None:
+        self.append(f"ERROR: {exc}")
+        details = traceback.format_exc().strip()
+        if details and details != "NoneType: None":
+            self.append("Traceback:")
+            self.lines.extend(details.splitlines())
+            _set_acme_status(last_log=self.text(), last_log_at=_iso(_utcnow()))
+
+    def text(self) -> str:
+        return "\n".join(self.lines).strip()
+
+
+def _set_acme_status(**updates: Any) -> None:
+    _acme_status.update(updates)
+
+
+def _derive_status(current: dict[str, Any], cfg: AcmeConfig | None = None) -> str:
+    if current.get("running"):
+        return "running"
+    result = current.get("last_result")
+    if isinstance(result, dict):
+        if result.get("success") is True:
+            return "success"
+        if result.get("success") is False:
+            return "failed"
+    if current.get("last_error") or (cfg and cfg.last_error):
+        return "error"
+    return "idle"
+
+
+def get_acme_status() -> dict[str, Any]:
+    cfg = load_acme_config()
+    status = dict(_acme_status)
+    if not status.get("last_log"):
+        status["last_log"] = cfg.last_log
+    if not status.get("last_log_at"):
+        status["last_log_at"] = cfg.last_log_at
+    if not status.get("last_error"):
+        status["last_error"] = cfg.last_error or None
+    status["status"] = _derive_status(status, cfg)
+    return status
 
 
 @dataclass
@@ -62,6 +123,8 @@ class AcmeConfig:
     last_renewed: str = ""
     last_error: str = ""
     cert_expiry: str = ""
+    last_log: str = ""
+    last_log_at: str = ""
 
 
 def _utcnow() -> datetime:
@@ -225,7 +288,7 @@ async def _serve_http01_challenge(token: str, key_authorization: str, port: int 
     return await asyncio.start_server(handle, host="0.0.0.0", port=port)
 
 
-async def _dns01_cloudflare(domain: str, txt_record: str, credentials: dict) -> None:
+async def _dns01_cloudflare(domain: str, txt_record: str, credentials: dict, log: AcmeLogCapture | None = None) -> None:
     import httpx
 
     token = (credentials or {}).get("cf_api_token", "").strip()
@@ -242,9 +305,13 @@ async def _dns01_cloudflare(domain: str, txt_record: str, credentials: dict) -> 
     labels = domain.split(".")
     zone_id = ""
     zone_name = ""
+    if log:
+        log.append(f"Preparing Cloudflare DNS-01 challenge for {domain}")
     async with httpx.AsyncClient(timeout=20) as client:
         for index in range(1, len(labels)):
             candidate = ".".join(labels[index:])
+            if log:
+                log.append(f"Checking Cloudflare zone candidate {candidate}")
             response = await client.get("https://api.cloudflare.com/client/v4/zones", params={"name": candidate}, headers=headers)
             response.raise_for_status()
             payload = response.json()
@@ -256,6 +323,8 @@ async def _dns01_cloudflare(domain: str, txt_record: str, credentials: dict) -> 
         if not zone_id:
             raise ValueError(f"Could not determine Cloudflare zone for {domain}")
         record_name = f"_acme-challenge.{domain}" if domain != zone_name else f"_acme-challenge.{zone_name}"
+        if log:
+            log.append(f"Creating TXT record {record_name} in Cloudflare zone {zone_name}")
         response = await client.post(
             f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records",
             headers=headers,
@@ -267,6 +336,8 @@ async def _dns01_cloudflare(domain: str, txt_record: str, credentials: dict) -> 
         if not record_id:
             raise ValueError("Cloudflare did not return a DNS record id")
         _cloudflare_records[(domain, txt_record)] = (zone_id, record_id, headers)
+    if log:
+        log.append("Cloudflare TXT record created; waiting 10 seconds for propagation")
     await asyncio.sleep(10)
 
 
@@ -285,7 +356,7 @@ async def _cleanup_cloudflare_record(domain: str, txt_record: str) -> None:
             )
 
 
-async def _dns01_hurricane_electric(domain: str, txt_record: str, credentials: dict) -> None:
+async def _dns01_hurricane_electric(domain: str, txt_record: str, credentials: dict, log: AcmeLogCapture | None = None) -> None:
     """Set _acme-challenge TXT record via Hurricane Electric DDNS API.
 
     Prerequisites (one-time setup in dns.he.net):
@@ -300,6 +371,8 @@ async def _dns01_hurricane_electric(domain: str, txt_record: str, credentials: d
         raise ValueError("Hurricane Electric DNS requires he_ddns_key credential")
 
     challenge_hostname = f"_acme-challenge.{domain}"
+    if log:
+        log.append(f"Updating Hurricane Electric TXT record {challenge_hostname}")
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(
             "https://dyn.dns.he.net/nic/update",
@@ -312,6 +385,8 @@ async def _dns01_hurricane_electric(domain: str, txt_record: str, credentials: d
             raise ValueError(f"HE DNS unexpected response: {body}")
 
     _he_records[(domain, txt_record)] = challenge_hostname
+    if log:
+        log.append("Hurricane Electric TXT record updated; waiting 15 seconds for propagation")
     # Allow time for DNS propagation before CA checks
     await asyncio.sleep(15)
 
@@ -349,6 +424,7 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
     server: asyncio.AbstractServer | None = None
     dns_cleanup: tuple[str, str, str] | None = None
     token: str | None = None
+    log = AcmeLogCapture()
     new_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     key_pem = new_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -356,8 +432,15 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
         encryption_algorithm=serialization.NoEncryption(),
     )
 
+    domain = cfg.domain.strip()
+    _set_acme_status(running=True, status="running", last_result=None, last_error=None, last_log="", last_log_at="")
+    log.append(
+        f"Starting ACME certificate request for {domain or '(unset domain)'} "
+        f"via {cfg.ca or 'letsencrypt'} using {cfg.challenge or 'http-01'}"
+    )
+
     try:
-        if not cfg.domain.strip():
+        if not domain:
             raise ValueError("Domain is required")
         if cfg.challenge not in {"http-01", "dns-01"}:
             raise ValueError("Challenge must be http-01 or dns-01")
@@ -366,27 +449,33 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
 
         from acme import client, messages
 
+        log.append("Loading ACME account key")
         account_key = _get_or_create_account_key(account_key_path)
         network = client.ClientNetwork(account_key, user_agent="webui-hub-acme")
-        directory = messages.Directory.from_json(network.get(_ca_directory(cfg.ca)).json())
+        directory_url = _ca_directory(cfg.ca)
+        log.append(f"Fetching ACME directory {directory_url}")
+        directory = messages.Directory.from_json(network.get(directory_url).json())
         acme_client = client.ClientV2(directory, network)
 
         contact = [f"mailto:{cfg.email.strip()}"] if cfg.email.strip() else ()
+        log.append("Registering or reusing ACME account")
         await asyncio.to_thread(
             acme_client.new_account,
             messages.NewRegistration.from_data(email=contact, terms_of_service_agreed=True),
         )
 
+        log.append(f"Creating CSR for {domain}")
         csr = (
             x509.CertificateSigningRequestBuilder()
-            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cfg.domain.strip())]))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(cfg.domain.strip())]), critical=False)
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(domain)]), critical=False)
             .sign(new_key, hashes.SHA256())
         )
+        log.append("Creating ACME order")
         order = await asyncio.to_thread(acme_client.new_order, csr.public_bytes(serialization.Encoding.PEM))
 
         challenge_body = None
-        authz_domain = cfg.domain.strip()
+        authz_domain = domain
         for authorization in getattr(order, "authorizations", []):
             identifier = getattr(getattr(authorization, "body", None), "identifier", None)
             if getattr(identifier, "value", ""):
@@ -399,7 +488,7 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
             if challenge_body is not None:
                 break
         if challenge_body is None:
-            raise RuntimeError(f"No {cfg.challenge} challenge offered for {cfg.domain}")
+            raise RuntimeError(f"No {cfg.challenge} challenge offered for {domain}")
 
         challenge_obj = getattr(challenge_body, "chall", challenge_body)
         response = challenge_body.response(account_key) if hasattr(challenge_body, "response") else challenge_obj.response(account_key)
@@ -407,14 +496,15 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
         if cfg.challenge == "http-01":
             token = challenge_obj.token.decode() if isinstance(challenge_obj.token, bytes) else str(challenge_obj.token)
             validation = challenge_body.validation(account_key) if hasattr(challenge_body, "validation") else challenge_obj.validation(account_key)
+            log.append(f"Serving HTTP-01 challenge token {token} on port 80 for {authz_domain}")
             server = await _serve_http01_challenge(token, validation, port=80)
         else:
             validation = challenge_body.validation(account_key) if hasattr(challenge_body, "validation") else challenge_obj.validation(account_key)
             if cfg.dns_provider == "cloudflare":
-                await _dns01_cloudflare(authz_domain, validation, cfg.dns_credentials)
+                await _dns01_cloudflare(authz_domain, validation, cfg.dns_credentials, log=log)
                 dns_cleanup = (authz_domain, validation, "cloudflare")
             elif cfg.dns_provider == "hurricane_electric":
-                await _dns01_hurricane_electric(authz_domain, validation, cfg.dns_credentials)
+                await _dns01_hurricane_electric(authz_domain, validation, cfg.dns_credentials, log=log)
                 dns_cleanup = (authz_domain, validation, "hurricane_electric")
             elif cfg.dns_provider == "azure_dns":
                 await _dns01_azure(authz_domain, validation, cfg.dns_credentials)
@@ -423,8 +513,10 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
             else:
                 raise ValueError(f"Unsupported DNS provider: {cfg.dns_provider}")
 
+        log.append("Answering ACME challenge")
         await asyncio.to_thread(acme_client.answer_challenge, challenge_body, response)
         deadline = _utcnow() + timedelta(seconds=60)
+        log.append("Waiting for ACME validation and certificate finalization")
         order = await asyncio.to_thread(acme_client.poll_and_finalize, order, deadline)
         fullchain_pem = getattr(order, "fullchain_pem", "")
         if not fullchain_pem:
@@ -432,6 +524,7 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
 
         cert_path = tls_dir / "cert.pem"
         key_path = tls_dir / "key.pem"
+        log.append(f"Writing certificate to {cert_path}")
         cert_path.write_text(fullchain_pem, encoding="utf-8")
         key_path.write_bytes(key_pem)
 
@@ -439,15 +532,40 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
         cfg.last_renewed = _iso(_utcnow())
         cfg.cert_expiry = cert_info.get("expires", "")
         cfg.last_error = ""
+        log.append(f"Certificate issued successfully; expires {cfg.cert_expiry or 'unknown'}")
+        cfg.last_log = log.text()
+        cfg.last_log_at = _iso(_utcnow())
         save_acme_config(cfg)
-        return {"success": True, "expires": cfg.cert_expiry, "domain": cert_info.get("domain") or cfg.domain}
+        result = {"success": True, "expires": cfg.cert_expiry, "domain": cert_info.get("domain") or domain}
+        _set_acme_status(
+            running=False,
+            status="success",
+            last_result=result,
+            last_error=None,
+            last_log=cfg.last_log,
+            last_log_at=cfg.last_log_at,
+        )
+        return result
     except Exception as exc:
+        log.append_exception(exc)
         cfg.last_error = str(exc)
+        cfg.last_log = log.text()
+        cfg.last_log_at = _iso(_utcnow())
         save_acme_config(cfg)
         logger.exception("ACME certificate request failed for %s", cfg.domain)
-        return {"success": False, "error": str(exc)}
+        result = {"success": False, "error": str(exc)}
+        _set_acme_status(
+            running=False,
+            status="failed",
+            last_result=result,
+            last_error=str(exc),
+            last_log=cfg.last_log,
+            last_log_at=cfg.last_log_at,
+        )
+        return result
     finally:
         if server is not None:
+            log.append("Stopping HTTP-01 challenge server")
             server.close()
             with contextlib.suppress(Exception):
                 await server.wait_closed()
@@ -456,9 +574,16 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
         if dns_cleanup:
             domain_c, txt_c, provider_c = dns_cleanup
             if provider_c == "hurricane_electric":
+                log.append(f"Cleaning up Hurricane Electric TXT record for {domain_c}")
                 await _cleanup_he_record(domain_c, txt_c, (cfg.dns_credentials or {}).get("he_ddns_key", ""))
             else:
+                log.append(f"Cleaning up Cloudflare TXT record for {domain_c}")
                 await _cleanup_cloudflare_record(domain_c, txt_c)
+        if cfg.last_log != log.text():
+            cfg.last_log = log.text()
+            cfg.last_log_at = _iso(_utcnow())
+            save_acme_config(cfg)
+            _set_acme_status(last_log=cfg.last_log, last_log_at=cfg.last_log_at)
 
 
 async def renew_if_needed(data_dir: Path) -> bool:
