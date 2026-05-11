@@ -628,10 +628,34 @@ function renderSpokeBody(section, spoke) {
   }, { once: true });
 }
 
+async function deleteSpoke(spoke, section) {
+  const res = await apiFetch(`/api/spokes/${encodeURIComponent(spoke.id)}`, { method: "DELETE" });
+  if (!res || !res.ok) {
+    const err = await readJson(res);
+    showToast(err?.detail || "Failed to delete spoke.", "err");
+    return false;
+  }
+  spokeCache[spoke.tenant_id] = (spokeCache[spoke.tenant_id] || []).filter(item => item.id !== spoke.id);
+  getExpandedSet().delete(spoke.id);
+  if (activeSpokeModal?.spoke?.id === spoke.id && activeSpokeModal?.tenant_id === spoke.tenant_id) closeSpokeModal();
+  section.remove();
+  updateSpokeStatPills(getTenantSpokes());
+  populateCommandSpokeSelect();
+  const remaining = getTenantSpokes().filter(item => item.status === "approved");
+  $("#spokes-empty")?.classList.toggle("hidden", remaining.length > 0);
+  if (!remaining.length) $("#spokes-list") && ($("#spokes-list").innerHTML = "");
+  if (activeTab === "commands") loadCommands();
+  if (activeTab === "dashboard") loadDashboard();
+  showToast("Spoke deleted.", "ok");
+  return true;
+}
+
 function createSpokeSection(spoke) {
   const expanded = getExpandedSet().has(spoke.id);
   const online = isOnline(spoke.last_seen);
   const clients = spoke.telemetry?.clients || [];
+  const canDelete = canManageTenant(spoke.tenant_id);
+  const warning = online ? " This spoke is currently online." : "";
   const section = document.createElement("section");
   section.className = "spoke-section";
   section.dataset.spokeId = spoke.id;
@@ -643,12 +667,49 @@ function createSpokeSection(spoke) {
       <span class="spoke-hostname">${escHtml(spokePrimaryLabel(spoke))}</span>
       <span class="spoke-label-inline">${escHtml(spokeSecondaryLabel(spoke))}</span>
       <span class="spoke-meta">${clients.length} clients · ${escHtml(relativeTime(spoke.last_seen))}</span>
+      ${canDelete ? `
+        <div class="spoke-row-actions" data-row-action>
+          <button class="btn btn-danger btn-small" data-delete-toggle type="button">Delete</button>
+          <div class="spoke-delete-confirm hidden" data-delete-confirm>
+            <span>Delete this spoke?${escHtml(warning)}</span>
+            <button class="btn btn-danger btn-small" data-delete-confirm-btn type="button">Confirm</button>
+            <button class="btn btn-secondary btn-small" data-delete-cancel type="button">Cancel</button>
+          </div>
+        </div>
+      ` : ""}
     </div>
     <div class="spoke-section-body ${expanded ? "expanded" : ""}"></div>
   `;
-  $(".spoke-section-header", section)?.addEventListener("click", event => {
-    if (event.target.closest("button,select,input,a")) return;
+  const header = $(".spoke-section-header", section);
+  const confirmBox = $("[data-delete-confirm]", section);
+  const toggleButton = $("[data-delete-toggle]", section);
+  const cancelButton = $("[data-delete-cancel]", section);
+  const confirmButton = $("[data-delete-confirm-btn]", section);
+  header?.addEventListener("click", event => {
+    if (event.target.closest("button,select,input,a,[data-row-action]")) return;
     toggleSpokeSection(section, spoke);
+  });
+  toggleButton?.addEventListener("click", event => {
+    event.stopPropagation();
+    confirmBox?.classList.remove("hidden");
+    toggleButton.classList.add("hidden");
+  });
+  cancelButton?.addEventListener("click", event => {
+    event.stopPropagation();
+    confirmBox?.classList.add("hidden");
+    toggleButton?.classList.remove("hidden");
+  });
+  confirmButton?.addEventListener("click", async event => {
+    event.stopPropagation();
+    confirmButton.disabled = true;
+    cancelButton && (cancelButton.disabled = true);
+    const ok = await deleteSpoke(spoke, section);
+    if (!ok) {
+      confirmButton.disabled = false;
+      cancelButton && (cancelButton.disabled = false);
+      confirmBox?.classList.add("hidden");
+      toggleButton?.classList.remove("hidden");
+    }
   });
   if (expanded) {
     renderSpokeBody(section, spoke);

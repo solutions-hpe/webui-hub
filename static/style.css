@@ -1612,7 +1612,7 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 
 /* Spoke list */
 .spoke-section { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
-.spoke-section-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--card-bg); cursor: pointer; user-select: none; }
+.spoke-section-header { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--card-bg); cursor: pointer; user-select: none; flex-wrap: wrap; }
 .spoke-section-header:hover { background: var(--hover-bg); }
 .spoke-section-body { padding: 0 14px 14px; display: none; }
 .spoke-section-body.expanded { display: block; }
@@ -1641,6 +1641,8 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 .spoke-toggle.open { transform: rotate(90deg); }
 .spoke-hostname { font-weight: 600; font-size: 14px; }
 .spoke-meta { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+.spoke-row-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.spoke-delete-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted); }
 
 /* Spoke action bar */
 .spoke-action-bar { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
@@ -1705,6 +1707,7 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 .spoke-section-summary { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .spoke-label-inline { font-size: 12px; color: var(--muted); }
 .quick-command-select { min-width: 150px; max-width: 190px; }
+.spoke-delete-confirm.hidden { display: none; }
 .spoke-client-table { table-layout: auto; }
 
 .inline-form-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
-from ..data_models import AuditEntry, PendingSpoke
+from ..data_models import AuditEntry, PendingSpoke, User
 from ..ws import ws_broadcast
 
 router = APIRouter()
@@ -119,6 +119,18 @@ def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
             raise exc
         raise HTTPException(status_code=401, detail="Invalid credentials") from exc
     return spoke
+
+
+def _require_spoke_admin(spoke_id: str, current_user: User) -> tuple[str, Any]:
+    approved = store.get_approved_spoke_by_id(spoke_id)
+    if not approved:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+
+    tenant_id, spoke = approved
+    auth.require_tenant_access(tenant_id, current_user)
+    if not current_user.is_superadmin and current_user.get_role(tenant_id) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return tenant_id, spoke
 
 
 class RegisterPayload(BaseModel):
@@ -282,6 +294,13 @@ def spokes_diag(current_user: auth.User = Depends(auth.require_superadmin)):
         "registration_log": list(reversed(_registration_log)),
         "pending_count": len(store.list_pending_spokes()),
     }
+
+
+@router.delete("/spokes/{spoke_id}")
+def delete_spoke(spoke_id: str, current_user: User = Depends(auth.get_current_user)):
+    tenant_id, _ = _require_spoke_admin(spoke_id, current_user)
+    store.delete_spoke(tenant_id, spoke_id)
+    return {"ok": True}
 
 
 @router.post("/{tenant_id}/spokes/{spoke_id}/telemetry")
