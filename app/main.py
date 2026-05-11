@@ -52,15 +52,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hub — Client-Sim Central Platform", lifespan=lifespan)
-_acme_challenges: dict[str, str] = {}
-
-
-@app.get("/.well-known/acme-challenge/{token}", include_in_schema=False)
-async def acme_http_challenge(token: str):
-    key_authorization = _acme_challenges.get(token)
-    if not key_authorization:
-        raise HTTPException(status_code=404)
-    return PlainTextResponse(key_authorization)
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

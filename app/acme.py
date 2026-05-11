@@ -8,12 +8,9 @@ Config is stored in the hub's global settings JSON (DATA_DIR/acme.json).
 Account key is stored at DATA_DIR/tls/acme_account.pem.
 Issued cert/key replace DATA_DIR/tls/cert.pem and DATA_DIR/tls/key.pem.
 
-Challenge types:
-  http-01  — Hub temporarily serves challenge tokens at /.well-known/acme-challenge/
-              via an in-process asyncio HTTP server on port 80.
-  dns-01   — Hub calls DNS provider API to create TXT record.
-              Supported: cloudflare (full), hurricane_electric (full),
-              azure_dns (stub), route53 (stub).
+Challenge type: DNS-01 only.
+Supported providers: cloudflare (full), hurricane_electric (full),
+                     azure_dns (stub), route53 (stub).
 
 Hurricane Electric DNS setup:
   1. In dns.he.net, create a TXT record for _acme-challenge.<domain>
@@ -116,7 +113,7 @@ class AcmeConfig:
     enabled: bool = False
     domain: str = ""
     email: str = ""
-    challenge: str = "http-01"
+    challenge: str = "dns-01"
     ca: str = "letsencrypt"
     dns_provider: str = ""
     dns_credentials: dict = field(default_factory=dict)
@@ -148,14 +145,6 @@ def _cert_path(data_dir: Path | None = None) -> Path:
 
 
 def _challenge_store() -> dict[str, str]:
-    try:
-        from . import main as main_module
-
-        store = getattr(main_module, "_acme_challenges", None)
-        if isinstance(store, dict):
-            return store
-    except Exception:
-        pass
     return {}
 
 
@@ -252,40 +241,6 @@ def _get_or_create_account_key(key_path: Path) -> josepy.JWKRSA:
             )
         )
     return JWKRSA(key=private_key)
-
-
-async def _serve_http01_challenge(token: str, key_authorization: str, port: int = 80) -> asyncio.AbstractServer:
-    store = _challenge_store()
-    store[token] = key_authorization
-    expected = f"GET /.well-known/acme-challenge/{token} HTTP/1.1".encode()
-
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        body = b""
-        status = b"404 Not Found"
-        try:
-            request = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
-            if request.startswith(expected) or request.startswith(expected.replace(b"HTTP/1.1", b"HTTP/1.0")):
-                body = key_authorization.encode()
-                status = b"200 OK"
-        except Exception:
-            pass
-        finally:
-            headers = [
-                b"HTTP/1.1 " + status,
-                b"Content-Type: text/plain; charset=utf-8",
-                f"Content-Length: {len(body)}".encode(),
-                b"Connection: close",
-                b"",
-                b"",
-            ]
-            writer.write(b"\r\n".join(headers) + body)
-            with contextlib.suppress(Exception):
-                await writer.drain()
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-    return await asyncio.start_server(handle, host="0.0.0.0", port=port)
 
 
 async def _dns01_cloudflare(domain: str, txt_record: str, credentials: dict, log: AcmeLogCapture | None = None) -> None:
@@ -436,15 +391,13 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
     _set_acme_status(running=True, status="running", last_result=None, last_error=None, last_log="", last_log_at="")
     log.append(
         f"Starting ACME certificate request for {domain or '(unset domain)'} "
-        f"via {cfg.ca or 'letsencrypt'} using {cfg.challenge or 'http-01'}"
+        f"via {cfg.ca or 'letsencrypt'} using dns-01"
     )
 
     try:
         if not domain:
             raise ValueError("Domain is required")
-        if cfg.challenge not in {"http-01", "dns-01"}:
-            raise ValueError("Challenge must be http-01 or dns-01")
-        if cfg.challenge == "dns-01" and not cfg.dns_provider:
+        if not cfg.dns_provider:
             raise ValueError("DNS provider is required for dns-01")
 
         from acme import client, messages
@@ -488,30 +441,24 @@ async def request_certificate(cfg: AcmeConfig, data_dir: Path) -> dict:
             if challenge_body is not None:
                 break
         if challenge_body is None:
-            raise RuntimeError(f"No {cfg.challenge} challenge offered for {domain}")
+            raise RuntimeError(f"No dns-01 challenge offered for {domain}")
 
         challenge_obj = getattr(challenge_body, "chall", challenge_body)
         response = challenge_body.response(account_key) if hasattr(challenge_body, "response") else challenge_obj.response(account_key)
 
-        if cfg.challenge == "http-01":
-            token = challenge_obj.token.decode() if isinstance(challenge_obj.token, bytes) else str(challenge_obj.token)
-            validation = challenge_body.validation(account_key) if hasattr(challenge_body, "validation") else challenge_obj.validation(account_key)
-            log.append(f"Serving HTTP-01 challenge token {token} on port 80 for {authz_domain}")
-            server = await _serve_http01_challenge(token, validation, port=80)
+        validation = challenge_body.validation(account_key) if hasattr(challenge_body, "validation") else challenge_obj.validation(account_key)
+        if cfg.dns_provider == "cloudflare":
+            await _dns01_cloudflare(authz_domain, validation, cfg.dns_credentials, log=log)
+            dns_cleanup = (authz_domain, validation, "cloudflare")
+        elif cfg.dns_provider == "hurricane_electric":
+            await _dns01_hurricane_electric(authz_domain, validation, cfg.dns_credentials, log=log)
+            dns_cleanup = (authz_domain, validation, "hurricane_electric")
+        elif cfg.dns_provider == "azure_dns":
+            await _dns01_azure(authz_domain, validation, cfg.dns_credentials)
+        elif cfg.dns_provider == "route53":
+            await _dns01_route53(authz_domain, validation, cfg.dns_credentials)
         else:
-            validation = challenge_body.validation(account_key) if hasattr(challenge_body, "validation") else challenge_obj.validation(account_key)
-            if cfg.dns_provider == "cloudflare":
-                await _dns01_cloudflare(authz_domain, validation, cfg.dns_credentials, log=log)
-                dns_cleanup = (authz_domain, validation, "cloudflare")
-            elif cfg.dns_provider == "hurricane_electric":
-                await _dns01_hurricane_electric(authz_domain, validation, cfg.dns_credentials, log=log)
-                dns_cleanup = (authz_domain, validation, "hurricane_electric")
-            elif cfg.dns_provider == "azure_dns":
-                await _dns01_azure(authz_domain, validation, cfg.dns_credentials)
-            elif cfg.dns_provider == "route53":
-                await _dns01_route53(authz_domain, validation, cfg.dns_credentials)
-            else:
-                raise ValueError(f"Unsupported DNS provider: {cfg.dns_provider}")
+            raise ValueError(f"Unsupported DNS provider: {cfg.dns_provider}")
 
         log.append("Answering ACME challenge")
         await asyncio.to_thread(acme_client.answer_challenge, challenge_body, response)
