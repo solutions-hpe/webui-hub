@@ -57,8 +57,8 @@ Hub sits in the center of the platform, serving the shared `cs-webui` frontend i
 
 Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webui` for the shared browser assets used by both hub and spoke deployments.
 
-- `app/main.py` serves `index.html` and replaces `{{WEBUI_MODE}}` with `hub` before returning the page.
-- `templates/index.html`, `static/app.js`, and `static/style.css` are sourced from `cs-webui`.
+- `app/main.py` serves `static/index.html` and replaces `{{WEBUI_MODE}}` with `hub` before returning the page.
+- `static/index.html`, `static/app.js`, and `static/style.css` are sourced from `cs-webui`.
 - Branch alignment matters: `lrb` is the development branch and `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
 - For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
 
@@ -213,7 +213,7 @@ https://<dns-label>.<region>.azurecontainer.io:8443
 
 1. checks out `webui-hub`
 2. clones `cs-webui` from the matching branch, falling back to `main` if that branch does not exist
-3. copies `static/` and `templates/index.html` from `cs-webui` into the Docker build context
+3. copies `static/` plus `templates/index.html` from `cs-webui`, writing the shared HTML to `static/index.html` in the Docker build context
 4. builds and pushes `ghcr.io/solutions-hpe/webui-hub:latest` plus SHA-based tags
 
 
