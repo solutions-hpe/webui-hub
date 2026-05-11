@@ -174,10 +174,10 @@ async function pingApi() {
   updateApiStatus(ok, ok ? "Connected" : "Disconnected");
   if (ok) {
     const data = await res.json().catch(() => null);
-    const badge = $("#build-version");
-    if (badge && data?.version) {
-      badge.textContent = `v${data.version}`;
-      badge.title = `Branch: ${data.branch || "?"} | SHA: ${data.sha || "?"}`;
+    const footerVer = $("#footer-version");
+    if (footerVer && data?.version) {
+      footerVer.textContent = `v${data.version}`;
+      footerVer.title = `Branch: ${data.branch || "?"} | SHA: ${data.sha || "?"}`;
     }
   }
 }
