@@ -106,7 +106,12 @@ def api_init():
 async def spa_fallback(full_path: str):
     index = TEMPLATE_DIR / "index.html"
     try:
-        return HTMLResponse(content=index.read_text())
+        html = index.read_text()
+        version_file = Path(__file__).resolve().parent.parent / "VERSION"
+        ver = version_file.read_text().strip() if version_file.exists() else "dev"
+        html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={ver}"')
+        html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
+        return HTMLResponse(content=html)
     except FileNotFoundError:
         logger.error("index.html not found at %s — frontend may not be built", index)
         raise HTTPException(status_code=503, detail="Frontend not available. Check hub deployment.")
