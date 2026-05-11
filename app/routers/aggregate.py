@@ -81,8 +81,8 @@ def _is_online(spoke: Spoke) -> bool:
     last_seen = spoke.last_seen
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=timezone.utc)
-    # 3× the default relay interval (60s) so one missed sync doesn't flip to offline.
-    return (datetime.now(timezone.utc) - last_seen).total_seconds() < 180
+    # 5× the default relay interval (60s) for a stable online/offline signal.
+    return (datetime.now(timezone.utc) - last_seen).total_seconds() < 300
 
 
 
