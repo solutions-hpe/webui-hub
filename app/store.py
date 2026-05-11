@@ -9,7 +9,9 @@ requests and background tasks do not corrupt on-disk state.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import shutil
 import threading
 from datetime import datetime, timedelta, timezone
@@ -23,6 +25,9 @@ from .data_models import AuditEntry, Command, Spoke, PendingSpoke, Tenant, User
 _lock = threading.RLock()
 
 
+logger = logging.getLogger(__name__)
+
+
 def _data_dir() -> Path:
     return Path(get_settings().data_dir)
 
@@ -30,16 +35,29 @@ def _data_dir() -> Path:
 def _read_json(path: Path) -> Any:
     if not path.exists():
         return None
-    with open(path) as f:
-        return json.load(f)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        logger.error("Corrupt JSON in %s: %s — returning None", path, exc)
+        return None
+    except OSError as exc:
+        logger.error("Failed to read %s: %s — returning None", path, exc)
+        return None
 
 
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2, default=str)
-    tmp.replace(path)
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        tmp.replace(path)
+    except OSError as exc:
+        logger.error("Failed to write %s: %s", path, exc)
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def _now() -> datetime:

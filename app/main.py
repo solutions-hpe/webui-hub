@@ -105,4 +105,11 @@ def api_init():
 @app.get("/{full_path:path}", response_class=HTMLResponse)
 async def spa_fallback(full_path: str):
     index = TEMPLATE_DIR / "index.html"
-    return HTMLResponse(content=index.read_text())
+    try:
+        return HTMLResponse(content=index.read_text())
+    except FileNotFoundError:
+        logger.error("index.html not found at %s — frontend may not be built", index)
+        raise HTTPException(status_code=503, detail="Frontend not available. Check hub deployment.")
+    except OSError as exc:
+        logger.error("Failed to read index.html: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to read frontend.")
