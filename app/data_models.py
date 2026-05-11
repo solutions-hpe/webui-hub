@@ -64,6 +64,8 @@ class Tenant(BaseModel):
     aruba_config_enc: Optional[str] = None
     notification_config_enc: Optional[str] = None
     default_processing_mode: ProcessingMode = Field(default_factory=ProcessingMode)
+    hub_config_enabled: bool = False
+    hub_config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)
     created_by: str = ""
 

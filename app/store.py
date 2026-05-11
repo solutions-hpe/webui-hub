@@ -417,7 +417,10 @@ def ensure_config_update_command(tenant_id: str, spoke_id: str) -> None:
             payload_version = int((command.payload or {}).get("__config_version", 0) or 0)
             if command.type == "config_update" and payload_version == target_version and command.status in {"queued", "delivered", "executed"}:
                 return
+        tenant = get_tenant(tenant_id)
         payload = dict(spoke.config or {})
+        if tenant and tenant.hub_config_enabled and tenant.hub_config:
+            payload.update(tenant.hub_config)
         payload["__config_version"] = target_version
         commands.append(
             Command(
