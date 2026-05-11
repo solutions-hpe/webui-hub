@@ -42,6 +42,71 @@ def _is_valid_uuid(value: str) -> bool:
         return False
 
 
+def _name_conflict_message(spoke_name: str, state: str, tenant_id: str) -> str:
+    scope = f" within tenant '{tenant_id}'" if tenant_id else " within the same tenant"
+    if state == "approved":
+        return (
+            f"Spoke name '{spoke_name}' is already in use by another approved spoke{scope}. "
+            "Choose a different name."
+        )
+    return (
+        f"Spoke name '{spoke_name}' is already registered and pending approval{scope}. "
+        "Choose a different name."
+    )
+
+
+def _raise_name_conflict(spoke_name: str, state: str, tenant_id: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "conflict": "name_in_use",
+            "message": _name_conflict_message(spoke_name, state, tenant_id),
+        },
+    )
+
+
+def _ensure_name_available_for_tenant(
+    spoke_name: str,
+    tenant_id: str,
+    *,
+    hostname: str,
+    exclude_spoke_id: str = "",
+    log_context: Optional[dict[str, Any]] = None,
+) -> None:
+    if not tenant_id:
+        return
+
+    approved_conflict = store.find_spoke_name_conflict(
+        tenant_id,
+        spoke_name,
+        exclude_spoke_id=exclude_spoke_id,
+    )
+    if approved_conflict and approved_conflict.hostname != hostname:
+        _reg_log_append(
+            "name_conflict_approved",
+            hostname=hostname,
+            spoke_name=spoke_name,
+            tenant_id=tenant_id,
+            **(log_context or {}),
+        )
+        _raise_name_conflict(spoke_name, "approved", tenant_id)
+
+    pending_conflict = store.find_pending_spoke_name_conflict(
+        tenant_id,
+        spoke_name,
+        exclude_spoke_id=exclude_spoke_id,
+    )
+    if pending_conflict and pending_conflict.hostname != hostname:
+        _reg_log_append(
+            "name_conflict_pending",
+            hostname=hostname,
+            spoke_name=spoke_name,
+            tenant_id=tenant_id,
+            **(log_context or {}),
+        )
+        _raise_name_conflict(spoke_name, "pending", tenant_id)
+
+
 def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
     spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke or spoke.status != "approved" or not spoke.api_key_enc:
@@ -90,6 +155,14 @@ def register_spoke(payload: RegisterPayload, request: Request):
         if requested_spoke_id and spoke.id != requested_spoke_id:
             store.rekey_spoke(tenant_id, spoke.id, requested_spoke_id)
             spoke.id = requested_spoke_id
+        if spoke.spoke_name != spoke_name:
+            _ensure_name_available_for_tenant(
+                spoke_name,
+                tenant_id,
+                hostname=payload.hostname,
+                exclude_spoke_id=spoke.id,
+                log_context={"spoke_id": spoke.id, "ip": client_ip},
+            )
         changed = False
         if spoke.hostname != payload.hostname:
             spoke.hostname = payload.hostname
@@ -124,40 +197,22 @@ def register_spoke(payload: RegisterPayload, request: Request):
             "api_key": api_key,
         }
 
-    # Check for spoke_name conflicts in approved spokes
-    name_conflict_approved = store.get_spoke_by_name(spoke_name)
-    if name_conflict_approved:
-        _, conflict_spoke = name_conflict_approved
-        if conflict_spoke.hostname != payload.hostname:
-            _reg_log_append("name_conflict_approved", hostname=payload.hostname,
-                            spoke_name=spoke_name, ip=client_ip)
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "conflict": "name_in_use",
-                    "message": f"Spoke name '{spoke_name}' is already in use by an approved spoke. Choose a different name.",
-                },
-            )
-
-    # Check for spoke_name conflicts in pending spokes
-    name_conflict_pending = store.get_pending_spoke_by_name(spoke_name)
-    if name_conflict_pending and name_conflict_pending.hostname != payload.hostname:
-        _reg_log_append("name_conflict_pending", hostname=payload.hostname,
-                        spoke_name=spoke_name, ip=client_ip)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "conflict": "name_in_use",
-                "message": f"Spoke name '{spoke_name}' is already registered and pending approval. Choose a different name.",
-            },
-        )
-
     existing = store.get_pending_spoke(requested_spoke_id) if requested_spoke_id else None
     if not existing:
         existing = store.get_pending_by_hostname(payload.hostname)
         if existing and requested_spoke_id and existing.id != requested_spoke_id:
             store.rekey_pending_spoke(existing.id, requested_spoke_id)
             existing.id = requested_spoke_id
+
+    target_tenant_id = tenant_hint or (existing.tenant_hint if existing else "")
+    exclude_spoke_id = existing.id if existing else requested_spoke_id
+    _ensure_name_available_for_tenant(
+        spoke_name,
+        target_tenant_id,
+        hostname=payload.hostname,
+        exclude_spoke_id=exclude_spoke_id,
+        log_context={"spoke_id": exclude_spoke_id, "ip": client_ip},
+    )
     if existing:
         changed = False
         if existing.hostname != payload.hostname:

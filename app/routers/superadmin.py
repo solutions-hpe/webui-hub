@@ -103,6 +103,48 @@ def _user_response(user: User) -> dict[str, Any]:
     }
 
 
+def _ensure_tenant_spoke_name_available(
+    tenant_id: str,
+    spoke_name: str,
+    *,
+    spoke_id: str,
+    hostname: str,
+) -> None:
+    approved_conflict = store.find_spoke_name_conflict(
+        tenant_id,
+        spoke_name,
+        exclude_spoke_id=spoke_id,
+    )
+    if approved_conflict and approved_conflict.hostname != hostname:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": "name_in_use",
+                "message": (
+                    f"Spoke name '{spoke_name}' is already in use by another approved spoke "
+                    f"within tenant '{tenant_id}'. Choose a different name."
+                ),
+            },
+        )
+
+    pending_conflict = store.find_pending_spoke_name_conflict(
+        tenant_id,
+        spoke_name,
+        exclude_spoke_id=spoke_id,
+    )
+    if pending_conflict and pending_conflict.hostname != hostname:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": "name_in_use",
+                "message": (
+                    f"Spoke name '{spoke_name}' is already registered and pending approval "
+                    f"within tenant '{tenant_id}'. Choose a different name."
+                ),
+            },
+        )
+
+
 @router.post("/superadmin/tenants", status_code=status.HTTP_201_CREATED)
 def create_tenant(payload: TenantCreateRequest, current_user: User = Depends(auth.require_superadmin)):
     tenant_id = payload.aruba_cid or None
@@ -264,6 +306,13 @@ async def approve_pending_spoke(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    _ensure_tenant_spoke_name_available(
+        payload.tenant_id,
+        pending.spoke_name,
+        spoke_id=pending.id,
+        hostname=pending.hostname,
+    )
+
     spoke = Spoke(
         id=pending.id,
         tenant_id=payload.tenant_id,
@@ -352,6 +401,13 @@ async def tenant_approve_pending_spoke(
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+
+    _ensure_tenant_spoke_name_available(
+        tenant_id,
+        pending.spoke_name,
+        spoke_id=pending.id,
+        hostname=pending.hostname,
+    )
 
     label = label if label is not None else pending.label
     spoke = Spoke(

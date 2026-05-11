@@ -300,6 +300,28 @@ def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Spoke]]:
     return None
 
 
+def find_spoke_name_conflict(
+    tenant_id: str,
+    spoke_name: str,
+    *,
+    exclude_spoke_id: str = "",
+) -> Optional[Spoke]:
+    """Return the first approved spoke in tenant_id whose spoke_name conflicts."""
+    name = spoke_name.strip().lower()
+    if not tenant_id or not name:
+        return None
+    excluded = exclude_spoke_id.strip().lower()
+    with _lock:
+        for spoke in _load_spokes(tenant_id):
+            if spoke.status != "approved":
+                continue
+            if excluded and spoke.id.strip().lower() == excluded:
+                continue
+            if spoke.spoke_name.strip().lower() == name:
+                return spoke
+    return None
+
+
 def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingSpoke]:
     """Return first pending spoke matching spoke_name."""
     name = spoke_name.strip().lower()
@@ -309,6 +331,28 @@ def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingSpoke]:
         for p in list_pending_spokes():
             if p.spoke_name.strip().lower() == name:
                 return p
+    return None
+
+
+def find_pending_spoke_name_conflict(
+    tenant_hint: str,
+    spoke_name: str,
+    *,
+    exclude_spoke_id: str = "",
+) -> Optional[PendingSpoke]:
+    """Return the first pending spoke in tenant_hint whose spoke_name conflicts."""
+    name = spoke_name.strip().lower()
+    if not tenant_hint or not name:
+        return None
+    excluded = exclude_spoke_id.strip().lower()
+    with _lock:
+        for pending in list_pending_spokes():
+            if pending.tenant_hint != tenant_hint:
+                continue
+            if excluded and pending.id.strip().lower() == excluded:
+                continue
+            if pending.spoke_name.strip().lower() == name:
+                return pending
     return None
 
 
