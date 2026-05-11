@@ -12,6 +12,8 @@ let activeSpokeModal = null;
 let ws = null;
 let wsReconnectTimer = null;
 let activeTab = "dashboard";
+let tenantContextActive = false;
+let dashboardTenantRows = [];
 let autoRefreshTimer = null;
 let autoRefreshCountdownTimer = null;
 let autoRefreshSecondsLeft = 10;
@@ -194,27 +196,29 @@ function syncRoleBadge() {
   badge.textContent = currentUser.is_superadmin ? "SUPERADMIN" : (currentRoleForTenant() || "user").toUpperCase();
 }
 
-function buildTenantSelector() {
-  const wrap = $("#tenant-selector");
-  const select = $("#tenant-select");
-  if (!wrap || !select) return;
-  select.innerHTML = tenants.map(tenant => `<option value="${escHtml(tenant.id)}">${escHtml(tenant.name)}</option>`).join("");
-  if (currentTenantId) select.value = currentTenantId;
-  // Show the dropdown whenever there are multiple tenants or the user is a superadmin with any tenant.
-  const show = currentUser && tenants.length > 0 && (tenants.length > 1 || currentUser.is_superadmin);
-  wrap.classList.toggle("hidden", !show);
+function buildTenantSelector() {}
+function clearDynamicTenantTabs() {}
+function buildSuperadminTenantTabs() {}
+
+function syncTenantContextChrome() {
+  const active = Boolean(currentUser && authToken && tenantContextActive && currentTenantId);
+  $("#hub-admin-nav")?.classList.toggle("hidden", active);
+  $("#tenant-context-nav")?.classList.toggle("hidden", !active);
+  $("#hub-admin-topbar-nav")?.classList.toggle("hidden", !active);
+  $("#tenant-context-indicator")?.classList.toggle("hidden", !active);
+  $("#tenant-context-name") && ($("#tenant-context-name").textContent = tenantName(currentTenantId) || currentTenantId || "—");
 }
 
-function clearDynamicTenantTabs() {
-  $$(".dynamic-tenant-tab").forEach(tab => tab.remove());
-}
-
-function buildSuperadminTenantTabs() {
-  clearDynamicTenantTabs();
-  // No per-tenant tabs — tenant is selected via the dropdown in the header.
-  // Ensure the Spokes tab is always visible for authenticated users.
-  const spokesTab = $('.tab[data-tab="spokes"]');
-  if (spokesTab) spokesTab.classList.remove("hidden");
+function syncHubPermissionUI() {
+  const canManageCurrent = Boolean(currentUser && currentTenantId && (canManageTenant() || currentUser.is_superadmin));
+  [
+    '#hub-admin-nav .tab[data-tab="settings"]',
+    '#hub-admin-topbar-nav [data-admin-tab="settings"]',
+    '#tenant-context-nav .tab[data-tab="settings"]',
+  ].forEach(selector => {
+    $$(selector).forEach(el => el.classList.toggle("hidden", !canManageCurrent));
+  });
+  $("#dashboard-add-tenant-btn")?.classList.toggle("hidden", !currentUser?.is_superadmin);
 }
 
 function applyAuthUI() {
@@ -223,23 +227,20 @@ function applyAuthUI() {
   $("#topbar-user")?.classList.toggle("hidden", !loggedIn);
   $("#topbar-username") && ($("#topbar-username").textContent = currentUser?.username || "");
   $$(".auth-tab").forEach(tab => tab.classList.toggle("hidden", !loggedIn));
-  $(".superadmin-tab")?.classList.toggle("hidden", !(loggedIn && currentUser?.is_superadmin));
+  $$(".superadmin-tab").forEach(tab => tab.classList.toggle("hidden", !(loggedIn && currentUser?.is_superadmin)));
   if (!loggedIn) {
     currentTenantId = null;
+    tenantContextActive = false;
     tenants = [];
     spokeCache = {};
-    clearDynamicTenantTabs();
-    $("#tenant-selector")?.classList.add("hidden");
-    $(".tab[data-tab='spokes']")?.classList.remove("hidden");
-    $(".tab[data-tab='superadmin']") && ($(".tab[data-tab='superadmin']").textContent = "🔑 Superadmin");
+    dashboardTenantRows = [];
+    syncTenantContextChrome();
     if (activeTab !== "dashboard") showTab("dashboard");
     return;
   }
-  buildTenantSelector();
   syncRoleBadge();
-  buildSuperadminTenantTabs();
-  const settingsTab = $('.tab[data-tab="settings"]');
-  settingsTab?.classList.toggle("hidden", !canManageTenant() && !currentUser.is_superadmin);
+  syncTenantContextChrome();
+  syncHubPermissionUI();
 }
 
 async function loadUserContext() {
@@ -264,6 +265,7 @@ async function loadUserContext() {
     currentTenantId = tenants[0].id;
   }
   applyAuthUI();
+  syncHubPermissionUI();
   populateCommandSpokeSelect();
 }
 
@@ -310,8 +312,10 @@ function logout(showMessage = true) {
   authToken = null;
   currentUser = null;
   currentTenantId = null;
+  tenantContextActive = false;
   tenants = [];
   spokeCache = {};
+  dashboardTenantRows = [];
   activeSpokeModal = null;
   localStorage.removeItem("hub_token");
   applyAuthUI();
@@ -321,11 +325,11 @@ function logout(showMessage = true) {
 
 async function setCurrentTenant(tenantId, reload = true) {
   currentTenantId = tenantId;
-  $("#tenant-select") && ($("#tenant-select").value = tenantId || "");
   syncRoleBadge();
-  applyAuthUI();
+  syncTenantContextChrome();
+  syncHubPermissionUI();
   populateCommandSpokeSelect();
-  if (reload && ["dashboard", "spokes", "commands", "settings"].includes(activeTab)) await refreshCurrentView(true);
+  if (reload && ["spokes", "commands", "settings"].includes(activeTab)) await refreshCurrentView(true);
 }
 
 function showTab(tabId, opts = {}) {
@@ -333,6 +337,8 @@ function showTab(tabId, opts = {}) {
     openLoginModal();
     return;
   }
+  if (opts.source === "admin") tenantContextActive = false;
+  if (opts.source === "tenant") tenantContextActive = true;
   activeTab = tabId;
   $$(".tab-content").forEach(panel => panel.classList.add("hidden"));
   const panel = document.getElementById(`tab-${tabId}`);
@@ -341,8 +347,11 @@ function showTab(tabId, opts = {}) {
   if (opts.button) {
     opts.button.classList.add("active");
   } else {
-    $(`#tab-nav .tab[data-tab="${tabId}"]`)?.classList.add("active");
+    const selector = tenantContextActive ? `#tenant-context-nav .tab[data-tab="${tabId}"]` : `#hub-admin-nav .tab[data-tab="${tabId}"]`;
+    $(selector)?.classList.add("active");
   }
+  syncTenantContextChrome();
+  syncHubPermissionUI();
   refreshCurrentView();
 }
 
@@ -408,12 +417,106 @@ function updateSpokeStatPills(spokes) {
   $("#spokes-clients-pill") && ($("#spokes-clients-pill").textContent = `${clientCount} clients`);
 }
 
-async function loadDashboard() {
+function summarizeTenantSpokes(spokes = []) {
+  const approved = spokes.filter(spoke => spoke.status === "approved");
+  const onlineCount = approved.filter(spoke => isOnline(spoke.last_seen)).length;
+  const lastSeenTimes = approved.map(spoke => new Date(spoke.last_seen).getTime()).filter(Number.isFinite);
+  return {
+    approvedCount: approved.length,
+    onlineCount,
+    offlineCount: Math.max(0, approved.length - onlineCount),
+    pendingCount: Math.max(0, spokes.length - approved.length),
+    clientCount: approved.reduce((sum, spoke) => sum + ((spoke.telemetry?.clients || []).length), 0),
+    lastSync: lastSeenTimes.length ? new Date(Math.max(...lastSeenTimes)).toISOString() : null,
+  };
+}
+
+async function ensureSpokesForTenant(tenantId, force = false) {
+  if (!tenantId) return [];
+  if (!force && spokeCache[tenantId]) return spokeCache[tenantId];
+  const res = await apiFetch(`/api/${encodeURIComponent(tenantId)}/spokes`);
+  if (!res || !res.ok) return spokeCache[tenantId] || [];
+  const spokes = await res.json();
+  spokeCache[tenantId] = spokes;
+  return spokes;
+}
+
+function summarizeTenantAlerts(summary) {
+  if (summary.pendingCount > 0) return { tone: "alert", text: `${summary.pendingCount} pending ${summary.pendingCount === 1 ? "spoke" : "spokes"}` };
+  if (summary.offlineCount > 0) return { tone: "alert", text: `${summary.offlineCount} offline ${summary.offlineCount === 1 ? "spoke" : "spokes"}` };
+  return { tone: "ok", text: "OK" };
+}
+
+function renderTenantCard(cardData) {
+  const { id, name, summary, alert } = cardData;
+  const card = document.createElement("article");
+  card.className = "spoke-card tenant-card";
+  card.dataset.enterTenant = id;
+  card.innerHTML = `
+    <div class="tenant-card-top">
+      <div class="tenant-card-title-wrap">
+        <h2 class="tenant-card-title">${escHtml(name || id)}</h2>
+        <div class="tenant-card-subtitle">Tenant ID: ${escHtml(id)}</div>
+      </div>
+      <div class="spoke-card-status">${statusDot(summary.onlineCount > 0 || summary.approvedCount === 0)}</div>
+    </div>
+    <div class="tenant-card-metrics">
+      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Spokes</span><strong class="tenant-card-metric-value">${summary.approvedCount}</strong></div>
+      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Clients</span><strong class="tenant-card-metric-value">${summary.clientCount}</strong></div>
+      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Offline</span><strong class="tenant-card-metric-value">${summary.offlineCount}</strong></div>
+      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Last Sync</span><strong class="tenant-card-metric-value">${escHtml(relativeTime(summary.lastSync))}</strong></div>
+    </div>
+    <div class="tenant-card-alert"><span class="tenant-alert-pill ${alert.tone}">${escHtml(alert.text)}</span><span class="tenant-card-cta">Open tenant →</span></div>
+  `;
+  return card;
+}
+
+function renderTenantDashboardEmptyState() {
+  return currentUser?.is_superadmin
+    ? 'No tenants yet. Create your first tenant to get started.<div class="tenant-empty-action"><button class="btn btn-primary btn-small" data-add-tenant type="button">Add Tenant</button></div>'
+    : 'No tenants are available yet. Contact a hub administrator to add one.';
+}
+
+async function loadDashboard(force = false) {
+  const grid = $("#dashboard-grid");
+  const empty = $("#dashboard-empty");
+  if (currentUser) {
+    dashboardTenantRows = [];
+    $("#dash-tenants-pill") && ($("#dash-tenants-pill").textContent = `${tenants.length} tenants`);
+    $("#dashboard-add-tenant-btn")?.classList.toggle("hidden", !currentUser?.is_superadmin);
+    if (!grid || !empty) return;
+    if (!tenants.length) {
+      grid.innerHTML = "";
+      $("#dash-spokes-pill") && ($("#dash-spokes-pill").textContent = '0 spokes');
+      $("#dash-clients-pill") && ($("#dash-clients-pill").textContent = '0 clients');
+      $("#dash-online-pill") && ($("#dash-online-pill").textContent = '0 alerts');
+      empty.innerHTML = renderTenantDashboardEmptyState();
+      empty.classList.remove("hidden");
+      return;
+    }
+    const rows = await Promise.all(tenants.map(async tenant => {
+      const spokes = await ensureSpokesForTenant(tenant.id, force);
+      const summary = summarizeTenantSpokes(spokes || []);
+      return { id: tenant.id, name: tenant.name || tenant.id, summary, alert: summarizeTenantAlerts(summary) };
+    }));
+    rows.sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), undefined, { numeric: true, sensitivity: "base" }));
+    dashboardTenantRows = rows;
+    const totalSpokes = rows.reduce((sum, row) => sum + row.summary.approvedCount, 0);
+    const totalClients = rows.reduce((sum, row) => sum + row.summary.clientCount, 0);
+    const totalAlerts = rows.filter(row => row.alert.tone === "alert").length;
+    $("#dash-spokes-pill") && ($("#dash-spokes-pill").textContent = `${totalSpokes} spokes`);
+    $("#dash-clients-pill") && ($("#dash-clients-pill").textContent = `${totalClients} clients`);
+    $("#dash-online-pill") && ($("#dash-online-pill").textContent = totalAlerts ? `${totalAlerts} tenants need attention` : 'All tenants OK');
+    empty.classList.toggle("hidden", rows.length > 0);
+    empty.innerHTML = rows.length ? "" : renderTenantDashboardEmptyState();
+    renderInBatches("dashboard", grid, rows, renderTenantCard, 24);
+    return;
+  }
+
   const res = await fetch("/api/sites").catch(() => null);
   if (!res || !res.ok) return;
   const sites = (await res.json()).filter(site => site.status === "approved");
-  const grid = $("#dashboard-grid");
-  const empty = $("#dashboard-empty");
+  $("#dash-tenants-pill") && ($("#dash-tenants-pill").textContent = 'Public dashboard');
   const onlineCount = sites.filter(site => isOnline(site.last_seen)).length;
   const clientCount = sites.reduce((sum, site) => sum + ((site.telemetry?.clients || []).length), 0);
   $("#dash-spokes-pill") && ($("#dash-spokes-pill").textContent = spokeLabel(sites.length));
@@ -448,11 +551,7 @@ async function loadDashboard() {
 
 async function ensureSpokes(force = false) {
   if (!currentTenantId) return [];
-  if (!force && spokeCache[currentTenantId]) return spokeCache[currentTenantId];
-  const res = await apiFetch(`/api/${encodeURIComponent(currentTenantId)}/spokes`);
-  if (!res || !res.ok) return [];
-  const spokes = await res.json();
-  spokeCache[currentTenantId] = spokes;
+  const spokes = await ensureSpokesForTenant(currentTenantId, force);
   populateCommandSpokeSelect();
   return spokes;
 }
@@ -1208,6 +1307,18 @@ async function rejectPendingSpoke(id) {
   loadSuperadmin();
 }
 
+function openSuperadminTenantForm() {
+  if (!currentUser?.is_superadmin) {
+    showToast("Only superadmins can add tenants.", "warn");
+    return;
+  }
+  showTab("superadmin", { source: "admin" });
+  const tenantsButton = $('.sa-subtab[data-subtab="sa-tenants"]');
+  if (tenantsButton) tenantsButton.click();
+  $("#sa-tenant-form")?.classList.remove("hidden");
+  $("#sa-tenant-name")?.focus();
+}
+
 async function createTenant() {
   const name = $("#sa-tenant-name")?.value.trim();
   const aruba_cid = $("#sa-tenant-cid")?.value.trim() || null;
@@ -1235,7 +1346,7 @@ async function deleteTenant(id) {
     showToast("Failed to delete tenant.", "err");
     return;
   }
-  if (currentTenantId === id) currentTenantId = tenants.find(tenant => tenant.id !== id)?.id || null;
+  if (currentTenantId === id) { currentTenantId = tenants.find(tenant => tenant.id !== id)?.id || null; tenantContextActive = false; }
   showToast("Tenant deleted.", "ok");
   await loadSuperadmin();
 }
@@ -1395,10 +1506,33 @@ function connectWebSocket() {
 
 function bindEvents() {
   document.addEventListener("click", event => {
+    const adminShortcut = event.target.closest("[data-admin-tab]");
+    if (adminShortcut) {
+      showTab(adminShortcut.dataset.adminTab, { source: "admin" });
+      return;
+    }
+
+    if (event.target.closest("#tenant-context-change-btn")) {
+      showTab("dashboard", { source: "admin" });
+      return;
+    }
+
     const tabButton = event.target.closest("#tab-nav .tab");
     if (tabButton) {
       if (tabButton.dataset.tenantId) setCurrentTenant(tabButton.dataset.tenantId, false);
-      showTab(tabButton.dataset.tab, { button: tabButton });
+      showTab(tabButton.dataset.tab, { button: tabButton, source: tabButton.closest("#tenant-context-nav") ? "tenant" : "admin" });
+      return;
+    }
+
+    const enterTenantButton = event.target.closest("[data-enter-tenant]");
+    if (enterTenantButton) {
+      tenantContextActive = true;
+      setCurrentTenant(enterTenantButton.dataset.enterTenant, false).then(() => showTab("spokes", { source: "tenant" }));
+      return;
+    }
+
+    if (event.target.closest("[data-add-tenant]")) {
+      openSuperadminTenantForm();
       return;
     }
 
@@ -1439,14 +1573,14 @@ function bindEvents() {
     }
   });
 
-  $("#tenant-select")?.addEventListener("change", event => setCurrentTenant(event.target.value));
   $("#login-btn")?.addEventListener("click", openLoginModal);
   $("#logout-btn")?.addEventListener("click", () => logout(true));
   $("#login-submit-btn")?.addEventListener("click", submitLogin);
   $("#login-cancel-btn")?.addEventListener("click", closeLoginModal);
   $("#login-modal")?.addEventListener("click", event => { if (event.target === event.currentTarget) closeLoginModal(); });
   $("#login-password")?.addEventListener("keydown", event => { if (event.key === "Enter") submitLogin(); });
-  $("#refresh-dashboard-btn")?.addEventListener("click", loadDashboard);
+  $("#refresh-dashboard-btn")?.addEventListener("click", () => loadDashboard(true));
+  $("#dashboard-add-tenant-btn")?.addEventListener("click", openSuperadminTenantForm);
   $("#refresh-spokes-btn")?.addEventListener("click", () => loadSpokes(true));
   $("#refresh-commands-btn")?.addEventListener("click", loadCommands);
   $("#auto-refresh-toggle")?.addEventListener("change", startAutoRefresh);
@@ -1481,6 +1615,8 @@ function bindEvents() {
   if (authToken) await loadUserContext();
   connectWebSocket();
   if (currentUser && currentTenantId) await ensureSpokes(true);
+  syncTenantContextChrome();
+  syncHubPermissionUI();
   await loadDashboard();
   startAutoRefresh();
 })();

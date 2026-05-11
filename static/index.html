@@ -42,9 +42,16 @@
           <span id="auto-refresh-countdown" class="auto-refresh-countdown">10s</span>
         </div>
         <div id="gkill-badge" class="gkill-badge hidden hub-only" title="Global Kill Switch is ON">⚠ GKILL ON</div>
-        <div id="tenant-selector" class="tenant-selector hidden hub-only">
-          <label for="tenant-select" class="tenant-selector-label">Tenant:</label>
-          <select id="tenant-select" class="form-input form-input-sm tenant-selector-select"></select>
+        <div id="hub-admin-topbar-nav" class="hub-admin-topbar-nav hidden hub-only" aria-label="Hub admin navigation">
+          <button class="btn btn-secondary btn-small hub-admin-shortcut" data-admin-tab="dashboard" type="button">Tenants</button>
+          <button class="btn btn-secondary btn-small hub-admin-shortcut" data-admin-tab="spokes" type="button">Spokes</button>
+          <button class="btn btn-secondary btn-small hub-admin-shortcut" data-admin-tab="settings" type="button">Setup</button>
+          <button class="btn btn-secondary btn-small hub-admin-shortcut superadmin-tab hidden" data-admin-tab="superadmin" type="button">Superadmin</button>
+        </div>
+        <div id="tenant-context-indicator" class="tenant-context-indicator hidden hub-only">
+          <span class="tenant-context-label">Tenant:</span>
+          <strong id="tenant-context-name">—</strong>
+          <button id="tenant-context-change-btn" class="btn btn-secondary btn-small" type="button">Change</button>
         </div>
         <div id="topbar-user" class="topbar-user hidden hub-only">
           <span>👤</span>
@@ -91,14 +98,19 @@
 
   <!-- ── Unified tab nav ── -->
   <nav id="tab-nav" class="tab-nav" role="tablist">
-    <span class="hub-only">
-      <button class="tab active" data-tab="dashboard" type="button">Dashboard</button>
-      <button class="tab auth-tab hidden" data-tab="spokes" type="button">Spokes</button>
-      <button class="tab auth-tab hidden" data-tab="commands" type="button">Commands</button>
-      <span class="tab-nav-sep" aria-hidden="true"></span>
-      <button class="tab auth-tab hidden" data-tab="settings" type="button">⚙ Settings</button>
-      <button class="tab superadmin-tab hidden" data-tab="superadmin" type="button">Superadmin</button>
-    </span>
+    <div class="hub-only hub-nav-wrap">
+      <div id="hub-admin-nav" class="hub-admin-nav">
+        <button class="tab active" data-tab="dashboard" type="button">Tenants</button>
+        <button class="tab auth-tab hidden" data-tab="spokes" type="button">Spokes</button>
+        <button class="tab auth-tab hidden" data-tab="settings" type="button">⚙ Setup</button>
+        <button class="tab superadmin-tab hidden" data-tab="superadmin" type="button">Superadmin</button>
+      </div>
+      <div id="tenant-context-nav" class="tenant-context-nav hidden">
+        <button class="tab active" data-tab="spokes" type="button">Spokes</button>
+        <button class="tab" data-tab="commands" type="button">Commands</button>
+        <button class="tab" data-tab="settings" type="button">⚙ Setup</button>
+      </div>
+    </div>
     <span class="spoke-only">
       <button class="tab active" role="tab" aria-selected="true" data-tab="simulations" type="button">Simulations</button>
       <button class="tab" role="tab" aria-selected="false" data-tab="dashboard" type="button">Clients</button>
@@ -114,43 +126,20 @@
   <div id="hub-root" class="hub-only">
     <!-- ── Dashboard (public) ── -->
       <main id="tab-dashboard" class="page tab-content">
-        <div id="hub-dashboard-overview">
-          <div class="page-toolbar">
-            <div class="toolbar-stats">
-              <span class="stat-pill" id="dash-spokes-pill">— spokes</span>
-              <span class="stat-pill" id="dash-clients-pill">— clients</span>
-              <span class="stat-pill" id="dash-online-pill">— online</span>
-            </div>
-            <div class="toolbar-actions">
-              <button id="refresh-dashboard-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
-            </div>
+        <div class="page-toolbar">
+          <div class="toolbar-stats">
+            <span class="stat-pill" id="dash-tenants-pill">— tenants</span>
+            <span class="stat-pill" id="dash-spokes-pill">— spokes</span>
+            <span class="stat-pill" id="dash-clients-pill">— clients</span>
+            <span class="stat-pill" id="dash-online-pill">— alerts</span>
           </div>
-          <div id="dashboard-grid" class="spoke-grid"></div>
-          <div id="dashboard-empty" class="empty-state hidden">No spokes registered yet.</div>
-        </div>
-
-        <div id="hub-tenant-detail" class="tenant-detail-view hidden">
-          <div class="tenant-detail-header-row">
-            <button id="tenant-detail-back-btn" class="btn btn-secondary btn-small" type="button">← Back to Tenants</button>
-            <div class="tenant-detail-heading">
-              <h2 id="tenant-detail-title">Tenant</h2>
-              <p id="tenant-detail-subtitle" class="muted">—</p>
-            </div>
-            <div id="tenant-detail-pills" class="tenant-detail-inline-stats"></div>
+          <div class="toolbar-actions">
+            <button id="dashboard-add-tenant-btn" class="btn btn-primary btn-small hidden" type="button">Add Tenant</button>
+            <button id="refresh-dashboard-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
           </div>
-          <nav class="setup-subnav tenant-detail-subnav">
-            <button class="setup-subtab tenant-detail-tab active" data-tenant-detail-tab="dashboard" type="button">Dashboard</button>
-            <button class="setup-subtab tenant-detail-tab" data-tenant-detail-tab="spokes" type="button">Spokes</button>
-            <button class="setup-subtab tenant-detail-tab" data-tenant-detail-tab="commands" type="button">Commands</button>
-            <button class="setup-subtab tenant-detail-tab" data-tenant-detail-tab="setup" type="button">Setup</button>
-            <button class="setup-subtab tenant-detail-tab" data-tenant-detail-tab="config" type="button">Config</button>
-          </nav>
-          <section id="tenant-detail-dashboard-panel" class="tenant-detail-panel"></section>
-          <section id="tenant-detail-spokes-panel" class="tenant-detail-panel hidden"></section>
-          <section id="tenant-detail-commands-panel" class="tenant-detail-panel hidden"></section>
-          <section id="tenant-detail-setup-panel" class="tenant-detail-panel hidden"></section>
-          <section id="tenant-detail-config-panel" class="tenant-detail-panel hidden"></section>
         </div>
+        <div id="dashboard-grid" class="spoke-grid tenant-card-grid"></div>
+        <div id="dashboard-empty" class="empty-state hidden"></div>
       </main>
 
       <!-- ── Islands tab (auth required) ── -->

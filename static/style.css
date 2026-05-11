@@ -1582,9 +1582,25 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 }
 
 /* Tenant selector — lives in topbar-right next to the user icon */
-.tenant-selector { display: flex; align-items: center; gap: 6px; }
-.tenant-selector-label { font-size: 0.8rem; color: rgba(255,255,255,0.7); white-space: nowrap; }
-.tenant-selector-select { max-width: 160px; }
+.hub-admin-topbar-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hub-admin-shortcut { border-color: rgba(255,255,255,0.18); background: rgba(255,255,255,0.06); }
+.hub-admin-shortcut:hover { background: rgba(255,255,255,0.14); }
+.tenant-context-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+}
+.tenant-context-label {
+  font-size: 0.76rem;
+  color: rgba(255,255,255,0.72);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#tenant-context-name { color: #fff; font-size: 0.95rem; }
 .form-input-sm { padding: 4px 8px; font-size: 13px; height: 30px; }
 
 /* GKill badge */
@@ -1653,6 +1669,12 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
 .tab.dynamic-tenant-tab { font-weight: 600; }
 .sa-header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
+.hub-nav-wrap { display: flex; width: 100%; }
+.hub-admin-nav,
+.tenant-context-nav { display: flex; align-items: center; gap: 0; width: 100%; }
+.hub-admin-nav.hidden,
+.tenant-context-nav.hidden { display: none; }
+
 .spoke-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -1710,7 +1732,8 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
   .topbar { height: auto; padding-top: 10px; padding-bottom: 10px; }
   .topbar-content { flex-wrap: wrap; }
   .topbar-right { width: 100%; justify-content: space-between; flex-wrap: wrap; }
-  .tenant-selector { order: -1; }  /* pull tenant selector to the front on mobile */
+  .hub-admin-topbar-nav { width: 100%; }
+  .tenant-context-indicator { order: -1; }
   .tab-nav { overflow-x: auto; }
   .page-toolbar { padding: 12px 14px; }
   .setup-card { padding: 20px; }
@@ -1725,3 +1748,28 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
+
+.tenant-card-grid { margin-top: 16px; }
+.tenant-card {
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 220px;
+}
+.tenant-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.12); }
+.tenant-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.tenant-card-title-wrap { min-width: 0; }
+.tenant-card-title { margin: 0; font-size: 1.05rem; color: var(--hpe-navy); word-break: break-word; }
+.tenant-card-subtitle { margin-top: 4px; font-size: 0.8rem; color: var(--muted); }
+.tenant-card-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.tenant-card-metric { border: 1px solid rgba(148,163,184,0.18); border-radius: 10px; padding: 10px 12px; background: rgba(15,23,42,0.03); display: flex; flex-direction: column; gap: 4px; }
+.tenant-card-metric-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.tenant-card-metric-value { font-size: 1.15rem; font-weight: 700; color: var(--hpe-navy); }
+.tenant-card-alert { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tenant-alert-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }
+.tenant-alert-pill.ok { background: rgba(1,169,130,0.12); color: var(--hpe-green-dark); }
+.tenant-alert-pill.alert { background: rgba(192,57,43,0.12); color: #b03a2e; }
+.tenant-card-cta { font-size: 0.85rem; font-weight: 600; color: var(--hpe-green-dark); }
+.tenant-empty-action { margin-top: 12px; }
