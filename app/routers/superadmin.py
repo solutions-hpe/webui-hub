@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Union
 import uuid
 
+from ..ws import ws_broadcast
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
@@ -248,7 +250,7 @@ def list_pending_spokes(_: User = Depends(auth.require_superadmin)):
 
 
 @router.post("/superadmin/pending-spokes/{spoke_id}/approve")
-def approve_pending_spoke(
+async def approve_pending_spoke(
     spoke_id: str,
     payload: ApprovePendingSpokeRequest,
     request: Request,
@@ -267,6 +269,7 @@ def approve_pending_spoke(
         tenant_id=payload.tenant_id,
         hostname=pending.hostname,
         label=payload.label if payload.label is not None else pending.label,
+        spoke_name=pending.spoke_name,
         seed_config=pending.seed_config,
         config=pending.seed_config.copy(),
         processing_mode=tenant.default_processing_mode.model_copy(deep=True),
@@ -278,7 +281,7 @@ def approve_pending_spoke(
     store.save_spoke(spoke)
     store.delete_pending_spoke(spoke_id)
 
-    relay_server_url = str(request.base_url).rstrip("/") + f"/api/{payload.tenant_id}"
+    relay_server_url = str(request.base_url).rstrip("/")
     store.enqueue_command(
         Command(
             spoke_id=spoke.id,
@@ -293,6 +296,13 @@ def approve_pending_spoke(
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
     )
+    await ws_broadcast({
+        "type": "spoke_approved",
+        "tenant_id": payload.tenant_id,
+        "spoke_id": spoke.id,
+        "hostname": spoke.hostname,
+        "spoke_name": spoke.spoke_name,
+    })
 
     return {
         "spoke_id": spoke.id,
@@ -321,11 +331,11 @@ def list_tenant_pending_spokes(
 ):
     """Return pending spokes that pre-registered for this tenant."""
     all_pending = store.list_pending_spokes()
-    return [p for p in all_pending if p.get("tenant_hint") == tenant_id]
+    return [p for p in all_pending if p.tenant_hint == tenant_id]
 
 
 @router.post("/tenant/{tenant_id}/pending-spokes/{spoke_id}/approve", status_code=201)
-def tenant_approve_pending_spoke(
+async def tenant_approve_pending_spoke(
     tenant_id: str,
     spoke_id: str,
     request: Request,
@@ -361,7 +371,7 @@ def tenant_approve_pending_spoke(
     store.save_spoke(spoke)
     store.delete_pending_spoke(spoke_id)
 
-    relay_server_url = str(request.base_url).rstrip("/") + f"/api/{tenant_id}"
+    relay_server_url = str(request.base_url).rstrip("/")
     store.enqueue_command(
         Command(
             spoke_id=spoke.id,
@@ -376,6 +386,13 @@ def tenant_approve_pending_spoke(
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
     )
+    await ws_broadcast({
+        "type": "spoke_approved",
+        "tenant_id": tenant_id,
+        "spoke_id": spoke.id,
+        "hostname": spoke.hostname,
+        "spoke_name": spoke.spoke_name,
+    })
 
     return {
         "spoke_id": spoke.id,

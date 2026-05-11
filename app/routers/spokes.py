@@ -167,6 +167,7 @@ def spokes_diag(current_user: auth.User = Depends(auth.require_superadmin)):
 
 
 @router.post("/{tenant_id}/spokes/{spoke_id}/telemetry")
+@router.post("/{tenant_id}/islands/{spoke_id}/telemetry")
 async def post_telemetry(
     tenant_id: str,
     spoke_id: str,
@@ -180,6 +181,7 @@ async def post_telemetry(
 
 
 @router.get("/{tenant_id}/spokes/{spoke_id}/inbox")
+@router.get("/{tenant_id}/islands/{spoke_id}/inbox")
 def get_inbox(
     tenant_id: str,
     spoke_id: str,
@@ -205,6 +207,7 @@ class AckPayload(BaseModel):
 
 
 @router.post("/{tenant_id}/spokes/{spoke_id}/ack")
+@router.post("/{tenant_id}/islands/{spoke_id}/ack")
 async def ack_command_endpoint(
     tenant_id: str,
     spoke_id: str,
