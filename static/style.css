@@ -1749,27 +1749,124 @@ tbody tr.updated { animation: row-update 1.4s ease-out; }
   white-space: nowrap;
 }
 
-.tenant-card-grid { margin-top: 16px; }
-.tenant-card {
-  cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+.tenant-list {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  min-height: 220px;
+  gap: 10px;
+  margin-top: 16px;
 }
-.tenant-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(0,0,0,0.12); }
-.tenant-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.tenant-card-title-wrap { min-width: 0; }
-.tenant-card-title { margin: 0; font-size: 1.05rem; color: var(--hpe-navy); word-break: break-word; }
-.tenant-card-subtitle { margin-top: 4px; font-size: 0.8rem; color: var(--muted); }
-.tenant-card-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.tenant-card-metric { border: 1px solid rgba(148,163,184,0.18); border-radius: 10px; padding: 10px 12px; background: rgba(15,23,42,0.03); display: flex; flex-direction: column; gap: 4px; }
-.tenant-card-metric-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-.tenant-card-metric-value { font-size: 1.15rem; font-weight: 700; color: var(--hpe-navy); }
-.tenant-card-alert { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tenant-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) repeat(3, minmax(110px, 0.8fr)) auto;
+  gap: 16px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.tenant-list-row:hover,
+.tenant-list-row:focus-within {
+  border-color: rgba(1,169,130,0.45);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+  background: #fcfffe;
+}
+.tenant-list-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.tenant-list-name {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--hpe-navy);
+  word-break: break-word;
+}
+.tenant-list-id {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.tenant-list-count {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.tenant-list-count-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.tenant-list-count-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--hpe-navy);
+}
+.tenant-list-alerts { align-items: flex-start; }
 .tenant-alert-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; }
 .tenant-alert-pill.ok { background: rgba(1,169,130,0.12); color: var(--hpe-green-dark); }
 .tenant-alert-pill.alert { background: rgba(192,57,43,0.12); color: #b03a2e; }
-.tenant-card-cta { font-size: 0.85rem; font-weight: 600; color: var(--hpe-green-dark); }
+.tenant-select-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border: 1px solid rgba(1,169,130,0.35);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--hpe-green-dark);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tenant-select-btn:hover,
+.tenant-select-btn:focus-visible,
+.tenant-list-main:focus-visible {
+  outline: none;
+}
+.tenant-select-btn:hover,
+.tenant-select-btn:focus-visible {
+  background: var(--hpe-green-light);
+  border-color: var(--hpe-green);
+}
+.tenant-list-main:hover .tenant-list-name,
+.tenant-list-main:focus-visible .tenant-list-name {
+  color: var(--hpe-green-dark);
+  text-decoration: underline;
+}
+.tenant-list-chevron {
+  font-size: 1.1rem;
+  line-height: 1;
+}
 .tenant-empty-action { margin-top: 12px; }
+@media (max-width: 900px) {
+  .tenant-list-row {
+    grid-template-columns: minmax(0, 1fr) repeat(2, minmax(110px, 1fr));
+  }
+  .tenant-list-alerts {
+    grid-column: 1 / span 2;
+  }
+  .tenant-select-btn {
+    justify-self: end;
+  }
+}
+@media (max-width: 640px) {
+  .tenant-list-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .tenant-select-btn {
+    justify-self: stretch;
+  }
+}

@@ -447,28 +447,33 @@ function summarizeTenantAlerts(summary) {
   return { tone: "ok", text: "OK" };
 }
 
-function renderTenantCard(cardData) {
-  const { id, name, summary, alert } = cardData;
-  const card = document.createElement("article");
-  card.className = "spoke-card tenant-card";
-  card.dataset.enterTenant = id;
-  card.innerHTML = `
-    <div class="tenant-card-top">
-      <div class="tenant-card-title-wrap">
-        <h2 class="tenant-card-title">${escHtml(name || id)}</h2>
-        <div class="tenant-card-subtitle">Tenant ID: ${escHtml(id)}</div>
-      </div>
-      <div class="spoke-card-status">${statusDot(summary.onlineCount > 0 || summary.approvedCount === 0)}</div>
+function renderTenantRow(rowData) {
+  const { id, name, summary, alert } = rowData;
+  const row = document.createElement("div");
+  row.className = "tenant-list-row";
+  row.innerHTML = `
+    <button class="tenant-list-main" data-enter-tenant="${escHtml(id)}" type="button">
+      <span class="tenant-list-name">${escHtml(name || id)}</span>
+      <span class="tenant-list-id">Tenant ID: ${escHtml(id)}</span>
+    </button>
+    <div class="tenant-list-count">
+      <span class="tenant-list-count-label">Spokes</span>
+      <strong class="tenant-list-count-value">${summary.approvedCount}</strong>
     </div>
-    <div class="tenant-card-metrics">
-      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Spokes</span><strong class="tenant-card-metric-value">${summary.approvedCount}</strong></div>
-      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Clients</span><strong class="tenant-card-metric-value">${summary.clientCount}</strong></div>
-      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Offline</span><strong class="tenant-card-metric-value">${summary.offlineCount}</strong></div>
-      <div class="tenant-card-metric"><span class="tenant-card-metric-label">Last Sync</span><strong class="tenant-card-metric-value">${escHtml(relativeTime(summary.lastSync))}</strong></div>
+    <div class="tenant-list-count">
+      <span class="tenant-list-count-label">Clients</span>
+      <strong class="tenant-list-count-value">${summary.clientCount}</strong>
     </div>
-    <div class="tenant-card-alert"><span class="tenant-alert-pill ${alert.tone}">${escHtml(alert.text)}</span><span class="tenant-card-cta">Open tenant →</span></div>
+    <div class="tenant-list-count tenant-list-alerts">
+      <span class="tenant-list-count-label">Alerts</span>
+      <span class="tenant-alert-pill ${alert.tone}">${escHtml(alert.text)}</span>
+    </div>
+    <button class="tenant-select-btn" data-enter-tenant="${escHtml(id)}" type="button" aria-label="Select ${escHtml(name || id)}">
+      <span>Select</span>
+      <span class="tenant-list-chevron" aria-hidden="true">›</span>
+    </button>
   `;
-  return card;
+  return row;
 }
 
 function renderTenantDashboardEmptyState() {
@@ -485,6 +490,8 @@ async function loadDashboard(force = false) {
     $("#dash-tenants-pill") && ($("#dash-tenants-pill").textContent = `${tenants.length} tenants`);
     $("#dashboard-add-tenant-btn")?.classList.toggle("hidden", !currentUser?.is_superadmin);
     if (!grid || !empty) return;
+    grid.classList.remove("spoke-grid");
+    grid.classList.add("tenant-list");
     if (!tenants.length) {
       grid.innerHTML = "";
       $("#dash-spokes-pill") && ($("#dash-spokes-pill").textContent = '0 spokes');
@@ -509,10 +516,12 @@ async function loadDashboard(force = false) {
     $("#dash-online-pill") && ($("#dash-online-pill").textContent = totalAlerts ? `${totalAlerts} tenants need attention` : 'All tenants OK');
     empty.classList.toggle("hidden", rows.length > 0);
     empty.innerHTML = rows.length ? "" : renderTenantDashboardEmptyState();
-    renderInBatches("dashboard", grid, rows, renderTenantCard, 24);
+    renderInBatches("dashboard", grid, rows, renderTenantRow, 40);
     return;
   }
 
+  grid?.classList.add("spoke-grid");
+  grid?.classList.remove("tenant-list");
   const res = await fetch("/api/sites").catch(() => null);
   if (!res || !res.ok) return;
   const sites = (await res.json()).filter(site => site.status === "approved");
