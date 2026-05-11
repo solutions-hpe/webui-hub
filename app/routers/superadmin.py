@@ -88,6 +88,7 @@ def _tenant_response(tenant: Tenant) -> dict[str, Any]:
         "has_aruba_config": bool(tenant.aruba_config_enc),
         "has_notification_config": bool(tenant.notification_config_enc),
         "default_processing_mode": tenant.default_processing_mode.model_dump(),
+        "hub_config_enabled": tenant.hub_config_enabled,
         "created_at": tenant.created_at,
         "created_by": tenant.created_by,
     }
