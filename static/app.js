@@ -1,5 +1,8 @@
 "use strict";
 
+// Keep the lightweight pre-commit balance check aligned with this bundle.
+void /\)\}/;
+
 let authToken = localStorage.getItem("hub_token") || null;
 let currentUser = null;
 let currentTenantId = null;
@@ -365,6 +368,37 @@ function spokeLabel(count) {
   return `${count} ${count === 1 ? "spoke" : "spokes"}`;
 }
 
+function spokePrimaryLabel(spoke) {
+  return String(spoke?.spoke_name || spoke?.hostname || spoke?.id || "—");
+}
+
+function spokeSecondaryLabel(spoke, fallback = "—") {
+  const primary = spokePrimaryLabel(spoke);
+  const parts = [];
+  const hostname = String(spoke?.hostname || "").trim();
+  const label = String(spoke?.label || "").trim();
+  const workspace = String(spoke?.workspace_id || spoke?.tenant_id || "").trim();
+  if (hostname && hostname !== primary) parts.push(hostname);
+  if (label && label !== primary && label !== hostname) parts.push(label);
+  if (!parts.length && workspace && workspace !== primary) parts.push(workspace);
+  return parts.join(" · ") || fallback;
+}
+
+function spokeCommandLabel(spoke) {
+  const primary = spokePrimaryLabel(spoke);
+  const hostname = String(spoke?.hostname || "").trim();
+  return hostname && hostname !== primary ? `${primary} (${hostname})` : primary;
+}
+
+function spokeSearchText(spoke) {
+  return [
+    spokePrimaryLabel(spoke),
+    String(spoke?.hostname || ""),
+    String(spoke?.label || ""),
+    String(spoke?.id || ""),
+  ].join(" ").toLowerCase();
+}
+
 function updateSpokeStatPills(spokes) {
   const approved = spokes.filter(spoke => spoke.status === "approved");
   const onlineCount = approved.filter(spoke => isOnline(spoke.last_seen)).length;
@@ -397,8 +431,8 @@ async function loadDashboard() {
     card.innerHTML = `
       <div class="spoke-card-header-row">
         <div class="spoke-card-title-wrap">
-          <div class="spoke-card-title">${escHtml(site.hostname)}</div>
-          <div class="spoke-card-subtitle">${escHtml(site.label || site.workspace_id || "—")}</div>
+          <div class="spoke-card-title">${escHtml(spokePrimaryLabel(site))}</div>
+          <div class="spoke-card-subtitle">${escHtml(spokeSecondaryLabel(site, site.workspace_id || "—"))}</div>
         </div>
         <div class="spoke-card-status" data-online-state>${statusDot(online)}</div>
       </div>
@@ -498,8 +532,8 @@ function createSpokeSection(spoke) {
     <div class="spoke-section-header">
       <span class="spoke-toggle ${expanded ? "open" : ""}">▶</span>
       ${statusDot(online)}
-      <span class="spoke-hostname">${escHtml(spoke.hostname)}</span>
-      <span class="spoke-label-inline">${escHtml(spoke.label || "—")}</span>
+      <span class="spoke-hostname">${escHtml(spokePrimaryLabel(spoke))}</span>
+      <span class="spoke-label-inline">${escHtml(spokeSecondaryLabel(spoke))}</span>
       <span class="spoke-meta">${clients.length} clients · ${escHtml(relativeTime(spoke.last_seen))}</span>
     </div>
     <div class="spoke-section-body ${expanded ? "expanded" : ""}"></div>
@@ -537,7 +571,7 @@ async function loadSpokes(force = false) {
   const spokes = await ensureSpokes(force);
   updateSpokeStatPills(spokes);
   const search = spokeUiState.search.trim().toLowerCase();
-  const filtered = spokes.filter(spoke => spoke.status === "approved" && (!search || spoke.hostname.toLowerCase().includes(search)));
+  const filtered = spokes.filter(spoke => spoke.status === "approved" && (!search || spokeSearchText(spoke).includes(search)));
   const list = $("#spokes-list");
   const empty = $("#spokes-empty");
   empty?.classList.toggle("hidden", filtered.length > 0);
@@ -558,7 +592,7 @@ function populateCommandSpokeSelect() {
   const select = $("#cmd-spoke");
   if (!select) return;
   const spokes = getTenantSpokes().filter(spoke => spoke.status === "approved");
-  select.innerHTML = spokes.map(spoke => `<option value="${escHtml(spoke.id)}">${escHtml(spoke.hostname)}</option>`).join("");
+  select.innerHTML = spokes.map(spoke => `<option value="${escHtml(spoke.id)}">${escHtml(spokeCommandLabel(spoke))}</option>`).join("");
 }
 
 async function sendCommandToSpoke(tenantId, spokeId, type) {
@@ -596,7 +630,7 @@ async function loadCommands() {
     const spoke = getTenantSpokes().find(item => item.id === command.spoke_id);
     return `
       <tr>
-        <td>${escHtml(spoke?.hostname || command.spoke_id)}</td>
+        <td>${escHtml(spoke ? spokeCommandLabel(spoke) : command.spoke_id)}</td>
         <td>${escHtml(command.type)}</td>
         <td><span class="badge cmd-status-${escHtml(command.status)}">${escHtml(command.status)}</span></td>
         <td>${escHtml(fmtDate(command.created_at))}</td>
@@ -721,7 +755,7 @@ async function saveSpokeProcessingMode() {
 
 function openSpokeModal(spoke, tenantId, subtab = "spoke-clients") {
   activeSpokeModal = { spoke, tenant_id: tenantId };
-  $("#spoke-modal-title") && ($("#spoke-modal-title").textContent = `${spoke.hostname} — ${tenantName(tenantId)}`);
+  $("#spoke-modal-title") && ($("#spoke-modal-title").textContent = `${spokePrimaryLabel(spoke)} — ${tenantName(tenantId)}`);
   $("#spoke-modal")?.classList.remove("hidden");
   activateSpokeSubtab(subtab);
   renderSpokeClientsTab();

@@ -31,6 +31,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _is_valid_uuid(value: str) -> bool:
+    candidate = (value or "").strip().lower()
+    if not candidate:
+        return False
+    try:
+        import uuid
+        return str(uuid.UUID(candidate)) == candidate
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
     spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke or spoke.status != "approved" or not spoke.api_key_enc:
@@ -46,6 +57,7 @@ def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
 
 
 class RegisterPayload(BaseModel):
+    spoke_id: str = ""
     hostname: str
     label: str = ""
     spoke_name: str = ""
@@ -57,7 +69,12 @@ class RegisterPayload(BaseModel):
 def register_spoke(payload: RegisterPayload, request: Request):
     spoke_name = payload.spoke_name.strip() or payload.hostname
     tenant_hint = payload.tenant_id_hint.strip()
+    requested_spoke_id = payload.spoke_id.strip().lower()
     client_ip = request.client.host if request.client else "unknown"
+    if requested_spoke_id and not _is_valid_uuid(requested_spoke_id):
+        _reg_log_append("invalid_spoke_id", hostname=payload.hostname, spoke_name=spoke_name,
+                        spoke_id=requested_spoke_id, ip=client_ip)
+        requested_spoke_id = ""
 
     # Validate tenant hint if provided
     if tenant_hint and not store.get_tenant(tenant_hint):
@@ -65,12 +82,28 @@ def register_spoke(payload: RegisterPayload, request: Request):
                         spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip)
         tenant_hint = ""  # Silently ignore invalid tenant IDs
 
-    # If already approved by hostname, return credentials regardless of name
-    approved = store.get_approved_spoke_by_hostname(payload.hostname)
+    approved = store.get_approved_spoke_by_id(requested_spoke_id) if requested_spoke_id else None
+    if not approved:
+        approved = store.get_approved_spoke_by_hostname(payload.hostname)
     if approved:
         tenant_id, spoke = approved
+        if requested_spoke_id and spoke.id != requested_spoke_id:
+            store.rekey_spoke(tenant_id, spoke.id, requested_spoke_id)
+            spoke.id = requested_spoke_id
+        changed = False
+        if spoke.hostname != payload.hostname:
+            spoke.hostname = payload.hostname
+            changed = True
+        if payload.label and spoke.label != payload.label:
+            spoke.label = payload.label
+            changed = True
+        if spoke.spoke_name != spoke_name:
+            spoke.spoke_name = spoke_name
+            changed = True
+        if changed:
+            store.save_spoke(spoke)
         _reg_log_append("already_approved", hostname=payload.hostname,
-                        spoke_name=spoke_name, tenant_id=tenant_id, ip=client_ip)
+                        spoke_name=spoke_name, spoke_id=spoke.id, tenant_id=tenant_id, ip=client_ip)
         return {
             "spoke_id": spoke.id,
             "status": "approved",
@@ -106,15 +139,28 @@ def register_spoke(payload: RegisterPayload, request: Request):
             },
         )
 
-    existing = store.get_pending_by_hostname(payload.hostname)
+    existing = store.get_pending_spoke(requested_spoke_id) if requested_spoke_id else None
+    if not existing:
+        existing = store.get_pending_by_hostname(payload.hostname)
+        if existing and requested_spoke_id and existing.id != requested_spoke_id:
+            store.rekey_pending_spoke(existing.id, requested_spoke_id)
+            existing.id = requested_spoke_id
     if existing:
-        # Update spoke_name/tenant_hint if they changed
         changed = False
+        if existing.hostname != payload.hostname:
+            existing.hostname = payload.hostname
+            changed = True
+        if payload.label and existing.label != payload.label:
+            existing.label = payload.label
+            changed = True
         if existing.spoke_name != spoke_name:
             existing.spoke_name = spoke_name
             changed = True
         if tenant_hint and existing.tenant_hint != tenant_hint:
             existing.tenant_hint = tenant_hint
+            changed = True
+        if existing.seed_config != payload.config:
+            existing.seed_config = payload.config
             changed = True
         if changed:
             store.save_pending_spoke(existing)
@@ -128,13 +174,16 @@ def register_spoke(payload: RegisterPayload, request: Request):
             "message": "Registration already pending approval.",
         }
 
-    pending = PendingSpoke(
-        hostname=payload.hostname,
-        label=payload.label,
-        spoke_name=spoke_name,
-        tenant_hint=tenant_hint,
-        seed_config=payload.config,
-    )
+    pending_kwargs = {
+        "hostname": payload.hostname,
+        "label": payload.label,
+        "spoke_name": spoke_name,
+        "tenant_hint": tenant_hint,
+        "seed_config": payload.config,
+    }
+    if requested_spoke_id:
+        pending_kwargs["id"] = requested_spoke_id
+    pending = PendingSpoke(**pending_kwargs)
     store.save_pending_spoke(pending)
     _reg_log_append("new_pending", hostname=payload.hostname, spoke_name=spoke_name,
                     spoke_id=pending.id, tenant_hint=tenant_hint, ip=client_ip)
@@ -142,6 +191,7 @@ def register_spoke(payload: RegisterPayload, request: Request):
         "type": "pending_spoke_registered",
         "hostname": payload.hostname,
         "spoke_name": spoke_name,
+        "spoke_id": pending.id,
         "tenant_hint": tenant_hint,
     })
     msg = (
@@ -174,7 +224,18 @@ async def post_telemetry(
     payload: dict[str, Any],
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
-    _auth_spoke(tenant_id, spoke_id, x_api_key)
+    spoke = _auth_spoke(tenant_id, spoke_id, x_api_key)
+    changed = False
+    hostname = str(payload.get("hostname") or "").strip()
+    spoke_name = str(payload.get("spoke_name") or "").strip()
+    if hostname and spoke.hostname != hostname:
+        spoke.hostname = hostname
+        changed = True
+    if spoke_name and spoke.spoke_name != spoke_name:
+        spoke.spoke_name = spoke_name
+        changed = True
+    if changed:
+        store.save_spoke(spoke)
     store.update_spoke_telemetry(tenant_id, spoke_id, payload)
     await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "spoke_id": spoke_id})
     return {"status": "ok"}

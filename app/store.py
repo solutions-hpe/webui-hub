@@ -201,6 +201,22 @@ def get_pending_by_hostname(hostname: str) -> Optional[PendingSpoke]:
     return None
 
 
+def rekey_pending_spoke(old_spoke_id: str, new_spoke_id: str) -> bool:
+    with _lock:
+        if old_spoke_id == new_spoke_id:
+            return True
+        pending = get_pending_spoke(old_spoke_id)
+        if not pending:
+            return False
+        target = _pending_dir() / f"{new_spoke_id}.json"
+        if target.exists():
+            raise ValueError("Pending spoke ID already exists")
+        delete_pending_spoke(old_spoke_id)
+        pending.id = new_spoke_id
+        save_pending_spoke(pending)
+        return True
+
+
 def get_spoke_by_pending_hostname(hostname: str) -> Optional[PendingSpoke]:
     return get_pending_by_hostname(hostname)
 
@@ -261,6 +277,16 @@ def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Spoke]]
     return None
 
 
+def get_approved_spoke_by_id(spoke_id: str) -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for the first approved spoke matching ID across all tenants."""
+    with _lock:
+        for tenant in _load_tenants():
+            for spoke in _load_spokes(tenant.id):
+                if spoke.status == "approved" and spoke.id == spoke_id:
+                    return tenant.id, spoke
+    return None
+
+
 def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Spoke]]:
     """Return (tenant_id, spoke) for the first approved spoke matching spoke_name across all tenants."""
     name = spoke_name.strip().lower()
@@ -286,7 +312,7 @@ def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingSpoke]:
     return None
 
 
-
+def list_spokes(tenant_id: str) -> list[Spoke]:
     with _lock:
         return _load_spokes(tenant_id)
 
@@ -328,6 +354,31 @@ def delete_spoke(tenant_id: str, spoke_id: str) -> None:
         audit_path = _audit_path(tenant_id, spoke_id)
         if audit_path.exists():
             audit_path.unlink()
+
+
+def rekey_spoke(tenant_id: str, old_spoke_id: str, new_spoke_id: str) -> bool:
+    with _lock:
+        if old_spoke_id == new_spoke_id:
+            return True
+        spokes = _load_spokes(tenant_id)
+        if any(spoke.id == new_spoke_id for spoke in spokes):
+            raise ValueError("Spoke ID already exists")
+        for spoke in spokes:
+            if spoke.id == old_spoke_id:
+                spoke.id = new_spoke_id
+                _save_spokes(tenant_id, spokes)
+                old_queue_path = _queue_path(tenant_id, old_spoke_id)
+                new_queue_path = _queue_path(tenant_id, new_spoke_id)
+                if old_queue_path.exists():
+                    new_queue_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_queue_path.replace(new_queue_path)
+                old_audit_path = _audit_path(tenant_id, old_spoke_id)
+                new_audit_path = _audit_path(tenant_id, new_spoke_id)
+                if old_audit_path.exists():
+                    new_audit_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_audit_path.replace(new_audit_path)
+                return True
+    return False
 
 
 def approve_spoke(tenant_id: str, spoke_id: str) -> Optional[str]:
