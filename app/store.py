@@ -369,6 +369,50 @@ def save_spoke(spoke: Spoke) -> None:
         _save_spokes(spoke.tenant_id, spokes)
 
 
+def mark_spoke_config_applied(tenant_id: str, spoke_id: str, version: int) -> None:
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke:
+            return
+        if version > spoke.applied_config_version:
+            spoke.applied_config_version = version
+        spoke.last_config_applied_at = _now()
+        save_spoke(spoke)
+
+
+def get_command(tenant_id: str, spoke_id: str, command_id: str) -> Optional[Command]:
+    with _lock:
+        for command in _load_queue(tenant_id, spoke_id):
+            if command.id == command_id:
+                return command
+    return None
+
+
+def ensure_config_update_command(tenant_id: str, spoke_id: str) -> None:
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke or spoke.status != "approved" or spoke.config_version <= spoke.applied_config_version:
+            return
+        commands = _load_queue(tenant_id, spoke_id)
+        target_version = spoke.config_version
+        for command in commands:
+            payload_version = int((command.payload or {}).get("__config_version", 0) or 0)
+            if command.type == "config_update" and payload_version == target_version and command.status in {"queued", "delivered", "executed"}:
+                return
+        payload = dict(spoke.config or {})
+        payload["__config_version"] = target_version
+        commands.append(
+            Command(
+                spoke_id=spoke_id,
+                tenant_id=tenant_id,
+                type="config_update",
+                payload=payload,
+                expires_at=_now() + timedelta(hours=24),
+            )
+        )
+        _save_queue(tenant_id, spoke_id, commands)
+
+
 def get_processing_stats(tenant_id: str) -> dict:
     """Return count of islands in centralized vs distributed mode per feature."""
     spokes = list_spokes(tenant_id)

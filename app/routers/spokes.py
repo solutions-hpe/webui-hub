@@ -336,6 +336,7 @@ def get_inbox(
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
     _auth_spoke(tenant_id, spoke_id, x_api_key)
+    store.ensure_config_update_command(tenant_id, spoke_id)
     commands = store.get_queued_commands(tenant_id, spoke_id)
     return [{"id": c.id, "target": c.target, "type": c.type, "payload": c.payload} for c in commands]
 
@@ -363,8 +364,13 @@ async def ack_command_endpoint(
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
     _auth_spoke(tenant_id, spoke_id, x_api_key)
+    command = store.get_command(tenant_id, spoke_id, payload.command_id)
     result = payload.result.model_dump(exclude_none=True) if payload.result else None
     store.ack_command(tenant_id, spoke_id, payload.command_id, result)
+    if command and command.type == "config_update" and (result or {}).get("success", True):
+        version = int((command.payload or {}).get("__config_version", 0) or 0)
+        if version > 0:
+            store.mark_spoke_config_applied(tenant_id, spoke_id, version)
     if result and result.get("task_type"):
         task_status = "success" if result.get("success") else "failure"
         store.append_audit(

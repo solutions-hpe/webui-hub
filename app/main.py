@@ -17,7 +17,9 @@ from .ws import ws_connect
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
-STATIC_DIR = BASE_DIR / "static"
+FRONTEND_DIR = BASE_DIR / "frontend"
+STATIC_DIR = FRONTEND_DIR / "static"
+TEMPLATE_DIR = FRONTEND_DIR / "templates"
 
 
 @asynccontextmanager
@@ -95,9 +97,12 @@ def health():
     return {"status": "ok", "version": app_version, "branch": branch, "sha": sha}
 
 
+@app.get("/api/init")
+def api_init():
+    return {"mode": "hub"}
+
+
 @app.get("/{full_path:path}", response_class=HTMLResponse)
 async def spa_fallback(full_path: str):
-    index = STATIC_DIR / "index.html"
-    html = index.read_text()
-    html = html.replace("{{WEBUI_MODE}}", "hub")
-    return HTMLResponse(content=html)
+    index = TEMPLATE_DIR / "index.html"
+    return HTMLResponse(content=index.read_text())

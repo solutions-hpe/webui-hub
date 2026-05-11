@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import auth, store
-from ..data_models import Command, Spoke, User
+from ..data_models import Spoke, User
 
 router = APIRouter()
 
@@ -31,6 +31,9 @@ def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any
         "status": spoke.status,
         "seed_config": spoke.seed_config,
         "processing_mode": spoke.processing_mode,
+        "config_version": spoke.config_version,
+        "applied_config_version": spoke.applied_config_version,
+        "last_config_applied_at": spoke.last_config_applied_at,
         "last_seen": spoke.last_seen,
         "telemetry": spoke.telemetry,
         "created_at": spoke.created_at,
@@ -119,16 +122,8 @@ def update_spoke_config(
         raise HTTPException(status_code=409, detail="Spoke is not approved")
 
     spoke.config = payload.config
+    spoke.config_version += 1
     store.save_spoke(spoke)
-    store.enqueue_command(
-        Command(
-            spoke_id=spoke.id,
-            tenant_id=tenant_id,
-            type="config_update",
-            payload=payload.config,
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
-        )
-    )
     return _serialize_spoke(spoke)
 
 

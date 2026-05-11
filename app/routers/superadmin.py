@@ -60,7 +60,7 @@ class CreateUserRequest(BaseModel):
 
 class AssignRoleRequest(BaseModel):
     tenant_id: str
-    role: Literal["admin", "operator"]
+    role: Literal["admin", "viewer", "operator"]
 
 
 def _normalize_notification_config(payload: NotificationConfigRequest) -> dict[str, Any]:
@@ -514,8 +514,9 @@ def assign_tenant_role(
     if not store.get_tenant(payload.tenant_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    normalized_role = "viewer" if payload.role == "operator" else payload.role
     user.tenant_roles = [tr for tr in user.tenant_roles if tr["tenant_id"] != payload.tenant_id]
-    user.tenant_roles.append({"tenant_id": payload.tenant_id, "role": payload.role})
+    user.tenant_roles.append({"tenant_id": payload.tenant_id, "role": normalized_role})
     store.save_user(user)
     return _user_response(user)
 

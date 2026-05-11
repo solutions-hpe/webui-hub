@@ -79,6 +79,9 @@ class Spoke(BaseModel):
     seed_config: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     processing_mode: ProcessingMode = Field(default_factory=ProcessingMode)
+    config_version: int = 0
+    applied_config_version: int = 0
+    last_config_applied_at: Optional[datetime] = None
     last_seen: Optional[datetime] = None
     telemetry: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)
