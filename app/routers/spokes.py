@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import auth, store
-from ..crypto import decrypt_str
+from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, PendingSpoke
 from ..ws import ws_broadcast
 
@@ -100,15 +100,28 @@ def register_spoke(payload: RegisterPayload, request: Request):
         if spoke.spoke_name != spoke_name:
             spoke.spoke_name = spoke_name
             changed = True
+        regenerated_api_key = False
+        api_key = ""
+        if spoke.api_key_enc:
+            try:
+                api_key = decrypt_str(spoke.api_key_enc)
+            except Exception:
+                api_key = ""
+        if not api_key:
+            api_key = generate_api_key()
+            spoke.api_key_enc = encrypt_str(api_key)
+            changed = True
+            regenerated_api_key = True
         if changed:
             store.save_spoke(spoke)
         _reg_log_append("already_approved", hostname=payload.hostname,
-                        spoke_name=spoke_name, spoke_id=spoke.id, tenant_id=tenant_id, ip=client_ip)
+                        spoke_name=spoke_name, spoke_id=spoke.id, tenant_id=tenant_id,
+                        ip=client_ip, regenerated_api_key=regenerated_api_key)
         return {
             "spoke_id": spoke.id,
             "status": "approved",
             "tenant_id": tenant_id,
-            "api_key": decrypt_str(spoke.api_key_enc) if spoke.api_key_enc else "",
+            "api_key": api_key,
         }
 
     # Check for spoke_name conflicts in approved spokes
