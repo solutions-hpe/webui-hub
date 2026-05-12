@@ -19,13 +19,27 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import get_settings
-from .crypto import decrypt_str, encrypt_str, generate_api_key
+from .crypto import decrypt_dict, decrypt_str, encrypt_str, generate_api_key
 from .data_models import AuditEntry, Command, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
 
 
 logger = logging.getLogger(__name__)
+
+_RELAY_CONFIG_KEYS = {
+    "relay_server_url",
+    "relay_api_key",
+    "relay_tenant_id",
+    "hub_tls_verify",
+    "relay_spoke_id",
+    "relay_spoke_name",
+}
+_PROCESSING_MODE_DEFAULTS = {
+    "central_api": "centralized",
+    "teams": "centralized",
+    "email": "centralized",
+}
 
 
 def _data_dir() -> Path:
@@ -406,6 +420,128 @@ def get_command(tenant_id: str, spoke_id: str, command_id: str) -> Optional[Comm
     return None
 
 
+def _tenant_processing_modes(tenant: Tenant | None) -> dict[str, str]:
+    modes = dict(_PROCESSING_MODE_DEFAULTS)
+    if tenant:
+        for key, default in _PROCESSING_MODE_DEFAULTS.items():
+            value = str((tenant.processing_modes or {}).get(key, default)).strip().lower()
+            modes[key] = value if value in {"centralized", "distributed"} else default
+    return modes
+
+
+
+def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
+    if not tenant:
+        return {}
+    return {
+        key: value
+        for key, value in (tenant.hub_config or {}).items()
+        if key not in _RELAY_CONFIG_KEYS
+    }
+
+
+
+def _hub_central_config(tenant: Tenant | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not tenant or not tenant.aruba_config_enc:
+        return None, None
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception:
+        logger.warning("Unable to decrypt Aruba config for tenant %s", tenant.id)
+        return None, None
+
+    api_version = str(cfg.get("api_version") or "classic").strip().lower()
+    if api_version == "new_central":
+        central_api = {
+            "mode": "central",
+            "classic": {"url": "", "username": ""},
+            "central": {
+                "url": cfg.get("cluster_url", ""),
+                "client_id": cfg.get("client_id", ""),
+                "customer_id": cfg.get("customer_id", ""),
+                "client_secret": cfg.get("client_secret", ""),
+            },
+        }
+    else:
+        central_api = {
+            "mode": "classic",
+            "classic": {
+                "url": cfg.get("cluster_url", ""),
+                "username": cfg.get("username", ""),
+                "password": cfg.get("password", ""),
+            },
+            "central": {"url": "", "client_id": "", "customer_id": "", "client_secret": ""},
+        }
+
+    central_config = {
+        "api_version": api_version,
+        "cluster_url": cfg.get("cluster_url", ""),
+        "client_id": cfg.get("client_id", ""),
+        "client_secret": cfg.get("client_secret", ""),
+        "customer_id": cfg.get("customer_id", ""),
+        "access_token": cfg.get("access_token", ""),
+        "refresh_token": cfg.get("refresh_token", ""),
+    }
+    return central_api, central_config
+
+
+
+def _hub_notification_config(tenant: Tenant | None) -> dict[str, Any]:
+    if not tenant or not tenant.notification_config_enc:
+        return {}
+    try:
+        cfg = decrypt_dict(tenant.notification_config_enc)
+    except Exception:
+        logger.warning("Unable to decrypt notification config for tenant %s", tenant.id)
+        return {}
+
+    to_emails = cfg.get("to_emails") or []
+    if isinstance(to_emails, str):
+        to_emails = [item.strip() for item in to_emails.split(",") if item.strip()]
+    return {
+        "teams_webhook_url": cfg.get("teams_webhook_url") or cfg.get("teams_webhook") or "",
+        "smtp_host": cfg.get("smtp_host", ""),
+        "smtp_port": cfg.get("smtp_port", 587),
+        "smtp_user": cfg.get("smtp_user", ""),
+        "smtp_password": cfg.get("smtp_password") or cfg.get("smtp_pass") or "",
+        "smtp_from": cfg.get("from_email", ""),
+        "smtp_to": to_emails,
+    }
+
+
+
+def _build_spoke_config_payload(tenant: Tenant | None) -> dict[str, Any]:
+    payload = _hub_core_config(tenant)
+    modes = _tenant_processing_modes(tenant)
+    central_api, central_config = _hub_central_config(tenant)
+    notifications = _hub_notification_config(tenant)
+
+    if modes["central_api"] == "distributed":
+        payload["central_api"] = central_api or {
+            "mode": "classic",
+            "classic": {"url": "", "username": ""},
+            "central": {"url": "", "client_id": "", "customer_id": "", "client_secret": ""},
+        }
+        payload["central_config"] = central_config or {
+            "api_version": "classic",
+            "cluster_url": "",
+            "client_id": "",
+            "client_secret": "",
+            "customer_id": "",
+            "access_token": "",
+            "refresh_token": "",
+        }
+    else:
+        payload["central_api"] = None
+        payload["central_config"] = None
+
+    payload["teams_webhook_url"] = notifications.get("teams_webhook_url", "") if modes["teams"] == "distributed" else None
+    for key in ("smtp_host", "smtp_port", "smtp_user", "smtp_password", "smtp_from", "smtp_to"):
+        payload[key] = notifications.get(key) if modes["email"] == "distributed" else None
+    return payload
+
+
+
 def ensure_config_update_command(tenant_id: str, spoke_id: str) -> None:
     with _lock:
         spoke = get_spoke(tenant_id, spoke_id)
@@ -414,20 +550,45 @@ def ensure_config_update_command(tenant_id: str, spoke_id: str) -> None:
         commands = _load_queue(tenant_id, spoke_id)
         target_version = spoke.config_version
         for command in commands:
-            payload_version = int((command.payload or {}).get("__config_version", 0) or 0)
+            payload_version = int((command.payload or {}).get("config_version") or (command.payload or {}).get("__config_version", 0) or 0)
             if command.type == "config_update" and payload_version == target_version and command.status in {"queued", "delivered", "executed"}:
                 return
         tenant = get_tenant(tenant_id)
-        payload = dict(spoke.config or {})
-        if tenant and tenant.hub_config_enabled and tenant.hub_config:
-            payload.update(tenant.hub_config)
-        payload["__config_version"] = target_version
+        merged_payload = _build_spoke_config_payload(tenant)
+        command_payload = {
+            "command": "config_update",
+            "config": merged_payload,
+            "config_version": target_version,
+            "__config_version": target_version,
+        }
         commands.append(
             Command(
                 spoke_id=spoke_id,
                 tenant_id=tenant_id,
                 type="config_update",
-                payload=payload,
+                payload=command_payload,
+                expires_at=_now() + timedelta(hours=24),
+            )
+        )
+        _save_queue(tenant_id, spoke_id, commands)
+
+
+
+def ensure_config_clear_command(tenant_id: str, spoke_id: str) -> None:
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke or spoke.status != "approved":
+            return
+        commands = _load_queue(tenant_id, spoke_id)
+        for command in commands:
+            if command.type == "config_clear" and command.status in {"queued", "delivered"}:
+                return
+        commands.append(
+            Command(
+                spoke_id=spoke_id,
+                tenant_id=tenant_id,
+                type="config_clear",
+                payload={"command": "config_clear"},
                 expires_at=_now() + timedelta(hours=24),
             )
         )

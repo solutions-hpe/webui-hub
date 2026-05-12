@@ -53,6 +53,12 @@ class ProcessingModeUpdateRequest(BaseModel):
     repo_sync: Optional[ModeValue] = None
 
 
+class TenantProcessingModesRequest(BaseModel):
+    central_api: Optional[ModeValue] = None
+    teams: Optional[ModeValue] = None
+    email: Optional[ModeValue] = None
+
+
 def _get_tenant(tenant_id: str) -> Tenant:
     tenant = store.get_tenant(tenant_id)
     if not tenant:
@@ -226,6 +232,7 @@ def get_tenant_settings(tenant_id: str, current_user: User = Depends(auth.get_cu
         "aruba": _serialize_aruba_config(tenant),
         "notifications": _serialize_notification_config(tenant),
         "processing_mode": tenant.default_processing_mode.model_dump(),
+        "processing_modes": tenant.processing_modes,
     }
 
 
@@ -241,6 +248,12 @@ def update_aruba_settings(
     tenant.aruba_config_enc = encrypt_dict(cfg)
     tenant.aruba_cid = payload.customer_id or tenant.aruba_cid
     store.save_tenant(tenant)
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
     return _serialize_aruba_config(tenant)
 
 
@@ -254,6 +267,12 @@ def update_notification_settings(
     tenant = _get_tenant(tenant_id)
     tenant.notification_config_enc = encrypt_dict(_normalize_notification_config(payload))
     store.save_tenant(tenant)
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
     return _serialize_notification_config(tenant)
 
 
@@ -275,6 +294,32 @@ def update_default_processing_mode(
     tenant.default_processing_mode = _processing_mode_from_payload(payload)
     store.save_tenant(tenant)
     return tenant.default_processing_mode.model_dump()
+
+
+@router.patch("/hub/tenants/{tenant_id}/processing-modes")
+def update_tenant_processing_modes(
+    tenant_id: str,
+    payload: TenantProcessingModesRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    updated = dict(tenant.processing_modes or {})
+    for key, value in payload.model_dump(exclude_none=True).items():
+        updated[key] = value
+    tenant.processing_modes = updated
+    store.save_tenant(tenant)
+
+    pushed_count = 0
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
+        pushed_count += 1
+
+    return {"processing_modes": tenant.processing_modes, "pushed_to_spokes": pushed_count}
 
 
 @router.patch("/{tenant_id}/spokes/{spoke_id}/processing-mode")

@@ -326,14 +326,27 @@ async def post_telemetry(
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
     spoke = _auth_spoke(tenant_id, spoke_id, x_api_key)
+    tenant = store.get_tenant(tenant_id)
     changed = False
+    previous_config_version = spoke.config_version
     hostname = str(payload.get("hostname") or "").strip()
     spoke_name = str(payload.get("spoke_name") or "").strip()
+    telemetry_config = payload.get("config") if isinstance(payload.get("config"), dict) else None
     if hostname and spoke.hostname != hostname:
         spoke.hostname = hostname
         changed = True
     if spoke_name and spoke.spoke_name != spoke_name:
         spoke.spoke_name = spoke_name
+        changed = True
+    if not spoke.config and telemetry_config:
+        spoke.config = dict(telemetry_config)
+        spoke.config_version = 1
+        spoke.applied_config_version = 0
+        changed = True
+    if tenant and previous_config_version > 0 and not tenant.hub_config:
+        spoke.config_version = 0
+        spoke.applied_config_version = 0
+        store.ensure_config_clear_command(tenant_id, spoke_id)
         changed = True
     if changed:
         store.save_spoke(spoke)

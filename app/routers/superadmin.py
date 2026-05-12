@@ -292,7 +292,11 @@ def get_tenant_hub_config(
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    return {"hub_config_enabled": tenant.hub_config_enabled, "hub_config": tenant.hub_config}
+    return {
+        "hub_config_enabled": tenant.hub_config_enabled,
+        "hub_config": tenant.hub_config,
+        "processing_modes": tenant.processing_modes,
+    }
 
 
 @router.put("/tenant/{tenant_id}/hub-config")
@@ -306,35 +310,25 @@ async def update_tenant_hub_config(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     tenant.hub_config_enabled = payload.hub_config_enabled
-    if payload.hub_config:
-        tenant.hub_config = payload.hub_config
+    tenant.hub_config = payload.hub_config or {}
     store.save_tenant(tenant)
 
     pushed_count = 0
-    if tenant.hub_config_enabled and tenant.hub_config:
-        relay_server_url = str(request.base_url).rstrip("/")
-        for spoke in store.list_spokes(tenant_id):
-            if spoke.status != "approved":
-                continue
-            updated_config = dict(spoke.config or {})
-            updated_config.update(tenant.hub_config)
-            if updated_config != spoke.config:
-                spoke.config = updated_config
-                spoke.config_version += 1
-                store.save_spoke(spoke)
-            store.enqueue_command(
-                Command(
-                    spoke_id=spoke.id,
-                    tenant_id=tenant_id,
-                    type="config_update",
-                    payload={
-                        **tenant.hub_config,
-                        "__config_version": spoke.config_version,
-                        "relay_server_url": relay_server_url,
-                    },
-                    expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
-                )
-            )
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        if tenant.hub_config_enabled and tenant.hub_config:
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant_id, spoke.id)
+            pushed_count += 1
+            continue
+
+        if spoke.config_version > 0:
+            spoke.config_version = 0
+            spoke.applied_config_version = 0
+            store.save_spoke(spoke)
+            store.ensure_config_clear_command(tenant_id, spoke.id)
             pushed_count += 1
 
     return {"status": "saved", "hub_config_enabled": tenant.hub_config_enabled, "pushed_to_spokes": pushed_count}
