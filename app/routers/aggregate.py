@@ -156,6 +156,9 @@ def _spoke_usb_lookup(spoke: Spoke) -> tuple[set[str], set[str], dict[str, str]]
         vmid = str(vm.get("vmid")).strip() if vm.get("vmid") is not None else ""
         if hostname and vmid:
             vmids_by_hostname[hostname] = vmid
+        # VMs with reclone_bus_path have a USB dongle assigned in Proxmox config
+        if vmid and vm.get("reclone_bus_path"):
+            usb_vmids.add(vmid)
 
     return usb_vmids, usb_hostnames, vmids_by_hostname
 
