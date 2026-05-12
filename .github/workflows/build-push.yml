@@ -72,25 +72,6 @@ jobs:
           echo "✅ Pushed version ${VERSION}:"
           echo "   ghcr.io/${{ github.repository }}:latest"
 
-  deploy-aci:
-    name: Restart ACI container
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    environment: production
-    if: github.ref_name == 'lrb'
-    steps:
-      - name: Azure login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Restart ACI container (force new image pull)
-        run: |
-          az container restart \
-            --name cs-hub-lrb \
-            --resource-group LRB
-          echo "✅ ACI container cs-hub-lrb restarted — pulling ghcr.io/solutions-hpe/webui-hub:lrb"
-
   cleanup-old-runs:
     name: Delete old workflow runs
     needs: build-and-push
