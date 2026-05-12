@@ -82,7 +82,32 @@ def _require_any_admin(user: User) -> User:
     raise HTTPException(status_code=403, detail="Admin role required")
 
 
+_SECRET_DNS_CREDENTIAL_KEYS = {
+    "cf_api_token",
+    "cf_api_key",
+    "he_ddns_key",
+    "godaddy_api_key",
+    "godaddy_api_secret",
+    "do_token",
+    "porkbun_api_key",
+    "porkbun_secret_key",
+    "gcloud_service_account_json",
+    "dnsimple_token",
+    "azure_client_secret",
+    "route53_secret_key",
+    "namecheap_api_key",
+}
+
+
 def _masked_dns_credentials(credentials: dict[str, Any]) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for key, value in (credentials or {}).items():
+        text = "" if value is None else str(value)
+        data[key] = "***" if key in _SECRET_DNS_CREDENTIAL_KEYS and text else text
+    return data
+
+
+def _configured_dns_credentials(credentials: dict[str, Any]) -> dict[str, str]:
     return {key: ("***" if value else "") for key, value in (credentials or {}).items()}
 
 
@@ -279,6 +304,7 @@ def get_acme_settings(current_user: User = Depends(auth.get_current_user)):
     cfg = acme_manager.load_acme_config()
     data = asdict(cfg)
     data["dns_credentials"] = _masked_dns_credentials(cfg.dns_credentials)
+    data["dns_credentials_configured"] = _configured_dns_credentials(cfg.dns_credentials)
     data["cert_info"] = acme_manager.get_cert_info()
     return data
 
@@ -304,6 +330,7 @@ def save_acme_settings(payload: dict[str, Any], current_user: User = Depends(aut
     acme_manager.save_acme_config(cfg)
     data = asdict(cfg)
     data["dns_credentials"] = _masked_dns_credentials(cfg.dns_credentials)
+    data["dns_credentials_configured"] = _configured_dns_credentials(cfg.dns_credentials)
     data["cert_info"] = acme_manager.get_cert_info()
     return data
 
