@@ -405,6 +405,8 @@ Hub returns queued commands, including the one-time registration payload with th
 | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/inbox` | `X-API-Key` | Pull queued commands and config updates |
 | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/ack` | `X-API-Key` | Acknowledge command execution and optionally report task results |
 
+Hub heartbeat monitoring treats a spoke as offline after 300 seconds without telemetry.
+
 ### Tenant-scoped management (JWT)
 
 | Category | Method | Path | Role |
