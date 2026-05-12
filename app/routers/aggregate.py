@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+import time
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -358,6 +360,266 @@ def get_aggregate_central(
 ):
     resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
     return _aggregate_central_payload(resolved_tenant_id)
+
+
+@router.get("/central/devices")
+async def hub_central_devices(
+    site: str = Query(..., description="Site name to filter devices by"),
+    tenant_id: Optional[str] = Query(None),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Fetch network devices from Central API filtered by site name. Hub-side endpoint for CNX mode."""
+    resolved_tid = _resolve_tenant_id(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tid)
+
+    if not tenant.aruba_config_enc:
+        return {"devices": [], "count": 0, "warning": "Central API not configured on hub."}
+
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception:
+        return {"devices": [], "count": 0, "warning": "Could not decrypt Central API config."}
+
+    api_version = cfg.get("api_version", "classic")
+    if api_version != "new_central":
+        return {"devices": [], "count": 0, "warning": "Device list requires New Central API mode."}
+
+    cluster_url = (cfg.get("cluster_url") or "").rstrip("/")
+    client_id = cfg.get("client_id", "")
+    client_secret = cfg.get("client_secret", "")
+    customer_id = cfg.get("customer_id", "")
+
+    if not all([cluster_url, client_id, client_secret, customer_id]):
+        return {"devices": [], "count": 0, "warning": "Central API credentials incomplete."}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            token_resp = await client.post(
+                f"{cluster_url}/oauth2/token",
+                data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
+                headers={"X-API-KEY": customer_id},
+                timeout=15,
+            )
+            if token_resp.status_code != 200:
+                return {"devices": [], "count": 0, "warning": f"Token fetch failed: {token_resp.status_code}"}
+            access_token = token_resp.json().get("access_token", "")
+            if not access_token:
+                return {"devices": [], "count": 0, "warning": "No access token in response."}
+
+            headers = {"Authorization": f"Bearer {access_token}", "X-API-KEY": customer_id}
+
+            site_id = None
+            try:
+                sh_resp = await client.get(
+                    f"{cluster_url}/network-monitoring/v1alpha1/sites-health",
+                    headers=headers,
+                    timeout=20,
+                )
+                if sh_resp.status_code == 200:
+                    for item in sh_resp.json().get("items", []):
+                        sname = item.get("siteName") or item.get("site_name") or ""
+                        if sname.lower() == site.lower():
+                            site_id = item.get("siteId") or item.get("site_id")
+                            break
+            except Exception:
+                pass
+
+            if not site_id:
+                return {"devices": [], "count": 0, "warning": f"Site '{site}' not found in Central."}
+
+            params: dict[str, Any] = {"limit": 500}
+            if site_id:
+                params["filter"] = f"siteId eq '{site_id}'"
+
+            dev_resp = await client.get(
+                f"{cluster_url}/network-monitoring/v1alpha1/devices",
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            if dev_resp.status_code != 200:
+                return {"devices": [], "count": 0, "warning": f"Devices fetch failed: {dev_resp.status_code}"}
+
+            raw_devices = dev_resp.json().get("items", [])
+            if site_id:
+                raw_devices = [d for d in raw_devices if d.get("siteId") == site_id]
+
+            devices = [
+                {
+                    "name": d.get("deviceName") or d.get("id") or "—",
+                    "type": d.get("deviceType", "—"),
+                    "model": d.get("model", "—"),
+                    "ip": d.get("ipv4") or d.get("ip", "—"),
+                    "mac": d.get("macAddress") or d.get("mac", "—"),
+                    "status": d.get("status", "—"),
+                    "site": d.get("siteId", "—"),
+                    "serial": d.get("serial", "—"),
+                    "sw_ver": d.get("firmwareVersion") or d.get("swVersion", "—"),
+                }
+                for d in raw_devices
+            ]
+
+            return {"devices": devices, "count": len(devices)}
+
+    except Exception as exc:
+        return {"devices": [], "count": 0, "warning": f"Error fetching devices: {exc}"}
+
+
+@router.get("/central/site-alerts")
+async def hub_central_site_alerts(
+    site: str = Query(..., description="Site name to fetch alerts for"),
+    tenant_id: Optional[str] = Query(None),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Fetch site alerts from Central API. Hub-side endpoint."""
+    resolved_tid = _resolve_tenant_id(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tid)
+
+    if not tenant.aruba_config_enc:
+        return {"alerts": [], "count": 0, "warning": "Central API not configured on hub."}
+
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception:
+        return {"alerts": [], "count": 0, "warning": "Could not decrypt Central API config."}
+
+    api_version = cfg.get("api_version", "classic")
+    cluster_url = (cfg.get("cluster_url") or "").rstrip("/")
+    client_id = cfg.get("client_id", "")
+    client_secret = cfg.get("client_secret", "")
+    customer_id = cfg.get("customer_id", "")
+
+    if not all([cluster_url, client_id, client_secret]):
+        return {"alerts": [], "count": 0, "warning": "Central API credentials incomplete."}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            token_resp = await client.post(
+                f"{cluster_url}/oauth2/token",
+                data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
+                headers={"X-API-KEY": customer_id} if customer_id else {},
+                timeout=15,
+            )
+            if token_resp.status_code != 200:
+                return {"alerts": [], "count": 0, "warning": f"Token fetch failed: {token_resp.status_code}"}
+            access_token = token_resp.json().get("access_token", "")
+            if not access_token:
+                return {"alerts": [], "count": 0, "warning": "No access token in response."}
+            headers = {"Authorization": f"Bearer {access_token}"}
+            if customer_id:
+                headers["X-API-KEY"] = customer_id
+
+            alerts: list[dict[str, Any]] = []
+            ts_now = int(time.time())
+
+            if api_version == "new_central":
+                site_id = None
+                health_score = None
+                site_found = False
+                try:
+                    sh_resp = await client.get(
+                        f"{cluster_url}/network-monitoring/v1alpha1/sites-health",
+                        headers=headers,
+                        timeout=20,
+                    )
+                    if sh_resp.status_code == 200:
+                        for item in sh_resp.json().get("items", []):
+                            sname = item.get("siteName") or item.get("site_name") or ""
+                            if sname.lower() == site.lower():
+                                site_found = True
+                                site_id = item.get("siteId") or item.get("site_id")
+                                health_score = int(item.get("healthScore", item.get("health_score", 100)))
+                                break
+                except Exception:
+                    pass
+
+                if not site_found:
+                    return {"alerts": [], "count": 0, "warning": f"Site '{site}' not found in Central."}
+
+                if health_score is not None and health_score < 100:
+                    severity = "CRITICAL" if health_score < 50 else "MAJOR" if health_score < 80 else "MINOR"
+                    alerts.append({
+                        "type": "SITE_HEALTH",
+                        "name": "Site Health Score",
+                        "severity": severity,
+                        "state": "active",
+                        "site": site,
+                        "device": site,
+                        "ts": ts_now,
+                        "message": f"Site health score is {health_score}/100",
+                    })
+
+                if site_id:
+                    try:
+                        params: dict[str, Any] = {"limit": 500, "filter": f"siteId eq '{site_id}'"}
+                        dev_resp = await client.get(
+                            f"{cluster_url}/network-monitoring/v1alpha1/devices",
+                            headers=headers,
+                            params=params,
+                            timeout=20,
+                        )
+                        if dev_resp.status_code == 200:
+                            _TYPE_MAP = {
+                                "ACCESS_POINT": ("AP_DOWN", "AP Down"),
+                                "SWITCH": ("SWITCH_DOWN", "Switch Down"),
+                                "GATEWAY": ("GATEWAY_DOWN", "Gateway Down"),
+                            }
+                            for dev in dev_resp.json().get("items", []):
+                                if dev.get("siteId") != site_id:
+                                    continue
+                                status = (dev.get("status") or "").upper()
+                                if status in ("UP", "ONLINE"):
+                                    continue
+                                dtype = (dev.get("deviceType") or "").upper()
+                                atype, aname = _TYPE_MAP.get(dtype, ("DEVICE_DOWN", "Device Down"))
+                                alerts.append({
+                                    "type": atype,
+                                    "name": aname,
+                                    "severity": "CRITICAL",
+                                    "state": "active",
+                                    "site": site,
+                                    "device": dev.get("deviceName") or dev.get("id") or "—",
+                                    "ts": ts_now,
+                                    "message": f"{dev.get('model', dtype)} — status: {dev.get('status', 'Unknown')} | IP: {dev.get('ipv4') or dev.get('ip', '—')}",
+                                })
+                    except Exception:
+                        pass
+            else:
+                thirty_days_ago = ts_now - 30 * 86400
+                for path in ["/monitoring/v1/alerts", "/monitoring/v2/alerts"]:
+                    try:
+                        resp = await client.get(
+                            f"{cluster_url}{path}",
+                            headers=headers,
+                            params={"site": site, "limit": 500, "from_timestamp": thirty_days_ago},
+                            timeout=20,
+                        )
+                        if resp.status_code == 200:
+                            for alert in resp.json().get("alerts", []):
+                                alert_site = alert.get("site_name") or alert.get("site") or ""
+                                if alert_site and alert_site.lower() != site.lower():
+                                    continue
+                                alerts.append({
+                                    "type": alert.get("alert_type") or alert.get("type", ""),
+                                    "name": alert.get("alert_type_name") or alert.get("alert_type", ""),
+                                    "severity": alert.get("severity", ""),
+                                    "state": alert.get("state", ""),
+                                    "site": alert.get("site_name") or site,
+                                    "device": alert.get("device_name") or alert.get("hostname", ""),
+                                    "ts": alert.get("timestamp") or alert.get("raised_at", ""),
+                                    "message": alert.get("details") or alert.get("description", ""),
+                                })
+                            break
+                        if resp.status_code == 404:
+                            continue
+                    except Exception:
+                        break
+
+            warning = None if alerts else "No alerts detected for this site."
+            return {"alerts": alerts, "count": len(alerts), "warning": warning}
+
+    except Exception as exc:
+        return {"alerts": [], "count": 0, "warning": f"Error fetching alerts: {exc}"}
 
 
 @router.post("/aggregate/central")
