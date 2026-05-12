@@ -113,7 +113,7 @@ async def heartbeat_monitor() -> None:
                 for spoke in store.list_spokes(tenant.id):
                     if spoke.status != "approved":
                         continue
-                    online = bool(spoke.last_seen and (_now() - spoke.last_seen).total_seconds() < 120)
+                    online = bool(spoke.last_seen and (_now() - spoke.last_seen).total_seconds() < 300)
                     prev = tenant_state.get(spoke.id)
                     if prev != online:
                         tenant_state[spoke.id] = online
@@ -433,7 +433,7 @@ async def check_state_engine() -> None:
                     if spoke.status != "approved":
                         continue
                     key = f"{tenant.id}:{spoke.id}"
-                    online = bool(spoke.last_seen and (_now() - spoke.last_seen).total_seconds() < 120)
+                    online = bool(spoke.last_seen and (_now() - spoke.last_seen).total_seconds() < 300)
                     was_online = prev_online.get(key)
                     if was_online is True and not online:
                         await send_notification(
