@@ -287,7 +287,7 @@ class HubConfigRequest(BaseModel):
 @router.get("/tenant/{tenant_id}/hub-config")
 def get_tenant_hub_config(
     tenant_id: str,
-    current_user: User = Depends(auth.require_tenant_access),
+    current_user: User = Depends(auth.require_superadmin),
 ):
     tenant = store.get_tenant(tenant_id)
     if not tenant:
@@ -300,7 +300,7 @@ async def update_tenant_hub_config(
     tenant_id: str,
     payload: HubConfigRequest,
     request: Request,
-    current_user: User = Depends(auth.require_tenant_access),
+    current_user: User = Depends(auth.require_superadmin),
 ):
     tenant = store.get_tenant(tenant_id)
     if not tenant:

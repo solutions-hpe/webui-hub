@@ -197,8 +197,22 @@ def register_spoke(payload: RegisterPayload, request: Request):
             spoke.api_key_enc = encrypt_str(api_key)
             changed = True
             regenerated_api_key = True
+        # Update seed_config so the hub always reflects the spoke's current settings.
+        # When hub_config_enabled is False the spoke drives its own config — also
+        # update spoke.config and bump config_version so the hub's record stays current
+        # and the config page shows fresh values.
+        if payload.config and spoke.seed_config != payload.config:
+            spoke.seed_config = dict(payload.config)
+            tenant = store.get_tenant(tenant_id)
+            hub_managed = bool(tenant and tenant.hub_config_enabled)
+            if not hub_managed:
+                spoke.config = dict(payload.config)
+                spoke.config_version += 1
+            changed = True
         if changed:
             store.save_spoke(spoke)
+        if spoke.config_version > spoke.applied_config_version:
+            store.ensure_config_update_command(tenant_id, spoke.id)
         _reg_log_append("already_approved", hostname=payload.hostname,
                         spoke_name=spoke_name, spoke_id=spoke.id, tenant_id=tenant_id,
                         ip=client_ip, regenerated_api_key=regenerated_api_key)
