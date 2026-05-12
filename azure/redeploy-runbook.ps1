@@ -17,8 +17,9 @@
       HubSecretKey          (String, encrypted)
       StorageAccountKey     (String, encrypted)
 
-    The Automation Account must have a System-Assigned Managed Identity with
-    Contributor role on the LRB resource group.
+    The Automation Account must have a Credential asset named "AzureLogin"
+    containing the Azure username and password for an account with Contributor
+    access to the LRB resource group.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -37,9 +38,11 @@ $MEMORY_GB      = 1.5
 $STORAGE_ACCOUNT = "lrbcshub"
 $FILE_SHARE      = "lrbhubdata"
 
-# ── Authenticate via Managed Identity ────────────────────────────────────────
-Write-Output "Authenticating with Managed Identity..."
-Connect-AzAccount -Identity | Out-Null
+# ── Authenticate via stored credential ────────────────────────────────────────
+Write-Output "Authenticating with stored credential..."
+$cred = Get-AutomationPSCredential -Name "AzureLogin"
+Connect-AzAccount -Credential $cred -TenantId "2e5cab22-02d0-4fe4-8ceb-f9faa02999c1" -ServicePrincipal:$false | Out-Null
+Set-AzContext -SubscriptionId "1480d28a-9917-4fdd-9ccc-96513a1c59f2" | Out-Null
 
 # ── Check GitHub for latest commit SHA ───────────────────────────────────────
 Write-Output "Checking GitHub branch: $GH_BRANCH..."
