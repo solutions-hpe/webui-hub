@@ -122,6 +122,56 @@ def _hardware_type(client: dict[str, Any]) -> str:
 
 
 
+def _normalize_lookup_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+
+def _spoke_usb_lookup(spoke: Spoke) -> tuple[set[str], set[str], dict[str, str]]:
+    proxmox = _telemetry_dict(spoke, "proxmox")
+    usb_devices = _telemetry_list(spoke, "usb_devices")
+    if not usb_devices and isinstance(proxmox.get("usb_state"), list):
+        usb_devices = proxmox.get("usb_state")
+    proxmox_vms = _telemetry_list(spoke, "proxmox_vms")
+    if not proxmox_vms and isinstance(proxmox.get("vms"), list):
+        proxmox_vms = proxmox.get("vms")
+
+    usb_vmids = {
+        str(device.get("vmid")).strip()
+        for device in usb_devices
+        if isinstance(device, dict) and device.get("vmid") is not None and str(device.get("vmid")).strip()
+    }
+    usb_hostnames = {
+        _normalize_lookup_value(device.get("hostname") or device.get("vm_name"))
+        for device in usb_devices
+        if isinstance(device, dict)
+    }
+    usb_hostnames.discard("")
+
+    vmids_by_hostname: dict[str, str] = {}
+    for vm in proxmox_vms:
+        if not isinstance(vm, dict):
+            continue
+        hostname = _normalize_lookup_value(vm.get("name") or vm.get("hostname"))
+        vmid = str(vm.get("vmid")).strip() if vm.get("vmid") is not None else ""
+        if hostname and vmid:
+            vmids_by_hostname[hostname] = vmid
+
+    return usb_vmids, usb_hostnames, vmids_by_hostname
+
+
+
+def _client_has_usb(client: dict[str, Any], usb_vmids: set[str], usb_hostnames: set[str], vmids_by_hostname: dict[str, str]) -> bool:
+    vmid = str(client.get("vmid") or client.get("proxmox_vmid") or "").strip()
+    hostname = _normalize_lookup_value(client.get("hostname"))
+    if not vmid and hostname:
+        vmid = vmids_by_hostname.get(hostname, "")
+    if vmid and vmid in usb_vmids:
+        return True
+    return bool(hostname and hostname in usb_hostnames)
+
+
+
 def _record_check(summary: dict[str, int], raw_status: Any) -> None:
     status = str(raw_status or "unknown").strip().lower()
     if status in PASS_STATUSES:
@@ -241,6 +291,7 @@ def get_aggregate_clients(
     rows: list[dict[str, Any]] = []
     for spoke in _approved_spokes(resolved_tenant_id):
         spoke_name = spoke.spoke_name or spoke.hostname
+        usb_vmids, usb_hostnames, vmids_by_hostname = _spoke_usb_lookup(spoke)
         for client in _telemetry_clients(spoke):
             row = dict(client)
             row.update({
@@ -249,6 +300,7 @@ def get_aggregate_clients(
                 "spoke_name": spoke_name,
                 "spoke_hostname": spoke.hostname,
                 "spoke_label": spoke.label,
+                "has_usb": _client_has_usb(row, usb_vmids, usb_hostnames, vmids_by_hostname),
             })
             rows.append(row)
     rows.sort(key=lambda item: (str(item.get("spoke_name") or "").lower(), str(item.get("hostname") or "").lower()))
