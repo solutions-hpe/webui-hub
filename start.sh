@@ -2,8 +2,8 @@
 set -e
 
 PYTHON_BIN=${PYTHON_BIN:-python3}
-DATA_DIR=${DATA_DIR:-/data}
-HUB_PORT=${HUB_PORT:-8443}
+export DATA_DIR=${DATA_DIR:-/data}
+export HUB_PORT=${HUB_PORT:-8443}
 CERT_PATH="${TLS_CERT_PATH:-${DATA_DIR}/tls/cert.pem}"
 KEY_PATH="${TLS_KEY_PATH:-${DATA_DIR}/tls/key.pem}"
 DEBUG_LOG="${DATA_DIR}/startup.log"
