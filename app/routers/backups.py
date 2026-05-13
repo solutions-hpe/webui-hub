@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import os
 from typing import Any, Optional
 from uuid import uuid4
 import xml.etree.ElementTree as ET
@@ -11,7 +12,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from .. import auth, store
+from .. import auth, crypto, store
 from ..data_models import BackupConfig, Command, User
 from ..ws import send_spoke_command, ws_broadcast
 
@@ -23,7 +24,22 @@ _RESEED_SUCCESS_STATES = {"done", "completed"}
 _RESEED_ERROR_STATES = {"error", "failed"}
 
 
+def _get_azure_key(backup_config: BackupConfig) -> str:
+    """Decrypt and return the Azure storage key. Raises HTTPException 503 if not available."""
+    enc = (backup_config.azure_key_enc or "").strip()
+    if not enc:
+        raise HTTPException(status_code=503, detail="Azure storage key is not configured")
+    try:
+        return crypto.decrypt_value(enc)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to decrypt Azure key: {exc}") from exc
+
+
 class TriggerBackupRequest(BaseModel):
+    azure_key: str
+
+
+class SetAzureKeyRequest(BaseModel):
     azure_key: str
 
 
@@ -227,6 +243,57 @@ def save_backup_config(payload: BackupConfig, current_user: User = Depends(auth.
     return payload
 
 
+@router.post("/backup/config/key")
+def set_azure_key(
+    payload: SetAzureKeyRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_superadmin(current_user)
+    key = payload.azure_key.strip()
+    if not key:
+        raise HTTPException(status_code=422, detail="azure_key must not be empty")
+    try:
+        encrypted = crypto.encrypt_value(key)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    config = store.load_backup_config()
+    config.azure_key_enc = encrypted
+    store.save_backup_config(config)
+    return {"detail": "Azure key encrypted and saved"}
+
+
+@router.get("/backup/installer/sas-token")
+async def get_installer_sas_token(request: Request):
+    """
+    Generate a short-lived read-only SAS token for the installer to download blobs.
+    Authenticated via X-Installer-Key header (must match INSTALLER_API_KEY env var).
+    """
+    installer_key = os.environ.get("INSTALLER_API_KEY", "").strip()
+    if not installer_key:
+        raise HTTPException(status_code=503, detail="INSTALLER_API_KEY not configured on hub")
+    provided = (request.headers.get("X-Installer-Key") or "").strip()
+    if not provided or provided != installer_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Installer-Key")
+    backup_config = store.load_backup_config()
+    azure_key = _get_azure_key(backup_config)
+    try:
+        sas_url = crypto.generate_blob_container_sas(
+            account_name=backup_config.azure_account,
+            account_key=azure_key,
+            container=backup_config.azure_container,
+            permissions="rl",
+            hours=2,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate SAS token: {exc}") from exc
+    return {
+        "sas_url": sas_url,
+        "account": backup_config.azure_account,
+        "container": backup_config.azure_container,
+        "expires_in_hours": 2,
+    }
+
+
 @router.post("/backup/trigger/{tenant_id}/{spoke_id}")
 async def trigger_backup(
     tenant_id: str,
@@ -249,7 +316,7 @@ async def trigger_backup(
 
     azure_key = payload.azure_key.strip()
     if not azure_key:
-        raise HTTPException(status_code=400, detail="Azure key is required")
+        azure_key = _get_azure_key(backup_config)
 
     job_id = f"backup-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
     vm_ids = list(spoke_config.vm_ids)
