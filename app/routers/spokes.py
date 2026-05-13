@@ -422,3 +422,32 @@ async def ack_command_endpoint(
             }
         )
     return {"status": "ok"}
+
+
+@router.get("/{tenant_id}/spokes/{spoke_id}/central-feed")
+async def get_spoke_central_feed(
+    tenant_id: str,
+    spoke_id: str,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    """Return hub-polled Aruba Central data for a spoke to consume in centralized mode."""
+    _auth_spoke(tenant_id, spoke_id, x_api_key)
+    from ..tasks import _hub_central_status
+
+    tenant_data = _hub_central_status.get(tenant_id, {})
+    spoke_data = tenant_data.get("spokes", {}).get(spoke_id, {})
+    token_valid = bool(tenant_data.get("token_valid", False))
+    token_state_str = tenant_data.get("token_state", "not_configured")
+    return {
+        "status": spoke_data.get("status", {}),
+        "wireless_clients": spoke_data.get("wireless_clients", {}),
+        "hardware_alerts": spoke_data.get("hardware_alerts", []),
+        "client_count_status": {},
+        "token_valid": token_valid,
+        "token_state": {
+            "state": token_state_str if token_valid else "not_configured",
+            "detail": tenant_data.get("error", ""),
+        },
+        "site_mappings": spoke_data.get("site_mappings", {}),
+        "monitored_checks": spoke_data.get("monitored_checks", []),
+    }

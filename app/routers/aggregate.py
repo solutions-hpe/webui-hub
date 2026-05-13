@@ -418,6 +418,105 @@ def get_aggregate_central(
     return _aggregate_central_payload(resolved_tenant_id)
 
 
+@router.get("/aggregate/central-status")
+async def get_aggregate_central_status(
+    tenant_id: Optional[str] = Query(default=None),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Aggregate Aruba Central status across spokes.
+    Centralized mode: from hub's own polling. Distributed mode: from spoke relay telemetry.
+    """
+    resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    mode = _central_mode(tenant)
+    spokes = _approved_spokes(resolved_tenant_id)
+
+    if mode == "centralized":
+        from ..tasks import _hub_central_status
+
+        tenant_data = _hub_central_status.get(resolved_tenant_id, {})
+        token_valid = bool(tenant_data.get("token_valid", False))
+        token_state = tenant_data.get("token_state", "not_configured")
+        spokes_out = []
+        spoke_map = {spoke.id: spoke for spoke in spokes}
+        for spoke_id, spoke_data in tenant_data.get("spokes", {}).items():
+            spoke = spoke_map.get(spoke_id)
+            site_mappings = spoke_data.get("site_mappings", {})
+            status = spoke_data.get("status", {})
+            wireless = spoke_data.get("wireless_clients", {})
+            hw_alerts = spoke_data.get("hardware_alerts", [])
+            sites = []
+            for wsite, central_site in site_mappings.items():
+                site_status = status.get(wsite, {})
+                ok = sum(1 for value in site_status.values() if isinstance(value, dict) and value.get("status") == "OK")
+                fail = sum(1 for value in site_status.values() if isinstance(value, dict) and value.get("status") == "ERROR")
+                unk = max(len(site_status) - ok - fail, 0)
+                sites.append({
+                    "wsite": wsite,
+                    "central_site": central_site,
+                    "check_ok": ok,
+                    "check_fail": fail,
+                    "check_unknown": unk,
+                    "wireless_clients": wireless.get(wsite),
+                    "status_map": site_status,
+                })
+            spokes_out.append({
+                "spoke_id": spoke_id,
+                "spoke_name": (spoke.spoke_name or spoke.hostname) if spoke else spoke_id,
+                "spoke_online": _is_online(spoke) if spoke else False,
+                "sites": sites,
+                "hardware_alerts": hw_alerts,
+            })
+        return {
+            "tenant_id": resolved_tenant_id,
+            "mode": "centralized",
+            "token_valid": token_valid,
+            "token_state": token_state,
+            "spokes": spokes_out,
+        }
+
+    spokes_out = []
+    for spoke in spokes:
+        central = _central_telemetry(spoke)
+        site_mappings = central.get("site_mappings", {})
+        status = central.get("status", {})
+        wireless = central.get("wireless_clients", {})
+        hw_alerts = central.get("hardware_alerts", [])
+        token_valid_spoke = bool(central.get("token_valid", False))
+        token_state_spoke = central.get("token_state", {})
+        sites = []
+        for wsite, central_site in site_mappings.items():
+            site_status = status.get(wsite, {})
+            ok = sum(1 for value in site_status.values() if isinstance(value, dict) and value.get("status") == "OK")
+            fail = sum(1 for value in site_status.values() if isinstance(value, dict) and value.get("status") == "ERROR")
+            unk = max(len(site_status) - ok - fail, 0)
+            sites.append({
+                "wsite": wsite,
+                "central_site": central_site,
+                "check_ok": ok,
+                "check_fail": fail,
+                "check_unknown": unk,
+                "wireless_clients": wireless.get(wsite),
+                "status_map": site_status,
+            })
+        spokes_out.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "spoke_online": _is_online(spoke),
+            "token_valid": token_valid_spoke,
+            "token_state": token_state_spoke,
+            "sites": sites,
+            "hardware_alerts": hw_alerts,
+        })
+    return {
+        "tenant_id": resolved_tenant_id,
+        "mode": "distributed",
+        "token_valid": None,
+        "token_state": None,
+        "spokes": spokes_out,
+    }
+
+
 @router.get("/central/devices")
 async def hub_central_devices(
     site: str = Query(..., description="Site name to filter devices by"),
