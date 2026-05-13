@@ -147,5 +147,5 @@ class SpokeBackupConfig(BaseModel):
 class BackupConfig(BaseModel):
     spokes: dict[str, SpokeBackupConfig] = Field(default_factory=dict)
     retention: int = 3
-    azure_account: str = "lrbcsvms"
+    azure_account: str = "csvmstorage"
     azure_container: str = "vms"
