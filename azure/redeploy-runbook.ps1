@@ -3,7 +3,7 @@
     Polls GitHub for a new image on the lrb branch and redeploys the ACI hub container if changed.
 
 .DESCRIPTION
-    Runs on an hourly Azure Automation schedule.
+    Runs on a scheduled Azure Automation schedule (default: hourly, can be changed to nightly).
     Compares the latest commit SHA on the webui-hub lrb branch against the last
     deployed SHA (stored as an Automation Account Variable).
     If a new commit is detected, deletes and recreates the ACI container so it
@@ -17,9 +17,13 @@
       HubSecretKey          (String, encrypted)
       StorageAccountKey     (String, encrypted)
 
-    The Automation Account must have a Credential asset named "AzureLogin"
-    containing the Azure username and password for an account with Contributor
-    access to the LRB resource group.
+    The Automation Account must have a Credential asset named "AzureLogin":
+      Username : Application (client) ID of the "cs-hub-automation-sp" service principal
+                 (e.g. 07f16589-a3ac-4a85-9d9c-cecf10801f53)
+      Password : Client secret generated for the service principal
+
+    The service principal must have the "Contributor" role on the LRB resource group.
+    Tenant ID is hardcoded below — update if it changes.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -38,11 +42,17 @@ $MEMORY_GB      = 1.5
 $STORAGE_ACCOUNT = "lrbcshub"
 $FILE_SHARE      = "lrbhubdata"
 
-# ── Authenticate via stored credential ────────────────────────────────────────
-Write-Output "Authenticating with stored credential..."
-$cred = Get-AutomationPSCredential -Name "AzureLogin"
-Connect-AzAccount -Credential $cred -TenantId "2e5cab22-02d0-4fe4-8ceb-f9faa02999c1" -ServicePrincipal:$false | Out-Null
+# ── Authenticate via service principal ───────────────────────────────────────
+# AzureLogin credential: Username = SP Application (client) ID, Password = client secret
+Write-Output "Authenticating as service principal..."
+$spCred    = Get-AutomationPSCredential -Name "AzureLogin"
+$tenantId  = "2e5cab22-02d0-4fe4-8ceb-f9faa02999c1"
+$appId     = $spCred.UserName
+$appSecret = $spCred.GetNetworkCredential().Password | ConvertTo-SecureString -AsPlainText -Force
+$psCred    = New-Object System.Management.Automation.PSCredential($appId, $appSecret)
+Connect-AzAccount -ServicePrincipal -Credential $psCred -Tenant $tenantId | Out-Null
 Set-AzContext -SubscriptionId "1480d28a-9917-4fdd-9ccc-96513a1c59f2" | Out-Null
+Write-Output "Authenticated as SP: $appId"
 
 # ── Check GitHub for latest commit SHA ───────────────────────────────────────
 Write-Output "Checking GitHub branch: $GH_BRANCH..."
@@ -113,6 +123,33 @@ New-AzContainerGroup `
     -IpAddressType Public `
     -IpAddressDnsNameLabel $DNS_LABEL `
     -Volume @($volume) | Out-Null
+
+# ── Wait for container to become healthy ─────────────────────────────────────
+Write-Output "Waiting for container to become healthy..."
+$healthUrl  = "https://${DNS_LABEL}.westus3.azurecontainer.io:${HUB_PORT}/api/health"
+$maxWait    = 600   # 10 minutes
+$interval   = 20
+$elapsed    = 0
+$ready      = $false
+
+while ($elapsed -lt $maxWait) {
+    Start-Sleep -Seconds $interval
+    $elapsed += $interval
+    try {
+        $resp = Invoke-RestMethod -Uri $healthUrl -SkipCertificateCheck -TimeoutSec 8 -ErrorAction Stop
+        if ($resp.version) {
+            Write-Output "✅ Container healthy after ${elapsed}s — version $($resp.version)"
+            $ready = $true
+            break
+        }
+    } catch { }
+    Write-Output "   ${elapsed}s elapsed — not ready yet..."
+}
+
+if (-not $ready) {
+    Write-Warning "⚠️  Container did not respond within ${maxWait}s — check ACI logs."
+    # Still update SHA so we don't redeploy in a loop; operator should investigate.
+}
 
 # ── Update last deployed SHA ──────────────────────────────────────────────────
 Set-AutomationVariable -Name "LastDeployedSHA" -Value $latestSHA
