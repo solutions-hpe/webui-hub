@@ -149,4 +149,4 @@ class BackupConfig(BaseModel):
     retention: int = 3
     azure_account: str = "csvmstorage"
     azure_container: str = "vms"
-    azure_key_enc: str = "gAAAAABqBJTaIq3sRBxkZmiBFd1COwEsn09WkWTxt96t9uo5ojn_5A3jB2NtHMfQNUCVixKcWY3UfBH4gkUdlWZLnQGzORZMhaZ5FjLNogfay0bVl3HigP2H1yG5O0DUY3KZXAR1SPjt8CW8vhXwAUSRvC-S7rx6su4l2pBHrEOg7l_krMqiqtrUnMP_8NzunLM0UCuuE0Qa"
+    azure_key_enc: str = "gAAAAABqBJh3Y-hvGAVJXju-Cp2qBDjR73zbyYoJ1ukCCd2JoWbYhemtXxlTVdHmYqOrKs9NjfAvNGnD1s-mC7MA8hDN8jE2-smgeh_SHeqCTXzIqi1GwWV82gf-kQNe_j6OgO7CeXMZeWHOjTgV1Q780Z0yRsQ5KCZAiaJdMy7doyqd8sQnR-ZGBeaxHXQJmXs2tlX-bkWo"
