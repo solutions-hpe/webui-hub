@@ -717,6 +717,14 @@ def update_aggregate_central(
     tenant.aruba_config_enc = encrypt_dict(cfg) if any(str(value).strip() for key, value in cfg.items() if key != "api_version") or cfg.get("client_secret") else None
     tenant.default_processing_mode.aruba_polling = mode
     store.save_tenant(tenant)
+
+    # Bump config_version on all approved spokes so the new Central config
+    # is queued as a config_update command on the next relay cycle.
+    for spoke in _approved_spokes(resolved_tenant_id):
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(resolved_tenant_id, spoke.id)
+
     return _aggregate_central_payload(resolved_tenant_id)
 
 
