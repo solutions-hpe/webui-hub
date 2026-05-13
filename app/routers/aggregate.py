@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import auth, store
 from ..crypto import decrypt_dict, encrypt_dict
-from ..data_models import Spoke, Tenant, User
+from ..data_models import Command, Spoke, Tenant, User
 
 router = APIRouter()
 
@@ -107,6 +107,47 @@ def _telemetry_list(spoke: Spoke, *keys: str) -> list[dict[str, Any]]:
         if isinstance(value, list):
             return value
     return []
+
+
+
+def _coerce_int(value: Any, default: int = 0, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        number = int(str(value).strip())
+    except (AttributeError, TypeError, ValueError):
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+
+def _setting_toggle(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+
+def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, bool]:
+    proxmox = _telemetry_dict(spoke, "proxmox")
+    api_server = _telemetry_dict(spoke, "api_server")
+    usb_devices = _telemetry_list(spoke, "usb_devices") or (proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else [])
+    used_slots = _coerce_int(proxmox.get("usb_count") or len(usb_devices), 0, minimum=0)
+    spoke_config = spoke.config or {}
+    total_slots = _coerce_int(
+        spoke_config.get("usb_max_slots")
+        or api_server.get("usb_max_slots")
+        or proxmox.get("usb_max_slots")
+        or 0,
+        0,
+        minimum=0,
+    )
+    auto_provision = _setting_toggle(
+        spoke_config.get("usb_auto_provision")
+        or api_server.get("usb_auto_provision")
+        or proxmox.get("usb_auto_provision")
+    )
+    return used_slots, total_slots, auto_provision
 
 
 
@@ -386,6 +427,111 @@ def get_aggregate_proxmox(
         })
     hosts.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
     return {"tenant_id": resolved_tenant_id, "hosts": hosts}
+
+
+@router.post("/{tenant_id}/aggregate/fleet-reclone")
+async def fleet_reclone(
+    tenant_id: str,
+    body: dict = Body(default={}),
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    concurrency = _coerce_int(body.get("concurrency"), 3, minimum=1, maximum=10)
+    tenant = _get_tenant(resolved_tenant_id)
+    hub_config = dict(tenant.hub_config or {})
+    hub_config["fleet_reclone_concurrency"] = concurrency
+    if hub_config != tenant.hub_config:
+        tenant.hub_config = hub_config
+        store.save_tenant(tenant)
+
+    queued = 0
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    for spoke in _approved_spokes(resolved_tenant_id):
+        store.enqueue_command(
+            Command(
+                spoke_id=spoke.id,
+                tenant_id=resolved_tenant_id,
+                type="proxmox_reclone_all",
+                payload={"concurrency": concurrency},
+                expires_at=expires_at,
+            )
+        )
+        queued += 1
+    return {"tenant_id": resolved_tenant_id, "queued": queued, "concurrency": concurrency}
+
+
+@router.get("/{tenant_id}/aggregate/fleet-reclone-status")
+def get_fleet_reclone_status(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    total_vms = 0
+    completed = 0
+    failed = 0
+    any_running = False
+    spokes_out: list[dict[str, Any]] = []
+    for spoke in _approved_spokes(resolved_tenant_id):
+        reclone = _telemetry_dict(spoke, "reclone_state")
+        spoke_total = _coerce_int(reclone.get("total"), 0, minimum=0)
+        spoke_completed = _coerce_int(reclone.get("completed"), 0, minimum=0)
+        spoke_failed = _coerce_int(reclone.get("failed"), 0, minimum=0)
+        status = str(reclone.get("status") or "idle")
+        total_vms += spoke_total
+        completed += spoke_completed
+        failed += spoke_failed
+        any_running = any_running or status == "running"
+        spokes_out.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "status": status,
+            "total": spoke_total,
+            "completed": spoke_completed,
+            "failed": spoke_failed,
+        })
+    spokes_out.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
+    return {
+        "tenant_id": resolved_tenant_id,
+        "any_running": any_running,
+        "total_vms": total_vms,
+        "completed": completed,
+        "failed": failed,
+        "default_concurrency": _coerce_int((tenant.hub_config or {}).get("fleet_reclone_concurrency"), 3, minimum=1, maximum=10),
+        "spokes": spokes_out,
+    }
+
+
+@router.get("/{tenant_id}/aggregate/usb-provisioning-status")
+def get_usb_provisioning_status(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    total_slots = 0
+    used_slots = 0
+    auto_provision_on = False
+    spokes_out: list[dict[str, Any]] = []
+    for spoke in _approved_spokes(resolved_tenant_id):
+        used, total, auto_provision = _spoke_usb_capacity(spoke)
+        total_slots += total
+        used_slots += used
+        auto_provision_on = auto_provision_on or auto_provision
+        spokes_out.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "used": used,
+            "total": total,
+            "auto_provision": auto_provision,
+        })
+    spokes_out.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
+    return {
+        "tenant_id": resolved_tenant_id,
+        "total_slots": total_slots,
+        "used_slots": used_slots,
+        "auto_provision_on": auto_provision_on,
+        "spokes": spokes_out,
+    }
 
 
 @router.get("/aggregate/api-server")
