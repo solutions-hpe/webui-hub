@@ -138,3 +138,14 @@ class AuditEntry(BaseModel):
     initiated_by: str = ""
     result: Optional[dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=_now)
+
+
+class SpokeBackupConfig(BaseModel):
+    vm_ids: list[int] = Field(default_factory=list)
+
+
+class BackupConfig(BaseModel):
+    spokes: dict[str, SpokeBackupConfig] = Field(default_factory=dict)
+    retention: int = 3
+    azure_account: str = "lrbcsvms"
+    azure_container: str = "vms"

@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from .config import get_settings
 from .crypto import decrypt_dict, decrypt_str, encrypt_str, generate_api_key
-from .data_models import AuditEntry, Command, Spoke, PendingSpoke, Tenant, User
+from .data_models import AuditEntry, BackupConfig, Command, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
 
@@ -49,6 +49,10 @@ _PROCESSING_MODE_DEFAULTS = {
 
 def _data_dir() -> Path:
     return Path(get_settings().data_dir)
+
+
+DATA_DIR = _data_dir()
+_BACKUP_CONFIG_FILE = DATA_DIR / "backup_config.json"
 
 
 def _read_json(path: Path) -> Any:
@@ -94,6 +98,19 @@ def _load_users() -> list[User]:
 
 def _save_users(users: list[User]) -> None:
     _write_json(_users_path(), [u.model_dump(mode="json") for u in users])
+
+
+def load_backup_config() -> BackupConfig:
+    with _lock:
+        raw = _read_json(_BACKUP_CONFIG_FILE)
+        if not raw:
+            return BackupConfig()
+        return BackupConfig(**raw)
+
+
+def save_backup_config(config: BackupConfig) -> None:
+    with _lock:
+        _write_json(_BACKUP_CONFIG_FILE, config.model_dump(mode="json"))
 
 
 def get_user(username: str) -> Optional[User]:

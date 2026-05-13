@@ -112,6 +112,18 @@ async def ws_broadcast(data: dict) -> None:
     browser_connections.difference_update(dead)
 
 
+async def send_spoke_command(tenant_id: str, spoke_id: str, command: dict) -> bool:
+    websocket = spoke_connections.get((tenant_id, spoke_id))
+    if websocket is None:
+        return False
+    try:
+        await websocket.send_json({"type": "commands", "commands": [command]})
+    except Exception:
+        await unregister_spoke(tenant_id, spoke_id, websocket)
+        return False
+    return True
+
+
 async def push_spoke_commands(tenant_id: str, spoke_id: str) -> bool:
     websocket = spoke_connections.get((tenant_id, spoke_id))
     if websocket is None:
