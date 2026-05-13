@@ -1,0 +1,11 @@
+#!/bin/bash
+# Post-commit hook: auto-push to tracking remote branch.
+
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+remote=$(git config --get "branch.${branch}.remote" 2>/dev/null || echo "origin")
+
+if git push "$remote" "$branch" 2>&1; then
+    echo "[post-commit] Pushed $branch → $remote ✓"
+else
+    echo "[post-commit] WARNING: push failed — run 'git push' manually"
+fi

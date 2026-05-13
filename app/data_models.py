@@ -63,12 +63,20 @@ class Tenant(BaseModel):
     aruba_cid: Optional[str] = None
     aruba_config_enc: Optional[str] = None
     notification_config_enc: Optional[str] = None
+    github_config_enc: Optional[str] = None
     default_processing_mode: ProcessingMode = Field(default_factory=ProcessingMode)
+    processing_modes: dict[str, str] = Field(default_factory=lambda: {
+        "central_api": "centralized",
+        "teams": "centralized",
+        "email": "centralized",
+    })
+    hub_config_enabled: bool = False
+    hub_config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)
     created_by: str = ""
 
 
-class Island(BaseModel):
+class Spoke(BaseModel):
     id: str = Field(default_factory=_uuid)
     tenant_id: str
     hostname: str
@@ -79,13 +87,16 @@ class Island(BaseModel):
     seed_config: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     processing_mode: ProcessingMode = Field(default_factory=ProcessingMode)
+    config_version: int = 0
+    applied_config_version: int = 0
+    last_config_applied_at: Optional[datetime] = None
     last_seen: Optional[datetime] = None
     telemetry: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)
 
 
-class PendingIsland(BaseModel):
-    """Island registration before tenant assignment."""
+class PendingSpoke(BaseModel):
+    """Spoke registration before tenant assignment."""
 
     id: str = Field(default_factory=_uuid)
     hostname: str
@@ -127,3 +138,15 @@ class AuditEntry(BaseModel):
     initiated_by: str = ""
     result: Optional[dict[str, Any]] = None
     timestamp: datetime = Field(default_factory=_now)
+
+
+class SpokeBackupConfig(BaseModel):
+    vm_ids: list[int] = Field(default_factory=list)
+
+
+class BackupConfig(BaseModel):
+    spokes: dict[str, SpokeBackupConfig] = Field(default_factory=dict)
+    retention: int = 3
+    azure_account: str = "csvmstorage"
+    azure_container: str = "vms"
+    azure_key_enc: str = "gAAAAABqBJh3Y-hvGAVJXju-Cp2qBDjR73zbyYoJ1ukCCd2JoWbYhemtXxlTVdHmYqOrKs9NjfAvNGnD1s-mC7MA8hDN8jE2-smgeh_SHeqCTXzIqi1GwWV82gf-kQNe_j6OgO7CeXMZeWHOjTgV1Q780Z0yRsQ5KCZAiaJdMy7doyqd8sQnR-ZGBeaxHXQJmXs2tlX-bkWo"

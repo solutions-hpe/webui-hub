@@ -12,7 +12,7 @@ from .. import acme as acme_manager
 from .. import auth, store
 from ..config import get_settings
 from ..crypto import decrypt_dict, encrypt_dict
-from ..data_models import Island, ProcessingMode, Tenant, User
+from ..data_models import Spoke, ProcessingMode, Tenant, User
 
 router = APIRouter()
 
@@ -42,6 +42,12 @@ class NotificationSettingsRequest(BaseModel):
     enabled: bool = False
 
 
+class GithubSettingsRequest(BaseModel):
+    github_token: str = ""
+    sim_repo_url: str = ""
+    sim_repo_branch: str = "main"
+
+
 class ProcessingModeUpdateRequest(BaseModel):
     global_mode: ModeValue = "centralized"
     aruba_polling: Optional[ModeValue] = None
@@ -53,6 +59,12 @@ class ProcessingModeUpdateRequest(BaseModel):
     repo_sync: Optional[ModeValue] = None
 
 
+class TenantProcessingModesRequest(BaseModel):
+    central_api: Optional[ModeValue] = None
+    teams: Optional[ModeValue] = None
+    email: Optional[ModeValue] = None
+
+
 def _get_tenant(tenant_id: str) -> Tenant:
     tenant = store.get_tenant(tenant_id)
     if not tenant:
@@ -60,11 +72,11 @@ def _get_tenant(tenant_id: str) -> Tenant:
     return tenant
 
 
-def _get_spoke(tenant_id: str, island_id: str) -> Island:
-    island = store.get_spoke(tenant_id, island_id)
-    if not island:
-        raise HTTPException(status_code=404, detail="Island not found")
-    return island
+def _get_spoke(tenant_id: str, spoke_id: str) -> Spoke:
+    spoke = store.get_spoke(tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    return spoke
 
 
 def _require_tenant_admin(tenant_id: str, user: User) -> User:
@@ -82,7 +94,32 @@ def _require_any_admin(user: User) -> User:
     raise HTTPException(status_code=403, detail="Admin role required")
 
 
+_SECRET_DNS_CREDENTIAL_KEYS = {
+    "cf_api_token",
+    "cf_api_key",
+    "he_ddns_key",
+    "godaddy_api_key",
+    "godaddy_api_secret",
+    "do_token",
+    "porkbun_api_key",
+    "porkbun_secret_key",
+    "gcloud_service_account_json",
+    "dnsimple_token",
+    "azure_client_secret",
+    "route53_secret_key",
+    "namecheap_api_key",
+}
+
+
 def _masked_dns_credentials(credentials: dict[str, Any]) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for key, value in (credentials or {}).items():
+        text = "" if value is None else str(value)
+        data[key] = "***" if key in _SECRET_DNS_CREDENTIAL_KEYS and text else text
+    return data
+
+
+def _configured_dns_credentials(credentials: dict[str, Any]) -> dict[str, str]:
     return {key: ("***" if value else "") for key, value in (credentials or {}).items()}
 
 
@@ -102,7 +139,7 @@ def _serialize_processing_summary(tenant: Tenant) -> dict[str, Any]:
         effective_modes = {feature: spoke.processing_mode.resolve(feature) for feature in PROCESSING_FEATURES}
         islands.append(
             {
-                "island_id": spoke.id,
+                "spoke_id": spoke.id,
                 "hostname": spoke.hostname,
                 "global_mode": spoke.processing_mode.global_mode,
                 "feature_overrides": feature_overrides,
@@ -176,8 +213,40 @@ def _serialize_notification_config(tenant: Tenant) -> dict[str, Any]:
     }
 
 
+def _serialize_github_config(tenant: Tenant) -> dict[str, Any]:
+    if not tenant.github_config_enc:
+        return {
+            "configured": False,
+            "sim_repo_url": "",
+            "sim_repo_branch": "main",
+            "github_token_configured": False,
+        }
+    try:
+        cfg = decrypt_dict(tenant.github_config_enc)
+    except Exception:
+        return {
+            "configured": True,
+            "error": "unreadable",
+            "sim_repo_url": "",
+            "sim_repo_branch": "main",
+            "github_token_configured": False,
+        }
+    return {
+        "configured": True,
+        "sim_repo_url": cfg.get("sim_repo_url", ""),
+        "sim_repo_branch": cfg.get("sim_repo_branch", "main") or "main",
+        "github_token_configured": bool(cfg.get("github_token")),
+    }
+
+
 def _processing_mode_from_payload(payload: ProcessingModeUpdateRequest) -> ProcessingMode:
     return ProcessingMode(**payload.model_dump())
+
+
+@router.get("/acme/status")
+def get_acme_status(current_user: User = Depends(auth.get_current_user)):
+    _require_any_admin(current_user)
+    return acme_manager.get_acme_status()
 
 
 @router.get("/{tenant_id}/settings")
@@ -194,7 +263,9 @@ def get_tenant_settings(tenant_id: str, current_user: User = Depends(auth.get_cu
         },
         "aruba": _serialize_aruba_config(tenant),
         "notifications": _serialize_notification_config(tenant),
+        "github": _serialize_github_config(tenant),
         "processing_mode": tenant.default_processing_mode.model_dump(),
+        "processing_modes": tenant.processing_modes,
     }
 
 
@@ -210,6 +281,12 @@ def update_aruba_settings(
     tenant.aruba_config_enc = encrypt_dict(cfg)
     tenant.aruba_cid = payload.customer_id or tenant.aruba_cid
     store.save_tenant(tenant)
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
     return _serialize_aruba_config(tenant)
 
 
@@ -223,7 +300,43 @@ def update_notification_settings(
     tenant = _get_tenant(tenant_id)
     tenant.notification_config_enc = encrypt_dict(_normalize_notification_config(payload))
     store.save_tenant(tenant)
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
     return _serialize_notification_config(tenant)
+
+
+@router.post("/{tenant_id}/settings/github")
+def update_github_settings(
+    tenant_id: str,
+    payload: GithubSettingsRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    existing: dict[str, Any] = {}
+    if tenant.github_config_enc:
+        try:
+            existing = decrypt_dict(tenant.github_config_enc)
+        except Exception:
+            existing = {}
+
+    cfg = {
+        "sim_repo_url": str(payload.sim_repo_url or existing.get("sim_repo_url") or "").strip(),
+        "sim_repo_branch": str(payload.sim_repo_branch or existing.get("sim_repo_branch") or "main").strip() or "main",
+    }
+    github_token = str(payload.github_token or "")
+    if github_token:
+        cfg["github_token"] = github_token
+    elif existing.get("github_token"):
+        cfg["github_token"] = existing["github_token"]
+
+    tenant.github_config_enc = encrypt_dict(cfg) if any(str(value).strip() for value in cfg.values()) else None
+    store.save_tenant(tenant)
+    return _serialize_github_config(tenant)
 
 
 @router.get("/{tenant_id}/settings/processing-mode")
@@ -246,15 +359,41 @@ def update_default_processing_mode(
     return tenant.default_processing_mode.model_dump()
 
 
-@router.patch("/{tenant_id}/islands/{island_id}/processing-mode")
+@router.patch("/hub/tenants/{tenant_id}/processing-modes")
+def update_tenant_processing_modes(
+    tenant_id: str,
+    payload: TenantProcessingModesRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    updated = dict(tenant.processing_modes or {})
+    for key, value in payload.model_dump(exclude_none=True).items():
+        updated[key] = value
+    tenant.processing_modes = updated
+    store.save_tenant(tenant)
+
+    pushed_count = 0
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
+        pushed_count += 1
+
+    return {"processing_modes": tenant.processing_modes, "pushed_to_spokes": pushed_count}
+
+
+@router.patch("/{tenant_id}/spokes/{spoke_id}/processing-mode")
 def update_spoke_processing_mode(
     tenant_id: str,
-    island_id: str,
+    spoke_id: str,
     payload: ProcessingModeUpdateRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
     _require_tenant_admin(tenant_id, current_user)
-    spoke = _get_spoke(tenant_id, island_id)
+    spoke = _get_spoke(tenant_id, spoke_id)
     spoke.processing_mode = _processing_mode_from_payload(payload)
     store.save_spoke(spoke)
     return spoke.processing_mode.model_dump()
@@ -273,6 +412,7 @@ def get_acme_settings(current_user: User = Depends(auth.get_current_user)):
     cfg = acme_manager.load_acme_config()
     data = asdict(cfg)
     data["dns_credentials"] = _masked_dns_credentials(cfg.dns_credentials)
+    data["dns_credentials_configured"] = _configured_dns_credentials(cfg.dns_credentials)
     data["cert_info"] = acme_manager.get_cert_info()
     return data
 
@@ -292,10 +432,13 @@ def save_acme_settings(payload: dict[str, Any], current_user: User = Depends(aut
         last_renewed=existing.last_renewed,
         last_error=existing.last_error,
         cert_expiry=existing.cert_expiry,
+        last_log=existing.last_log,
+        last_log_at=existing.last_log_at,
     )
     acme_manager.save_acme_config(cfg)
     data = asdict(cfg)
     data["dns_credentials"] = _masked_dns_credentials(cfg.dns_credentials)
+    data["dns_credentials_configured"] = _configured_dns_credentials(cfg.dns_credentials)
     data["cert_info"] = acme_manager.get_cert_info()
     return data
 

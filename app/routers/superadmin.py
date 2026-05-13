@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional, Union
 import uuid
 
+from ..ws import ws_broadcast
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
@@ -11,7 +13,7 @@ from .. import auth, store
 from ..aruba import ArubaClient
 from ..config import get_settings
 from ..crypto import encrypt_dict, encrypt_str, generate_api_key
-from ..data_models import Command, Island, Tenant, User
+from ..data_models import Command, Spoke, Tenant, User
 
 router = APIRouter()
 
@@ -46,7 +48,7 @@ class NotificationConfigRequest(BaseModel):
     enabled: bool = False
 
 
-class ApprovePendingIslandRequest(BaseModel):
+class ApprovePendingSpokeRequest(BaseModel):
     tenant_id: str
     label: Optional[str] = None
 
@@ -58,7 +60,7 @@ class CreateUserRequest(BaseModel):
 
 class AssignRoleRequest(BaseModel):
     tenant_id: str
-    role: Literal["admin", "operator"]
+    role: Literal["admin", "viewer", "operator"]
 
 
 def _normalize_notification_config(payload: NotificationConfigRequest) -> dict[str, Any]:
@@ -86,6 +88,7 @@ def _tenant_response(tenant: Tenant) -> dict[str, Any]:
         "has_aruba_config": bool(tenant.aruba_config_enc),
         "has_notification_config": bool(tenant.notification_config_enc),
         "default_processing_mode": tenant.default_processing_mode.model_dump(),
+        "hub_config_enabled": tenant.hub_config_enabled,
         "created_at": tenant.created_at,
         "created_by": tenant.created_by,
     }
@@ -99,6 +102,80 @@ def _user_response(user: User) -> dict[str, Any]:
         "tenant_roles": user.tenant_roles,
         "created_at": user.created_at,
     }
+
+
+def _build_approval_config_payload(
+    tenant: "Tenant",
+    seed_config: dict,
+    plain_key: str,
+    spoke_id: str,
+    tenant_id: str,
+    relay_server_url: str,
+) -> dict:
+    """Build config_update payload for a newly approved spoke.
+    If hub_config_enabled, seed hub_config from first spoke or push existing hub_config.
+    Returns (payload_dict, updated_tenant_or_None)."""
+    base = {
+        "relay_spoke_id": spoke_id,
+        "relay_api_key": plain_key,
+        "relay_tenant_id": tenant_id,
+        "relay_server_url": relay_server_url,
+    }
+    if not tenant.hub_config_enabled:
+        return base, None
+
+    if not tenant.hub_config:
+        # First spoke — seed hub_config from spoke's seed_config
+        tenant.hub_config = dict(seed_config or {})
+        store.save_tenant(tenant)
+        base.update(tenant.hub_config)
+        return base, tenant
+
+    # Subsequent spoke — overwrite with hub's canonical config
+    base.update(tenant.hub_config)
+    return base, None
+
+
+def _ensure_tenant_spoke_name_available(
+    tenant_id: str,
+    spoke_name: str,
+    *,
+    spoke_id: str,
+    hostname: str,
+) -> None:
+    approved_conflict = store.find_spoke_name_conflict(
+        tenant_id,
+        spoke_name,
+        exclude_spoke_id=spoke_id,
+    )
+    if approved_conflict and approved_conflict.hostname != hostname:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": "name_in_use",
+                "message": (
+                    f"Spoke name '{spoke_name}' is already in use by another approved spoke "
+                    f"within tenant '{tenant_id}'. Choose a different name."
+                ),
+            },
+        )
+
+    pending_conflict = store.find_pending_spoke_name_conflict(
+        tenant_id,
+        spoke_name,
+        exclude_spoke_id=spoke_id,
+    )
+    if pending_conflict and pending_conflict.hostname != hostname:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "conflict": "name_in_use",
+                "message": (
+                    f"Spoke name '{spoke_name}' is already registered and pending approval "
+                    f"within tenant '{tenant_id}'. Choose a different name."
+                ),
+            },
+        )
 
 
 @router.post("/superadmin/tenants", status_code=status.HTTP_201_CREATED)
@@ -202,6 +279,61 @@ def update_tenant_notification_config(
     return {"status": "saved"}
 
 
+class HubConfigRequest(BaseModel):
+    hub_config_enabled: bool
+    hub_config: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/tenant/{tenant_id}/hub-config")
+def get_tenant_hub_config(
+    tenant_id: str,
+    current_user: User = Depends(auth.require_superadmin),
+):
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {
+        "hub_config_enabled": tenant.hub_config_enabled,
+        "hub_config": tenant.hub_config,
+        "processing_modes": tenant.processing_modes,
+    }
+
+
+@router.put("/tenant/{tenant_id}/hub-config")
+async def update_tenant_hub_config(
+    tenant_id: str,
+    payload: HubConfigRequest,
+    request: Request,
+    current_user: User = Depends(auth.require_superadmin),
+):
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    tenant.hub_config_enabled = payload.hub_config_enabled
+    tenant.hub_config = payload.hub_config or {}
+    store.save_tenant(tenant)
+
+    pushed_count = 0
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        if tenant.hub_config_enabled and tenant.hub_config:
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant_id, spoke.id)
+            pushed_count += 1
+            continue
+
+        if spoke.config_version > 0:
+            spoke.config_version = 0
+            spoke.applied_config_version = 0
+            store.save_spoke(spoke)
+            store.ensure_config_clear_command(tenant_id, spoke.id)
+            pushed_count += 1
+
+    return {"status": "saved", "hub_config_enabled": tenant.hub_config_enabled, "pushed_to_spokes": pushed_count}
+
+
 @router.get("/superadmin/gkill-state")
 def get_gkill_state(_: User = Depends(auth.require_superadmin)):
     from .. import tasks
@@ -248,9 +380,9 @@ def list_pending_spokes(_: User = Depends(auth.require_superadmin)):
 
 
 @router.post("/superadmin/pending-spokes/{spoke_id}/approve")
-def approve_pending_spoke(
+async def approve_pending_spoke(
     spoke_id: str,
-    payload: ApprovePendingIslandRequest,
+    payload: ApprovePendingSpokeRequest,
     request: Request,
     _: User = Depends(auth.require_superadmin),
 ):
@@ -262,11 +394,19 @@ def approve_pending_spoke(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
-    spoke = Island(
+    _ensure_tenant_spoke_name_available(
+        payload.tenant_id,
+        pending.spoke_name,
+        spoke_id=pending.id,
+        hostname=pending.hostname,
+    )
+
+    spoke = Spoke(
         id=pending.id,
         tenant_id=payload.tenant_id,
         hostname=pending.hostname,
         label=payload.label if payload.label is not None else pending.label,
+        spoke_name=pending.spoke_name,
         seed_config=pending.seed_config,
         config=pending.seed_config.copy(),
         processing_mode=tenant.default_processing_mode.model_copy(deep=True),
@@ -278,21 +418,26 @@ def approve_pending_spoke(
     store.save_spoke(spoke)
     store.delete_pending_spoke(spoke_id)
 
-    relay_server_url = str(request.base_url).rstrip("/") + f"/api/{payload.tenant_id}"
+    relay_server_url = str(request.base_url).rstrip("/")
+    cmd_payload, _ = _build_approval_config_payload(
+        tenant, pending.seed_config, plain_key, spoke.id, payload.tenant_id, relay_server_url
+    )
     store.enqueue_command(
         Command(
             spoke_id=spoke.id,
             tenant_id=payload.tenant_id,
             type="config_update",
-            payload={
-                "relay_spoke_id": spoke.id,
-                "relay_api_key": plain_key,
-                "relay_tenant_id": payload.tenant_id,
-                "relay_server_url": relay_server_url,
-            },
+            payload=cmd_payload,
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
     )
+    await ws_broadcast({
+        "type": "spoke_approved",
+        "tenant_id": payload.tenant_id,
+        "spoke_id": spoke.id,
+        "hostname": spoke.hostname,
+        "spoke_name": spoke.spoke_name,
+    })
 
     return {
         "spoke_id": spoke.id,
@@ -321,11 +466,11 @@ def list_tenant_pending_spokes(
 ):
     """Return pending spokes that pre-registered for this tenant."""
     all_pending = store.list_pending_spokes()
-    return [p for p in all_pending if p.get("tenant_hint") == tenant_id]
+    return [p for p in all_pending if p.tenant_hint == tenant_id]
 
 
 @router.post("/tenant/{tenant_id}/pending-spokes/{spoke_id}/approve", status_code=201)
-def tenant_approve_pending_spoke(
+async def tenant_approve_pending_spoke(
     tenant_id: str,
     spoke_id: str,
     request: Request,
@@ -343,8 +488,15 @@ def tenant_approve_pending_spoke(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    _ensure_tenant_spoke_name_available(
+        tenant_id,
+        pending.spoke_name,
+        spoke_id=pending.id,
+        hostname=pending.hostname,
+    )
+
     label = label if label is not None else pending.label
-    spoke = Island(
+    spoke = Spoke(
         id=pending.id,
         tenant_id=tenant_id,
         hostname=pending.hostname,
@@ -361,21 +513,26 @@ def tenant_approve_pending_spoke(
     store.save_spoke(spoke)
     store.delete_pending_spoke(spoke_id)
 
-    relay_server_url = str(request.base_url).rstrip("/") + f"/api/{tenant_id}"
+    relay_server_url = str(request.base_url).rstrip("/")
+    cmd_payload, _ = _build_approval_config_payload(
+        tenant, pending.seed_config, plain_key, spoke.id, tenant_id, relay_server_url
+    )
     store.enqueue_command(
         Command(
             spoke_id=spoke.id,
             tenant_id=tenant_id,
             type="config_update",
-            payload={
-                "relay_spoke_id": spoke.id,
-                "relay_api_key": plain_key,
-                "relay_tenant_id": tenant_id,
-                "relay_server_url": relay_server_url,
-            },
+            payload=cmd_payload,
             expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
     )
+    await ws_broadcast({
+        "type": "spoke_approved",
+        "tenant_id": tenant_id,
+        "spoke_id": spoke.id,
+        "hostname": spoke.hostname,
+        "spoke_name": spoke.spoke_name,
+    })
 
     return {
         "spoke_id": spoke.id,
@@ -441,8 +598,9 @@ def assign_tenant_role(
     if not store.get_tenant(payload.tenant_id):
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    normalized_role = "viewer" if payload.role == "operator" else payload.role
     user.tenant_roles = [tr for tr in user.tenant_roles if tr["tenant_id"] != payload.tenant_id]
-    user.tenant_roles.append({"tenant_id": payload.tenant_id, "role": payload.role})
+    user.tenant_roles.append({"tenant_id": payload.tenant_id, "role": normalized_role})
     store.save_user(user)
     return _user_response(user)
 

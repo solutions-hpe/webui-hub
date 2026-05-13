@@ -5,10 +5,12 @@
 # Usage:
 #   export WEBUI_SECRET_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 #   export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+#   export ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+#   export INSTALLER_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 #   export ADMIN_PASSWORD=your-secure-password
 #   bash deploy-azure.sh
 #
-# Required env vars: WEBUI_SECRET_KEY, SECRET_KEY, ADMIN_PASSWORD
+# Required env vars: WEBUI_SECRET_KEY, SECRET_KEY, ENCRYPTION_KEY, INSTALLER_API_KEY, ADMIN_PASSWORD
 # Optional env vars: RG, LOCATION, ACR_NAME, CONTAINER_NAME, STORAGE_ACCOUNT, FILE_SHARE
 
 set -euo pipefail
@@ -37,6 +39,16 @@ if [ -z "${SECRET_KEY:-}" ]; then
 fi
 if [ -z "${ADMIN_PASSWORD:-}" ]; then
     echo "❌ ADMIN_PASSWORD is required."
+    exit 1
+fi
+if [ -z "${ENCRYPTION_KEY:-}" ]; then
+    echo "❌ ENCRYPTION_KEY is required."
+    echo "   Generate with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    exit 1
+fi
+if [ -z "${INSTALLER_API_KEY:-}" ]; then
+    echo "❌ INSTALLER_API_KEY is required."
+    echo "   Generate with: python3 -c \"import secrets; print(secrets.token_urlsafe(32))\""
     exit 1
 fi
 
@@ -113,6 +125,8 @@ az container create \
     --secure-environment-variables \
         WEBUI_SECRET_KEY="$WEBUI_SECRET_KEY" \
         SECRET_KEY="$SECRET_KEY" \
+        ENCRYPTION_KEY="$ENCRYPTION_KEY" \
+        INSTALLER_API_KEY="$INSTALLER_API_KEY" \
     --azure-file-volume-account-name "$STORAGE_ACCOUNT" \
     --azure-file-volume-account-key "$STORAGE_KEY" \
     --azure-file-volume-share-name "$FILE_SHARE" \
@@ -139,6 +153,8 @@ echo ""
 echo "  Save these values securely:"
 echo "  WEBUI_SECRET_KEY : [set from env]"
 echo "  SECRET_KEY       : [set from env]"
+echo "  ENCRYPTION_KEY   : [set from env]"
+echo "  INSTALLER_API_KEY: [set from env]"
 echo "  ACR_NAME         : $ACR_NAME"
 echo "  STORAGE_ACCOUNT  : $STORAGE_ACCOUNT"
 echo "  FILE_SHARE       : $FILE_SHARE"

@@ -9,7 +9,9 @@ requests and background tasks do not corrupt on-disk state.
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import shutil
 import threading
 from datetime import datetime, timedelta, timezone
@@ -17,29 +19,68 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import get_settings
-from .crypto import decrypt_str, encrypt_str, generate_api_key
-from .data_models import AuditEntry, Command, Island, PendingIsland, Tenant, User
+from .crypto import decrypt_dict, decrypt_str, encrypt_str, generate_api_key
+from .data_models import AuditEntry, BackupConfig, Command, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
+
+
+logger = logging.getLogger(__name__)
+
+_RELAY_CONFIG_KEYS = {
+    "relay_server_url",
+    "relay_api_key",
+    "relay_tenant_id",
+    "hub_tls_verify",
+    "relay_spoke_id",
+    "relay_spoke_name",
+}
+_HUB_LOCAL_CONFIG_KEYS = {
+    "repo_url",
+    "sim_repo_url",
+    "sim_repo_branch",
+}
+_PROCESSING_MODE_DEFAULTS = {
+    "central_api": "centralized",
+    "teams": "centralized",
+    "email": "centralized",
+}
 
 
 def _data_dir() -> Path:
     return Path(get_settings().data_dir)
 
 
+DATA_DIR = _data_dir()
+_BACKUP_CONFIG_FILE = DATA_DIR / "backup_config.json"
+
+
 def _read_json(path: Path) -> Any:
     if not path.exists():
         return None
-    with open(path) as f:
-        return json.load(f)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError as exc:
+        logger.error("Corrupt JSON in %s: %s — returning None", path, exc)
+        return None
+    except OSError as exc:
+        logger.error("Failed to read %s: %s — returning None", path, exc)
+        return None
 
 
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2, default=str)
-    tmp.replace(path)
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2, default=str)
+        tmp.replace(path)
+    except OSError as exc:
+        logger.error("Failed to write %s: %s", path, exc)
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def _now() -> datetime:
@@ -57,6 +98,19 @@ def _load_users() -> list[User]:
 
 def _save_users(users: list[User]) -> None:
     _write_json(_users_path(), [u.model_dump(mode="json") for u in users])
+
+
+def load_backup_config() -> BackupConfig:
+    with _lock:
+        raw = _read_json(_BACKUP_CONFIG_FILE)
+        if not raw:
+            return BackupConfig()
+        return BackupConfig(**raw)
+
+
+def save_backup_config(config: BackupConfig) -> None:
+    with _lock:
+        _write_json(_BACKUP_CONFIG_FILE, config.model_dump(mode="json"))
 
 
 def get_user(username: str) -> Optional[User]:
@@ -174,13 +228,13 @@ def _pending_dir() -> Path:
     return _data_dir() / "pending"
 
 
-def get_pending_spoke(spoke_id: str) -> Optional[PendingIsland]:
+def get_pending_spoke(spoke_id: str) -> Optional[PendingSpoke]:
     with _lock:
         raw = _read_json(_pending_dir() / f"{spoke_id}.json")
-        return PendingIsland(**raw) if raw else None
+        return PendingSpoke(**raw) if raw else None
 
 
-def list_pending_spokes() -> list[PendingIsland]:
+def list_pending_spokes() -> list[PendingSpoke]:
     with _lock:
         d = _pending_dir()
         if not d.exists():
@@ -189,11 +243,11 @@ def list_pending_spokes() -> list[PendingIsland]:
         for f in d.glob("*.json"):
             raw = _read_json(f)
             if raw:
-                results.append(PendingIsland(**raw))
+                results.append(PendingSpoke(**raw))
         return results
 
 
-def get_pending_by_hostname(hostname: str) -> Optional[PendingIsland]:
+def get_pending_by_hostname(hostname: str) -> Optional[PendingSpoke]:
     with _lock:
         for p in list_pending_spokes():
             if p.hostname == hostname:
@@ -201,11 +255,27 @@ def get_pending_by_hostname(hostname: str) -> Optional[PendingIsland]:
     return None
 
 
-def get_spoke_by_pending_hostname(hostname: str) -> Optional[PendingIsland]:
+def rekey_pending_spoke(old_spoke_id: str, new_spoke_id: str) -> bool:
+    with _lock:
+        if old_spoke_id == new_spoke_id:
+            return True
+        pending = get_pending_spoke(old_spoke_id)
+        if not pending:
+            return False
+        target = _pending_dir() / f"{new_spoke_id}.json"
+        if target.exists():
+            raise ValueError("Pending spoke ID already exists")
+        delete_pending_spoke(old_spoke_id)
+        pending.id = new_spoke_id
+        save_pending_spoke(pending)
+        return True
+
+
+def get_spoke_by_pending_hostname(hostname: str) -> Optional[PendingSpoke]:
     return get_pending_by_hostname(hostname)
 
 
-def save_pending_spoke(spoke: PendingIsland) -> None:
+def save_pending_spoke(spoke: PendingSpoke) -> None:
     with _lock:
         _write_json(_pending_dir() / f"{spoke.id}.json", spoke.model_dump(mode="json"))
 
@@ -221,16 +291,16 @@ def _spoke_path(tenant_id: str) -> Path:
     return _data_dir() / tenant_id / "islands.json"
 
 
-def _load_spokes(tenant_id: str) -> list[Island]:
+def _load_spokes(tenant_id: str) -> list[Spoke]:
     raw = _read_json(_spoke_path(tenant_id)) or []
-    return [Island(**i) for i in raw]
+    return [Spoke(**i) for i in raw]
 
 
-def _save_spokes(tenant_id: str, spokes: list[Island]) -> None:
+def _save_spokes(tenant_id: str, spokes: list[Spoke]) -> None:
     _write_json(_spoke_path(tenant_id), [i.model_dump(mode="json") for i in spokes])
 
 
-def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Island]:
+def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Spoke]:
     with _lock:
         for i in _load_spokes(tenant_id):
             if i.id == spoke_id:
@@ -238,7 +308,7 @@ def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Island]:
     return None
 
 
-def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
+def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Spoke]:
     """Return the approved spoke whose encrypted API key matches the plaintext key."""
     with _lock:
         for i in _load_spokes(tenant_id):
@@ -251,8 +321,8 @@ def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Island]:
     return None
 
 
-def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Island]]:
-    """Return (tenant_id, island) for the first approved island matching hostname across all tenants."""
+def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for the first approved spoke matching hostname across all tenants."""
     with _lock:
         for tenant in _load_tenants():
             for spoke in _load_spokes(tenant.id):
@@ -261,8 +331,18 @@ def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Island]
     return None
 
 
-def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Island]]:
-    """Return (tenant_id, island) for the first approved island matching spoke_name across all tenants."""
+def get_approved_spoke_by_id(spoke_id: str) -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for the first approved spoke matching ID across all tenants."""
+    with _lock:
+        for tenant in _load_tenants():
+            for spoke in _load_spokes(tenant.id):
+                if spoke.status == "approved" and spoke.id == spoke_id:
+                    return tenant.id, spoke
+    return None
+
+
+def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for the first approved spoke matching spoke_name across all tenants."""
     name = spoke_name.strip().lower()
     if not name:
         return None
@@ -274,7 +354,29 @@ def get_spoke_by_name(spoke_name: str) -> Optional[tuple[str, Island]]:
     return None
 
 
-def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingIsland]:
+def find_spoke_name_conflict(
+    tenant_id: str,
+    spoke_name: str,
+    *,
+    exclude_spoke_id: str = "",
+) -> Optional[Spoke]:
+    """Return the first approved spoke in tenant_id whose spoke_name conflicts."""
+    name = spoke_name.strip().lower()
+    if not tenant_id or not name:
+        return None
+    excluded = exclude_spoke_id.strip().lower()
+    with _lock:
+        for spoke in _load_spokes(tenant_id):
+            if spoke.status != "approved":
+                continue
+            if excluded and spoke.id.strip().lower() == excluded:
+                continue
+            if spoke.spoke_name.strip().lower() == name:
+                return spoke
+    return None
+
+
+def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingSpoke]:
     """Return first pending spoke matching spoke_name."""
     name = spoke_name.strip().lower()
     if not name:
@@ -286,17 +388,254 @@ def get_pending_spoke_by_name(spoke_name: str) -> Optional[PendingIsland]:
     return None
 
 
+def find_pending_spoke_name_conflict(
+    tenant_hint: str,
+    spoke_name: str,
+    *,
+    exclude_spoke_id: str = "",
+) -> Optional[PendingSpoke]:
+    """Return the first pending spoke in tenant_hint whose spoke_name conflicts."""
+    name = spoke_name.strip().lower()
+    if not tenant_hint or not name:
+        return None
+    excluded = exclude_spoke_id.strip().lower()
+    with _lock:
+        for pending in list_pending_spokes():
+            if pending.tenant_hint != tenant_hint:
+                continue
+            if excluded and pending.id.strip().lower() == excluded:
+                continue
+            if pending.spoke_name.strip().lower() == name:
+                return pending
+    return None
 
+
+def list_spokes(tenant_id: str) -> list[Spoke]:
     with _lock:
         return _load_spokes(tenant_id)
 
 
-def save_spoke(spoke: Island) -> None:
+def save_spoke(spoke: Spoke) -> None:
     with _lock:
         spokes = _load_spokes(spoke.tenant_id)
         spokes = [i for i in spokes if i.id != spoke.id]
         spokes.append(spoke)
         _save_spokes(spoke.tenant_id, spokes)
+
+
+def mark_spoke_config_applied(tenant_id: str, spoke_id: str, version: int) -> None:
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke:
+            return
+        if version > spoke.applied_config_version:
+            spoke.applied_config_version = version
+        spoke.last_config_applied_at = _now()
+        save_spoke(spoke)
+
+
+def get_command(tenant_id: str, spoke_id: str, command_id: str) -> Optional[Command]:
+    with _lock:
+        for command in _load_queue(tenant_id, spoke_id):
+            if command.id == command_id:
+                return command
+    return None
+
+
+def _tenant_processing_modes(tenant: Tenant | None) -> dict[str, str]:
+    modes = dict(_PROCESSING_MODE_DEFAULTS)
+    if tenant:
+        for key, default in _PROCESSING_MODE_DEFAULTS.items():
+            value = str((tenant.processing_modes or {}).get(key, default)).strip().lower()
+            modes[key] = value if value in {"centralized", "distributed"} else default
+    return modes
+
+
+
+def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
+    if not tenant:
+        return {}
+    return {
+        key: value
+        for key, value in (tenant.hub_config or {}).items()
+        if key not in _RELAY_CONFIG_KEYS and key not in _HUB_LOCAL_CONFIG_KEYS
+    }
+
+
+
+def _hub_github_config(tenant: Tenant | None) -> dict[str, Any]:
+    if not tenant or not tenant.github_config_enc:
+        return {}
+    try:
+        cfg = decrypt_dict(tenant.github_config_enc)
+    except Exception:
+        logger.warning("Unable to decrypt GitHub config for tenant %s", tenant.id if tenant else "unknown")
+        return {}
+    return {
+        "repo_branch": str(cfg.get("sim_repo_branch") or "").strip(),
+        "github_token": str(cfg.get("github_token") or "").strip(),
+    }
+
+
+
+def tenant_has_spoke_config_payload(tenant: Tenant | None) -> bool:
+    return any(value is not None for value in _build_spoke_config_payload(tenant).values())
+
+
+
+def _hub_central_config(tenant: Tenant | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not tenant or not tenant.aruba_config_enc:
+        return None, None
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception:
+        logger.warning("Unable to decrypt Aruba config for tenant %s", tenant.id)
+        return None, None
+
+    api_version = str(cfg.get("api_version") or "classic").strip().lower()
+    if api_version == "new_central":
+        central_api = {
+            "mode": "central",
+            "classic": {"url": "", "username": ""},
+            "central": {
+                "url": cfg.get("cluster_url", ""),
+                "client_id": cfg.get("client_id", ""),
+                "customer_id": cfg.get("customer_id", ""),
+                "client_secret": cfg.get("client_secret", ""),
+            },
+        }
+    else:
+        central_api = {
+            "mode": "classic",
+            "classic": {
+                "url": cfg.get("cluster_url", ""),
+                "username": cfg.get("username", ""),
+                "password": cfg.get("password", ""),
+            },
+            "central": {"url": "", "client_id": "", "customer_id": "", "client_secret": ""},
+        }
+
+    central_config = {
+        "api_version": api_version,
+        "cluster_url": cfg.get("cluster_url", ""),
+        "client_id": cfg.get("client_id", ""),
+        "client_secret": cfg.get("client_secret", ""),
+        "customer_id": cfg.get("customer_id", ""),
+        "access_token": cfg.get("access_token", ""),
+        "refresh_token": cfg.get("refresh_token", ""),
+    }
+    return central_api, central_config
+
+
+
+def _hub_notification_config(tenant: Tenant | None) -> dict[str, Any]:
+    if not tenant or not tenant.notification_config_enc:
+        return {}
+    try:
+        cfg = decrypt_dict(tenant.notification_config_enc)
+    except Exception:
+        logger.warning("Unable to decrypt notification config for tenant %s", tenant.id)
+        return {}
+
+    to_emails = cfg.get("to_emails") or []
+    if isinstance(to_emails, str):
+        to_emails = [item.strip() for item in to_emails.split(",") if item.strip()]
+    return {
+        "teams_webhook_url": cfg.get("teams_webhook_url") or cfg.get("teams_webhook") or "",
+        "smtp_host": cfg.get("smtp_host", ""),
+        "smtp_port": cfg.get("smtp_port", 587),
+        "smtp_user": cfg.get("smtp_user", ""),
+        "smtp_password": cfg.get("smtp_password") or cfg.get("smtp_pass") or "",
+        "smtp_from": cfg.get("from_email", ""),
+        "smtp_to": to_emails,
+    }
+
+
+
+def _build_spoke_config_payload(tenant: Tenant | None) -> dict[str, Any]:
+    payload = _hub_core_config(tenant)
+    payload.update(_hub_github_config(tenant))
+    modes = _tenant_processing_modes(tenant)
+    central_api, central_config = _hub_central_config(tenant)
+    notifications = _hub_notification_config(tenant)
+
+    if modes["central_api"] == "distributed":
+        payload["central_api"] = central_api or {
+            "mode": "classic",
+            "classic": {"url": "", "username": ""},
+            "central": {"url": "", "client_id": "", "customer_id": "", "client_secret": ""},
+        }
+        payload["central_config"] = central_config or {
+            "api_version": "classic",
+            "cluster_url": "",
+            "client_id": "",
+            "client_secret": "",
+            "customer_id": "",
+            "access_token": "",
+            "refresh_token": "",
+        }
+    else:
+        payload["central_api"] = None
+        payload["central_config"] = None
+
+    payload["teams_webhook_url"] = notifications.get("teams_webhook_url", "") if modes["teams"] == "distributed" else None
+    for key in ("smtp_host", "smtp_port", "smtp_user", "smtp_password", "smtp_from", "smtp_to"):
+        payload[key] = notifications.get(key) if modes["email"] == "distributed" else None
+    return payload
+
+
+
+def ensure_config_update_command(tenant_id: str, spoke_id: str) -> None:
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke or spoke.status != "approved" or spoke.config_version <= spoke.applied_config_version:
+            return
+        commands = _load_queue(tenant_id, spoke_id)
+        target_version = spoke.config_version
+        for command in commands:
+            payload_version = int((command.payload or {}).get("config_version") or (command.payload or {}).get("__config_version", 0) or 0)
+            if command.type == "config_update" and payload_version == target_version and command.status in {"queued", "delivered", "executed"}:
+                return
+        tenant = get_tenant(tenant_id)
+        merged_payload = _build_spoke_config_payload(tenant)
+        command_payload = {
+            "command": "config_update",
+            "config": merged_payload,
+            "config_version": target_version,
+            "__config_version": target_version,
+        }
+        commands.append(
+            Command(
+                spoke_id=spoke_id,
+                tenant_id=tenant_id,
+                type="config_update",
+                payload=command_payload,
+                expires_at=_now() + timedelta(hours=24),
+            )
+        )
+        _save_queue(tenant_id, spoke_id, commands)
+
+
+
+def ensure_config_clear_command(tenant_id: str, spoke_id: str) -> None:
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke or spoke.status != "approved":
+            return
+        commands = _load_queue(tenant_id, spoke_id)
+        for command in commands:
+            if command.type == "config_clear" and command.status in {"queued", "delivered"}:
+                return
+        commands.append(
+            Command(
+                spoke_id=spoke_id,
+                tenant_id=tenant_id,
+                type="config_clear",
+                payload={"command": "config_clear"},
+                expires_at=_now() + timedelta(hours=24),
+            )
+        )
+        _save_queue(tenant_id, spoke_id, commands)
 
 
 def get_processing_stats(tenant_id: str) -> dict:
@@ -328,6 +667,31 @@ def delete_spoke(tenant_id: str, spoke_id: str) -> None:
         audit_path = _audit_path(tenant_id, spoke_id)
         if audit_path.exists():
             audit_path.unlink()
+
+
+def rekey_spoke(tenant_id: str, old_spoke_id: str, new_spoke_id: str) -> bool:
+    with _lock:
+        if old_spoke_id == new_spoke_id:
+            return True
+        spokes = _load_spokes(tenant_id)
+        if any(spoke.id == new_spoke_id for spoke in spokes):
+            raise ValueError("Spoke ID already exists")
+        for spoke in spokes:
+            if spoke.id == old_spoke_id:
+                spoke.id = new_spoke_id
+                _save_spokes(tenant_id, spokes)
+                old_queue_path = _queue_path(tenant_id, old_spoke_id)
+                new_queue_path = _queue_path(tenant_id, new_spoke_id)
+                if old_queue_path.exists():
+                    new_queue_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_queue_path.replace(new_queue_path)
+                old_audit_path = _audit_path(tenant_id, old_spoke_id)
+                new_audit_path = _audit_path(tenant_id, new_spoke_id)
+                if old_audit_path.exists():
+                    new_audit_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_audit_path.replace(new_audit_path)
+                return True
+    return False
 
 
 def approve_spoke(tenant_id: str, spoke_id: str) -> Optional[str]:
@@ -387,6 +751,36 @@ def enqueue_command(command: Command) -> None:
         cmds.append(command)
         _save_queue(command.tenant_id, command.spoke_id, cmds)
 
+    with contextlib.suppress(Exception):
+        from .ws import notify_spoke_command
+
+        notify_spoke_command(command.tenant_id, command.spoke_id)
+
+
+def peek_queued_commands(tenant_id: str, spoke_id: str) -> list[Command]:
+    with _lock:
+        now = _now()
+        cmds = _load_queue(tenant_id, spoke_id)
+        active = [c for c in cmds if c.expires_at > now]
+        if len(active) != len(cmds):
+            _save_queue(tenant_id, spoke_id, active)
+        return [c for c in active if c.status == "queued"]
+
+
+def mark_commands_delivered(tenant_id: str, spoke_id: str, command_ids: list[str]) -> None:
+    if not command_ids:
+        return
+    with _lock:
+        now = _now()
+        ids = set(command_ids)
+        cmds = _load_queue(tenant_id, spoke_id)
+        active = [c for c in cmds if c.expires_at > now]
+        for command in active:
+            if command.id in ids and command.status == "queued":
+                command.status = "delivered"
+                command.delivered_at = now
+        _save_queue(tenant_id, spoke_id, active)
+
 
 def get_queued_commands(tenant_id: str, spoke_id: str) -> list[Command]:
     """Return queued commands, mark as delivered, purge expired."""
@@ -439,7 +833,21 @@ def purge_expired_commands() -> int:
         for queue_file in base.glob("*/queue/*.json"):
             raw = _read_json(queue_file) or []
             before = len(raw)
-            fresh = [c for c in raw if datetime.fromisoformat(c["expires_at"]) > now]
+            fresh = []
+            for row in raw:
+                try:
+                    expires_at = datetime.fromisoformat(str(row.get("expires_at") or ""))
+                except ValueError as exc:
+                    logger.warning(
+                        "Skipping command %s in %s due to invalid expires_at %r: %s",
+                        row.get("id", "unknown"),
+                        queue_file,
+                        row.get("expires_at"),
+                        exc,
+                    )
+                    continue
+                if expires_at > now:
+                    fresh.append(row)
             if len(fresh) < before:
                 _write_json(queue_file, fresh)
                 total += before - len(fresh)

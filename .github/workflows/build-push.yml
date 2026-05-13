@@ -2,7 +2,7 @@ name: Build & Push Hub Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, lrb]
   workflow_dispatch:   # allow manual trigger from GitHub UI
 
 env:
@@ -21,6 +21,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Fetch cs-webui frontend (same branch, fallback to main)
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          REPO="https://github.com/solutions-hpe/cs-webui.git"
+          # Clone cs-webui at matching branch; fall back to main if branch doesn't exist
+          if git ls-remote --exit-code --heads "$REPO" "$BRANCH" >/dev/null 2>&1; then
+            git clone --depth=1 -b "$BRANCH" "$REPO" /tmp/cs-webui
+            echo "Fetched cs-webui branch: $BRANCH"
+          else
+            git clone --depth=1 -b main "$REPO" /tmp/cs-webui
+            echo "Branch $BRANCH not found in cs-webui — using main"
+          fi
+          # Copy frontend files into the hub build context (main.py expects frontend/static + frontend/templates)
+          mkdir -p frontend/static frontend/templates
+          cp -r /tmp/cs-webui/static/. frontend/static/
+          cp /tmp/cs-webui/templates/index.html frontend/templates/index.html
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -35,6 +52,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
             type=sha,prefix=sha-
 
       - name: Build and push image

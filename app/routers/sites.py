@@ -1,4 +1,4 @@
-"""Tenant-scoped island management endpoints."""
+"""Tenant-scoped spoke management endpoints."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import auth, store
-from ..data_models import Command, Island, User
+from ..data_models import Spoke, User
 
 router = APIRouter()
 
@@ -21,15 +21,19 @@ class LabelUpdateRequest(BaseModel):
     label: str
 
 
-def _serialize_spoke(spoke: Island, include_config: bool = True) -> dict[str, Any]:
+def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any]:
     data = {
         "id": spoke.id,
         "tenant_id": spoke.tenant_id,
         "hostname": spoke.hostname,
         "label": spoke.label,
+        "spoke_name": spoke.spoke_name,
         "status": spoke.status,
         "seed_config": spoke.seed_config,
         "processing_mode": spoke.processing_mode,
+        "config_version": spoke.config_version,
+        "applied_config_version": spoke.applied_config_version,
+        "last_config_applied_at": spoke.last_config_applied_at,
         "last_seen": spoke.last_seen,
         "telemetry": spoke.telemetry,
         "created_at": spoke.created_at,
@@ -39,7 +43,7 @@ def _serialize_spoke(spoke: Island, include_config: bool = True) -> dict[str, An
     return data
 
 
-def _get_spoke(tenant_id: str, spoke_id: str) -> Island:
+def _get_spoke(tenant_id: str, spoke_id: str) -> Spoke:
     spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke:
         raise HTTPException(status_code=404, detail="Spoke not found")
@@ -67,6 +71,7 @@ def list_sites_legacy():
                     "id": spoke.id,
                     "hostname": spoke.hostname,
                     "label": spoke.label,
+                    "spoke_name": spoke.spoke_name,
                     "status": spoke.status,
                     "last_seen": spoke.last_seen,
                     "telemetry": spoke.telemetry,
@@ -114,19 +119,11 @@ def update_spoke_config(
     _require_tenant_admin(tenant_id, current_user)
     spoke = _get_spoke(tenant_id, spoke_id)
     if spoke.status != "approved":
-        raise HTTPException(status_code=409, detail="Island is not approved")
+        raise HTTPException(status_code=409, detail="Spoke is not approved")
 
     spoke.config = payload.config
+    spoke.config_version += 1
     store.save_spoke(spoke)
-    store.enqueue_command(
-        Command(
-            spoke_id=spoke.id,
-            tenant_id=tenant_id,
-            type="config_update",
-            payload=payload.config,
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
-        )
-    )
     return _serialize_spoke(spoke)
 
 

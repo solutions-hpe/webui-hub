@@ -7,17 +7,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import store
 from .auth import ensure_admin
 from .config import get_settings
-from .ws import ws_connect
+from .ws import set_main_loop, ws_connect
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
-STATIC_DIR = BASE_DIR / "static"
+FRONTEND_DIR = BASE_DIR / "frontend"
+STATIC_DIR = FRONTEND_DIR / "static"
+TEMPLATE_DIR = FRONTEND_DIR / "templates"
 
 
 @asynccontextmanager
@@ -25,6 +27,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     store.init_store()
     ensure_admin()
+    set_main_loop(asyncio.get_running_loop())
     logger.info(f"Hub starting — data dir: {settings.data_dir}")
 
     from . import tasks
@@ -50,15 +53,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Hub — Client-Sim Central Platform", lifespan=lifespan)
-_acme_challenges: dict[str, str] = {}
-
-
-@app.get("/.well-known/acme-challenge/{token}", include_in_schema=False)
-async def acme_http_challenge(token: str):
-    key_authorization = _acme_challenges.get(token)
-    if not key_authorization:
-        raise HTTPException(status_code=404)
-    return PlainTextResponse(key_authorization)
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -70,7 +64,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 from .routers import auth as auth_router
-from .routers import checks, commands, settings as settings_router, sites, spokes, superadmin, workspaces
+from .routers import aggregate, backups, checks, commands, settings as settings_router, sites, spokes, superadmin, workspaces
 
 app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
 app.include_router(spokes.router, prefix="/api", tags=["spokes"])
@@ -80,6 +74,8 @@ app.include_router(workspaces.router, prefix="/api", tags=["workspaces"])
 app.include_router(checks.router, prefix="/api", tags=["checks"])
 app.include_router(commands.router, prefix="/api", tags=["commands"])
 app.include_router(settings_router.router, prefix="/api", tags=["settings"])
+app.include_router(aggregate.router, prefix="/api", tags=["aggregate"])
+app.include_router(backups.router, prefix="/api", tags=["backups"])
 
 
 @app.get("/api/health")
@@ -94,6 +90,26 @@ def health():
     return {"status": "ok", "version": app_version, "branch": branch, "sha": sha}
 
 
-@app.get("/{full_path:path}")
+@app.get("/api/init")
+# intentionally unauthenticated; returns only {"mode": "hub"}
+def api_init():
+    return {"mode": "hub"}
+
+
+@app.get("/{full_path:path}", response_class=HTMLResponse)
 async def spa_fallback(full_path: str):
-    return FileResponse(STATIC_DIR / "index.html")
+    index = TEMPLATE_DIR / "index.html"
+    try:
+        html = index.read_text()
+        version_file = Path(__file__).resolve().parent.parent / "VERSION"
+        ver = version_file.read_text().strip() if version_file.exists() else "dev"
+        html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={ver}"')
+        html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
+        html = html.replace("'{{WEBUI_MODE}}'", "'hub'")
+        return HTMLResponse(content=html)
+    except FileNotFoundError:
+        logger.error("index.html not found at %s — frontend may not be built", index)
+        raise HTTPException(status_code=503, detail="Frontend not available. Check hub deployment.")
+    except OSError as exc:
+        logger.error("Failed to read index.html: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to read frontend.")

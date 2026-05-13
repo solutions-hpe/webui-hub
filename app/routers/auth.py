@@ -34,6 +34,15 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
+def _tenant_role_response(role: dict[str, str]) -> dict[str, str]:
+    tenant_id = role.get("tenant_id", "")
+    tenant = store.get_tenant(tenant_id) if tenant_id else None
+    return {
+        **role,
+        "tenant_name": tenant.name if tenant else role.get("tenant_name") or tenant_id,
+    }
+
+
 @router.get("/providers")
 def list_auth_providers():
     from ..auth_providers import get_enabled_providers
@@ -86,7 +95,7 @@ def me(current_user=Depends(auth.get_current_user)):
         id=current_user.id,
         username=current_user.username,
         is_superadmin=current_user.is_superadmin,
-        tenant_roles=current_user.tenant_roles,
+        tenant_roles=[_tenant_role_response(role) for role in current_user.tenant_roles],
     )
 
 

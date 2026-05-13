@@ -9,15 +9,44 @@ Central tenants into Hub tenants.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def validate_cluster_url(cluster_url: str) -> str:
+    normalized = str(cluster_url or "").strip().rstrip("/")
+    if not normalized:
+        raise ValueError("cluster_url is required")
+
+    parsed = urlparse(normalized)
+    if parsed.scheme != "https":
+        raise ValueError("cluster_url must use https")
+    if not parsed.hostname:
+        raise ValueError("cluster_url must include a hostname")
+
+    try:
+        addrinfo = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"cluster_url hostname could not be resolved: {exc}") from exc
+
+    for _, _, _, _, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError(
+                f"cluster_url resolves to disallowed address {ip}"
+            )
+
+    return normalized
 
 
 @dataclass
@@ -218,6 +247,165 @@ class ArubaClient:
                 logger.warning("Aruba insights fetch failed [%s]: %s", self._config_hash, exc)
 
         return findings
+
+    async def poll_site_data(
+        self,
+        site: str,
+        hw_check_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Collect per-site Aruba Central health, counts, and hardware device names."""
+        if not self.is_configured():
+            return {
+                "site_health": None,
+                "wireless_clients": 0,
+                "alert_type_counts": {},
+                "insight_cat_counts": {},
+                "hw_devices": {},
+            }
+
+        hw_check_ids = {str(check_id).strip() for check_id in (hw_check_ids or set()) if str(check_id).strip()}
+        site_health: int | None = None
+        wireless_clients = 0
+        alert_type_counts: dict[str, int] = {}
+        insight_cat_counts: dict[str, int] = {}
+        hw_devices: dict[str, dict[str, int]] = {}
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            if self.api_version == "new_central":
+                site_id: str | None = None
+                try:
+                    data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
+                    for item in data.get("items") or []:
+                        site_name = (item.get("siteName") or item.get("site_name") or "").strip()
+                        if site_name.lower() != site.lower():
+                            continue
+                        site_id = item.get("siteId") or item.get("site_id")
+                        site_health = int(item.get("healthScore", item.get("health_score", 0)))
+                        wireless_clients = int(item.get("clientCount") or item.get("client_count") or 0)
+                        break
+                except Exception as exc:
+                    logger.warning("Aruba sites-health fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+
+                try:
+                    params: dict[str, Any] = {"limit": 500}
+                    if site_id:
+                        params["filter"] = f"siteId eq '{site_id}'"
+                    data = await self._get(client, "/network-monitoring/v1alpha1/devices", params=params)
+                    for device in data.get("items") or []:
+                        if site_id and str(device.get("siteId") or device.get("site_id") or "") != str(site_id):
+                            continue
+                        device_type = str(device.get("deviceType") or "").upper()
+                        status = str(device.get("status") or "").upper()
+                        if status in {"UP", "ONLINE"}:
+                            continue
+                        if device_type == "ACCESS_POINT":
+                            alert_id = "AP_DOWN"
+                        elif device_type == "SWITCH":
+                            alert_id = "SWITCH_DOWN"
+                        elif device_type == "GATEWAY":
+                            alert_id = "GATEWAY_DOWN"
+                        else:
+                            continue
+                        alert_type_counts[alert_id] = alert_type_counts.get(alert_id, 0) + 1
+                        if not hw_check_ids or alert_id in hw_check_ids:
+                            device_name = (
+                                device.get("deviceName")
+                                or device.get("name")
+                                or device.get("id")
+                                or device.get("serial")
+                                or ""
+                            ).strip()
+                            if device_name:
+                                hw_devices.setdefault(alert_id, {})[device_name] = hw_devices.setdefault(alert_id, {}).get(device_name, 0) + 1
+                except Exception as exc:
+                    logger.warning("Aruba devices fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+
+                try:
+                    params = {"site-id": site_id} if site_id else None
+                    data = await self._get(client, "/network-monitoring/v1alpha1/clients", params=params)
+                    wireless_clients = int(data.get("count") or wireless_clients or 0)
+                except Exception as exc:
+                    logger.warning("Aruba clients fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+
+                return {
+                    "site_health": site_health,
+                    "wireless_clients": wireless_clients,
+                    "alert_type_counts": alert_type_counts,
+                    "insight_cat_counts": insight_cat_counts,
+                    "hw_devices": hw_devices,
+                }
+
+            params: dict[str, Any] = {"site": site, "limit": 1000}
+            try:
+                alerts_payload = None
+                for alerts_path in ("/monitoring/v1/alerts", "/monitoring/v2/alerts"):
+                    try:
+                        alerts_payload = await self._get(client, alerts_path, params=params)
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            continue
+                        raise
+                for alert in (alerts_payload or {}).get("alerts") or (alerts_payload or {}).get("items") or []:
+                    alert_type = str(alert.get("alert_type") or alert.get("type") or "").strip()
+                    if not alert_type:
+                        continue
+                    alert_type_counts[alert_type] = alert_type_counts.get(alert_type, 0) + 1
+                    if hw_check_ids and alert_type in hw_check_ids:
+                        device_name = (
+                            alert.get("device_name")
+                            or alert.get("hostname")
+                            or alert.get("name")
+                            or ""
+                        ).strip()
+                        if device_name:
+                            hw_devices.setdefault(alert_type, {})[device_name] = hw_devices.setdefault(alert_type, {}).get(device_name, 0) + 1
+            except Exception as exc:
+                logger.warning("Aruba alerts fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+
+            insight_params = {"site_name": site, "limit": 1000}
+            try:
+                insights_payload = None
+                for insights_path in ("/aiops/v1/insights", "/aiops/v2/insights"):
+                    try:
+                        insights_payload = await self._get(client, insights_path, params=insight_params)
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            continue
+                        raise
+                for insight in (insights_payload or {}).get("insights") or (insights_payload or {}).get("items") or []:
+                    category = str(insight.get("category") or insight.get("type") or "").strip()
+                    if category:
+                        insight_cat_counts[category] = insight_cat_counts.get(category, 0) + 1
+            except Exception as exc:
+                logger.warning("Aruba insights fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+
+            fetched_wireless = False
+            for clients_path in ("/monitoring/v2/clients/wireless", "/monitoring/v1/clients/wireless"):
+                for site_param in ("site", "site_name"):
+                    try:
+                        payload = await self._get(client, clients_path, params={site_param: site, "limit": 1})
+                        wireless_clients = int(payload.get("total") or payload.get("count") or 0)
+                        fetched_wireless = True
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            continue
+                        raise
+                    except Exception as exc:
+                        logger.warning("Aruba wireless clients fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+                        break
+                if fetched_wireless:
+                    break
+
+        return {
+            "site_health": site_health,
+            "wireless_clients": wireless_clients,
+            "alert_type_counts": alert_type_counts,
+            "insight_cat_counts": insight_cat_counts,
+            "hw_devices": hw_devices,
+        }
 
     async def discover_tenants(self) -> list[dict[str, Any]]:
         """Discover Aruba MSP customer tenants and normalize them to ``{cid, name}`` pairs."""

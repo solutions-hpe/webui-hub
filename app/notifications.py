@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import smtplib
@@ -46,6 +47,21 @@ async def send_teams_webhook(url: str, title: str, message: str, color: str = "F
             logger.warning(f"Teams webhook failed: {e}")
 
 
+def _send_email_sync(
+    smtp_host: str,
+    smtp_port: int,
+    smtp_user: str,
+    smtp_pass: str,
+    from_addr: str,
+    to_addrs: list,
+    message: str,
+) -> None:
+    with smtplib.SMTP(smtp_host, smtp_port) as s:
+        if smtp_user:
+            s.login(smtp_user, smtp_pass)
+        s.sendmail(from_addr, to_addrs, message)
+
+
 async def send_email(
     smtp_host: str,
     smtp_port: int,
@@ -61,10 +77,16 @@ async def send_email(
     msg["From"] = from_addr
     msg["To"] = ", ".join(to_addrs)
     try:
-        with smtplib.SMTP(smtp_host, smtp_port) as s:
-            if smtp_user:
-                s.login(smtp_user, smtp_pass)
-            s.sendmail(from_addr, to_addrs, msg.as_string())
+        await asyncio.to_thread(
+            _send_email_sync,
+            smtp_host,
+            smtp_port,
+            smtp_user,
+            smtp_pass,
+            from_addr,
+            to_addrs,
+            msg.as_string(),
+        )
     except Exception as e:
         logger.warning(f"Email notification failed: {e}")
 

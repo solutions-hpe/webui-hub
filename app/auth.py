@@ -61,8 +61,12 @@ def _decode_token(token: str) -> User:
     return user
 
 
-def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> User:
+def decode_access_token(token: str) -> User:
     return _decode_token(token)
+
+
+def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> User:
+    return decode_access_token(token)
 
 
 def get_optional_current_user(
@@ -71,7 +75,7 @@ def get_optional_current_user(
     if not token:
         return None
     try:
-        return _decode_token(token)
+        return decode_access_token(token)
     except HTTPException:
         return None
 
