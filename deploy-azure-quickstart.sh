@@ -49,9 +49,8 @@ if [ -z "${SECRET_KEY:-}" ]; then
 fi
 
 if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    ADMIN_PASSWORD=$(python3 -c "import secrets, string; print('Hub-' + secrets.token_urlsafe(12))")
-    echo "  ✔ Generated ADMIN_PASSWORD: $ADMIN_PASSWORD"
-    echo "     ⚠  Save this — it will not be shown again."
+    ADMIN_PASSWORD="TeamFirst!"
+    echo "  ✔ ADMIN_PASSWORD set to: $ADMIN_PASSWORD"
 fi
 
 if [ -z "${ENCRYPTION_KEY:-}" ]; then
