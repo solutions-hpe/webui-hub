@@ -63,6 +63,7 @@ class Tenant(BaseModel):
     aruba_cid: Optional[str] = None
     aruba_config_enc: Optional[str] = None
     notification_config_enc: Optional[str] = None
+    github_config_enc: Optional[str] = None
     default_processing_mode: ProcessingMode = Field(default_factory=ProcessingMode)
     processing_modes: dict[str, str] = Field(default_factory=lambda: {
         "central_api": "centralized",

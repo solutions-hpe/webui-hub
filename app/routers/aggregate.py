@@ -1,10 +1,12 @@
 """Tenant-scoped aggregate telemetry endpoints."""
 from __future__ import annotations
 
+import base64
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -12,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from .. import auth, store
 from ..crypto import decrypt_dict, encrypt_dict
-from ..data_models import Command, Spoke, Tenant, User
+from ..data_models import AuditEntry, Command, Spoke, Tenant, User
 
 router = APIRouter()
 
@@ -39,6 +41,10 @@ class CentralUpdateRequest(BaseModel):
     tenant_id: str = ""
     mode: str = "distributed"
     hub_central_config: CentralConfigPayload = Field(default_factory=CentralConfigPayload)
+
+
+class SimulationConfUpdateRequest(BaseModel):
+    content: str = ""
 
 
 def _resolve_tenant_id(tenant_id: Optional[str], current_user: User) -> str:
@@ -281,6 +287,119 @@ def _serialize_hub_central_config(tenant: Tenant) -> dict[str, Any]:
 
 
 
+def _github_repo_settings(tenant: Tenant) -> dict[str, str]:
+    if not tenant.github_config_enc:
+        return {"github_token": "", "sim_repo_url": "", "sim_repo_branch": "main"}
+    try:
+        cfg = decrypt_dict(tenant.github_config_enc)
+    except Exception:
+        raise HTTPException(status_code=500, detail="GitHub settings could not be read")
+    return {
+        "github_token": str(cfg.get("github_token") or "").strip(),
+        "sim_repo_url": str(cfg.get("sim_repo_url") or "").strip(),
+        "sim_repo_branch": str(cfg.get("sim_repo_branch") or "main").strip() or "main",
+    }
+
+
+
+def _parse_github_repo(repo_url: str) -> tuple[str, str]:
+    normalized = str(repo_url or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Simulation repo URL is not configured")
+    parsed = urlparse(normalized)
+    path = parsed.path if parsed.scheme else normalized
+    parts = [part for part in path.strip("/").split("/") if part]
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Simulation repo URL must be a GitHub owner/repo URL")
+    owner = parts[0]
+    repo = parts[1][:-4] if parts[1].endswith(".git") else parts[1]
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="Simulation repo URL must include owner and repo")
+    return owner, repo
+
+
+
+def _github_api_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+
+def _require_sim_repo_config(tenant: Tenant) -> tuple[str, str, str, str]:
+    cfg = _github_repo_settings(tenant)
+    github_token = cfg.get("github_token", "")
+    repo_url = cfg.get("sim_repo_url", "")
+    branch = cfg.get("sim_repo_branch", "main")
+    if not github_token:
+        raise HTTPException(status_code=400, detail="GitHub token is not configured for this tenant. Open Setup to add it.")
+    if not repo_url:
+        raise HTTPException(status_code=400, detail="Simulation repo URL is not configured. Open Setup to add it.")
+    owner, repo = _parse_github_repo(repo_url)
+    return github_token, owner, repo, branch
+
+
+
+def _github_error_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    return payload.get("message") or response.text or f"GitHub API error ({response.status_code})"
+
+
+
+async def _fetch_simulation_conf_from_github(tenant: Tenant) -> tuple[str, str, str]:
+    github_token, owner, repo, branch = _require_sim_repo_config(tenant)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/configs/simulation.conf"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url, headers=_github_api_headers(github_token), params={"ref": branch})
+    if response.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"configs/simulation.conf was not found in {owner}/{repo} on branch {branch}.")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=_github_error_detail(response))
+    payload = response.json()
+    encoded = str(payload.get("content") or "").replace("\n", "")
+    try:
+        content = base64.b64decode(encoded).decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub returned unreadable simulation.conf content: {exc}") from exc
+    return content, str(payload.get("sha") or ""), branch
+
+
+
+def _queue_repo_sync_for_all_spokes(tenant_id: str, current_user: User) -> int:
+    queued = 0
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    for spoke in _approved_spokes(tenant_id):
+        store.enqueue_command(
+            Command(
+                spoke_id=spoke.id,
+                tenant_id=tenant_id,
+                type="repo_sync",
+                payload={},
+                expires_at=expires_at,
+            )
+        )
+        store.append_audit(
+            AuditEntry(
+                spoke_id=spoke.id,
+                tenant_id=tenant_id,
+                task_type="repo_sync",
+                execution_mode=spoke.processing_mode.resolve("repo_sync"),
+                status="pending",
+                detail="Queued repo sync after simulation.conf update",
+                initiated_by=current_user.username,
+                result={"target": "spoke"},
+            )
+        )
+        queued += 1
+    return queued
+
+
+
 def _central_mode(tenant: Tenant) -> str:
     mode = tenant.default_processing_mode.resolve("aruba_polling")
     return mode if mode in MODE_VALUES else "distributed"
@@ -305,6 +424,93 @@ def _aggregate_central_payload(tenant_id: str) -> dict[str, Any]:
             for spoke in spokes
         ],
     }
+
+
+def _store_and_queue_tenant_config(
+    tenant_id: str,
+    hub_config_updates: dict[str, Any],
+    *,
+    spoke_config_updates: dict[str, Any] | None = None,
+    force_push: bool = False,
+) -> list[dict[str, Any]]:
+    tenant = _get_tenant(tenant_id)
+    next_hub_config = dict(tenant.hub_config or {})
+    next_hub_config.update(hub_config_updates or {})
+    tenant_changed = next_hub_config != (tenant.hub_config or {})
+    if tenant_changed:
+        tenant.hub_config = next_hub_config
+        store.save_tenant(tenant)
+
+    effective_spoke_updates = dict(spoke_config_updates if spoke_config_updates is not None else hub_config_updates or {})
+    updated_spokes: list[dict[str, Any]] = []
+    for spoke in _approved_spokes(tenant_id):
+        config_changed = False
+        next_spoke_config = dict(spoke.config or {})
+        if effective_spoke_updates:
+            next_spoke_config.update(effective_spoke_updates)
+            config_changed = next_spoke_config != (spoke.config or {})
+            if config_changed:
+                spoke.config = next_spoke_config
+
+        should_queue = force_push or tenant_changed or config_changed
+        if should_queue:
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant_id, spoke.id)
+        elif config_changed:
+            store.save_spoke(spoke)
+
+        updated_spokes.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "config_version": spoke.config_version,
+            "applied_config_version": spoke.applied_config_version,
+            "last_config_applied_at": spoke.last_config_applied_at,
+        })
+    return updated_spokes
+
+
+@router.get("/{tenant_id}/config/simulation-conf")
+async def get_simulation_conf(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    content, sha, branch = await _fetch_simulation_conf_from_github(tenant)
+    return {
+        "content": content,
+        "sha": sha,
+        "branch": branch,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.put("/{tenant_id}/config/simulation-conf")
+async def save_simulation_conf(
+    tenant_id: str,
+    payload: SimulationConfUpdateRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    github_token, owner, repo, branch = _require_sim_repo_config(tenant)
+    _, sha, _ = await _fetch_simulation_conf_from_github(tenant)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/configs/simulation.conf"
+    body = {
+        "message": f"Update configs/simulation.conf via hub for tenant {resolved_tenant_id}",
+        "content": base64.b64encode(payload.content.encode("utf-8")).decode("ascii"),
+        "sha": sha,
+        "branch": branch,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.put(url, headers=_github_api_headers(github_token), json=body)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=_github_error_detail(response))
+    response_payload = response.json()
+    commit_sha = str((response_payload.get("commit") or {}).get("sha") or "")
+    synced_spokes = _queue_repo_sync_for_all_spokes(resolved_tenant_id, current_user)
+    return {"ok": True, "commit_sha": commit_sha, "synced_spokes": synced_spokes}
 
 
 @router.get("/aggregate/dashboard")
@@ -981,19 +1187,5 @@ def push_tenant_config(
 ):
     requested_tenant_id = payload.tenant_id or tenant_id
     resolved_tenant_id = _require_tenant_admin(_resolve_tenant_id(requested_tenant_id, current_user), current_user)
-    updated_spokes: list[dict[str, Any]] = []
-    for spoke in _approved_spokes(resolved_tenant_id):
-        updated_config = dict(spoke.config or {})
-        updated_config.update(payload.config or {})
-        if updated_config != spoke.config:
-            spoke.config = updated_config
-            spoke.config_version += 1
-            store.save_spoke(spoke)
-        updated_spokes.append({
-            "spoke_id": spoke.id,
-            "spoke_name": spoke.spoke_name or spoke.hostname,
-            "config_version": spoke.config_version,
-            "applied_config_version": spoke.applied_config_version,
-            "last_config_applied_at": spoke.last_config_applied_at,
-        })
+    updated_spokes = _store_and_queue_tenant_config(resolved_tenant_id, payload.config or {})
     return {"tenant_id": resolved_tenant_id, "config": payload.config, "spokes": updated_spokes}

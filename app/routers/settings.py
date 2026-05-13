@@ -42,6 +42,12 @@ class NotificationSettingsRequest(BaseModel):
     enabled: bool = False
 
 
+class GithubSettingsRequest(BaseModel):
+    github_token: str = ""
+    sim_repo_url: str = ""
+    sim_repo_branch: str = "main"
+
+
 class ProcessingModeUpdateRequest(BaseModel):
     global_mode: ModeValue = "centralized"
     aruba_polling: Optional[ModeValue] = None
@@ -207,6 +213,32 @@ def _serialize_notification_config(tenant: Tenant) -> dict[str, Any]:
     }
 
 
+def _serialize_github_config(tenant: Tenant) -> dict[str, Any]:
+    if not tenant.github_config_enc:
+        return {
+            "configured": False,
+            "sim_repo_url": "",
+            "sim_repo_branch": "main",
+            "github_token_configured": False,
+        }
+    try:
+        cfg = decrypt_dict(tenant.github_config_enc)
+    except Exception:
+        return {
+            "configured": True,
+            "error": "unreadable",
+            "sim_repo_url": "",
+            "sim_repo_branch": "main",
+            "github_token_configured": False,
+        }
+    return {
+        "configured": True,
+        "sim_repo_url": cfg.get("sim_repo_url", ""),
+        "sim_repo_branch": cfg.get("sim_repo_branch", "main") or "main",
+        "github_token_configured": bool(cfg.get("github_token")),
+    }
+
+
 def _processing_mode_from_payload(payload: ProcessingModeUpdateRequest) -> ProcessingMode:
     return ProcessingMode(**payload.model_dump())
 
@@ -231,6 +263,7 @@ def get_tenant_settings(tenant_id: str, current_user: User = Depends(auth.get_cu
         },
         "aruba": _serialize_aruba_config(tenant),
         "notifications": _serialize_notification_config(tenant),
+        "github": _serialize_github_config(tenant),
         "processing_mode": tenant.default_processing_mode.model_dump(),
         "processing_modes": tenant.processing_modes,
     }
@@ -274,6 +307,36 @@ def update_notification_settings(
         store.save_spoke(spoke)
         store.ensure_config_update_command(tenant_id, spoke.id)
     return _serialize_notification_config(tenant)
+
+
+@router.post("/{tenant_id}/settings/github")
+def update_github_settings(
+    tenant_id: str,
+    payload: GithubSettingsRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    existing: dict[str, Any] = {}
+    if tenant.github_config_enc:
+        try:
+            existing = decrypt_dict(tenant.github_config_enc)
+        except Exception:
+            existing = {}
+
+    cfg = {
+        "sim_repo_url": str(payload.sim_repo_url or existing.get("sim_repo_url") or "").strip(),
+        "sim_repo_branch": str(payload.sim_repo_branch or existing.get("sim_repo_branch") or "main").strip() or "main",
+    }
+    github_token = str(payload.github_token or "")
+    if github_token:
+        cfg["github_token"] = github_token
+    elif existing.get("github_token"):
+        cfg["github_token"] = existing["github_token"]
+
+    tenant.github_config_enc = encrypt_dict(cfg) if any(str(value).strip() for value in cfg.values()) else None
+    store.save_tenant(tenant)
+    return _serialize_github_config(tenant)
 
 
 @router.get("/{tenant_id}/settings/processing-mode")
