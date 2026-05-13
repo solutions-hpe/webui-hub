@@ -382,6 +382,7 @@ def get_aggregate_proxmox(
             "usb_devices": usb_devices,
             "vm_count": int(proxmox.get("vm_count") or len(vms)),
             "usb_count": int(proxmox.get("usb_count") or len(usb_devices)),
+            "reclone_state": _telemetry_dict(spoke, "reclone_state"),
         })
     hosts.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
     return {"tenant_id": resolved_tenant_id, "hosts": hosts}

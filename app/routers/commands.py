@@ -119,6 +119,45 @@ def list_commands(
     return [_serialize_command(command) for command in store.list_commands(tenant_id, spoke_id)]
 
 
+class ProxmoxCommandRequest(BaseModel):
+    action: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    target: str = "proxmox"
+
+
+@router.post("/{tenant_id}/spokes/{spoke_id}/proxmox-command")
+def proxmox_command(
+    tenant_id: str,
+    spoke_id: str,
+    req: ProxmoxCommandRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    auth.require_tenant_access(tenant_id, current_user)
+    _get_approved_spoke(tenant_id, spoke_id)
+    command = Command(
+        spoke_id=spoke_id,
+        tenant_id=tenant_id,
+        type="proxmox",
+        target=req.target,
+        payload={"action": req.action, "args": req.args},
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+    )
+    store.enqueue_command(command)
+    store.append_audit(
+        AuditEntry(
+            spoke_id=spoke_id,
+            tenant_id=tenant_id,
+            task_type="proxmox",
+            execution_mode="relay",
+            status="pending",
+            detail=f"Proxmox command: {req.action}",
+            initiated_by=current_user.username,
+            result={"action": req.action, "args": req.args, "target": req.target},
+        )
+    )
+    return {"id": command.id, "status": command.status, "action": req.action}
+
+
 @router.get("/{tenant_id}/spokes/{spoke_id}/audit")
 def get_spoke_audit(tenant_id: str, spoke_id: str, current_user: User = Depends(auth.get_current_user)):
     auth.require_tenant_access(tenant_id, current_user)
