@@ -35,6 +35,11 @@ _RELAY_CONFIG_KEYS = {
     "relay_spoke_id",
     "relay_spoke_name",
 }
+_HUB_LOCAL_CONFIG_KEYS = {
+    "repo_url",
+    "sim_repo_url",
+    "sim_repo_branch",
+}
 _PROCESSING_MODE_DEFAULTS = {
     "central_api": "centralized",
     "teams": "centralized",
@@ -436,7 +441,7 @@ def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
     return {
         key: value
         for key, value in (tenant.hub_config or {}).items()
-        if key not in _RELAY_CONFIG_KEYS
+        if key not in _RELAY_CONFIG_KEYS and key not in _HUB_LOCAL_CONFIG_KEYS
     }
 
 
@@ -707,6 +712,36 @@ def enqueue_command(command: Command) -> None:
         cmds = [c for c in cmds if c.expires_at > now]
         cmds.append(command)
         _save_queue(command.tenant_id, command.spoke_id, cmds)
+
+    with contextlib.suppress(Exception):
+        from .ws import notify_spoke_command
+
+        notify_spoke_command(command.tenant_id, command.spoke_id)
+
+
+def peek_queued_commands(tenant_id: str, spoke_id: str) -> list[Command]:
+    with _lock:
+        now = _now()
+        cmds = _load_queue(tenant_id, spoke_id)
+        active = [c for c in cmds if c.expires_at > now]
+        if len(active) != len(cmds):
+            _save_queue(tenant_id, spoke_id, active)
+        return [c for c in active if c.status == "queued"]
+
+
+def mark_commands_delivered(tenant_id: str, spoke_id: str, command_ids: list[str]) -> None:
+    if not command_ids:
+        return
+    with _lock:
+        now = _now()
+        ids = set(command_ids)
+        cmds = _load_queue(tenant_id, spoke_id)
+        active = [c for c in cmds if c.expires_at > now]
+        for command in active:
+            if command.id in ids and command.status == "queued":
+                command.status = "delivered"
+                command.delivered_at = now
+        _save_queue(tenant_id, spoke_id, active)
 
 
 def get_queued_commands(tenant_id: str, spoke_id: str) -> list[Command]:

@@ -4,13 +4,13 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, PendingSpoke, User
-from ..ws import ws_broadcast
+from ..ws import push_spoke_commands, register_spoke, unregister_spoke, ws_broadcast
 
 router = APIRouter()
 
@@ -131,6 +131,100 @@ def _require_spoke_admin(spoke_id: str, current_user: User) -> tuple[str, Any]:
     if not current_user.is_superadmin and current_user.get_role(tenant_id) != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
     return tenant_id, spoke
+
+
+def _serialize_spoke_command(command) -> dict[str, Any]:
+    return {"id": command.id, "target": command.target, "type": command.type, "payload": command.payload}
+
+
+def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
+    from ..tasks import _hub_central_status
+
+    tenant_data = _hub_central_status.get(tenant_id, {})
+    spoke_data = tenant_data.get("spokes", {}).get(spoke_id, {})
+    token_valid = bool(tenant_data.get("token_valid", False))
+    token_state_str = tenant_data.get("token_state", "not_configured")
+    return {
+        "status": spoke_data.get("status", {}),
+        "wireless_clients": spoke_data.get("wireless_clients", {}),
+        "hardware_alerts": spoke_data.get("hardware_alerts", []),
+        "client_count_status": {},
+        "token_valid": token_valid,
+        "token_state": {
+            "state": token_state_str if token_valid else "not_configured",
+            "detail": tenant_data.get("error", ""),
+        },
+        "site_mappings": spoke_data.get("site_mappings", {}),
+        "monitored_checks": spoke_data.get("monitored_checks", []),
+    }
+
+
+async def _apply_spoke_telemetry(tenant_id: str, spoke_id: str, spoke, payload: dict[str, Any]) -> None:
+    tenant = store.get_tenant(tenant_id)
+    changed = False
+    previous_config_version = spoke.config_version
+    hostname = str(payload.get("hostname") or "").strip()
+    spoke_name = str(payload.get("spoke_name") or "").strip()
+    telemetry_config = payload.get("config") if isinstance(payload.get("config"), dict) else None
+    if hostname and spoke.hostname != hostname:
+        spoke.hostname = hostname
+        changed = True
+    if spoke_name and spoke.spoke_name != spoke_name:
+        spoke.spoke_name = spoke_name
+        changed = True
+    if not spoke.config and telemetry_config:
+        spoke.config = dict(telemetry_config)
+        spoke.config_version = 1
+        spoke.applied_config_version = 0
+        changed = True
+    if tenant and previous_config_version > 0 and not tenant.hub_config:
+        spoke.config_version = 0
+        spoke.applied_config_version = 0
+        store.ensure_config_clear_command(tenant_id, spoke_id)
+        changed = True
+    if changed:
+        store.save_spoke(spoke)
+    store.update_spoke_telemetry(tenant_id, spoke_id, payload)
+    await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "spoke_id": spoke_id})
+
+
+def _get_spoke_inbox(tenant_id: str, spoke_id: str) -> list[dict[str, Any]]:
+    store.ensure_config_update_command(tenant_id, spoke_id)
+    return [_serialize_spoke_command(c) for c in store.get_queued_commands(tenant_id, spoke_id)]
+
+
+async def _handle_spoke_ack(tenant_id: str, spoke_id: str, payload: AckPayload) -> dict[str, str]:
+    command = store.get_command(tenant_id, spoke_id, payload.command_id)
+    result = payload.result.model_dump(exclude_none=True) if payload.result else None
+    store.ack_command(tenant_id, spoke_id, payload.command_id, result)
+    if command and command.type == "config_update" and (result or {}).get("success", True):
+        version = int((command.payload or {}).get("__config_version", 0) or 0)
+        if version > 0:
+            store.mark_spoke_config_applied(tenant_id, spoke_id, version)
+    if result and result.get("task_type"):
+        task_status = "success" if result.get("success") else "failure"
+        store.append_audit(
+            AuditEntry(
+                spoke_id=spoke_id,
+                tenant_id=tenant_id,
+                task_type=result.get("task_type", "command_ack"),
+                execution_mode="distributed",
+                status=task_status,
+                detail=result.get("detail", ""),
+                initiated_by="spoke",
+                result=result,
+            )
+        )
+        await ws_broadcast(
+            {
+                "type": "task_result",
+                "tenant_id": tenant_id,
+                "spoke_id": spoke_id,
+                "task_type": result.get("task_type", "command_ack"),
+                "status": task_status,
+            }
+        )
+    return {"status": "ok"}
 
 
 class RegisterPayload(BaseModel):
@@ -281,13 +375,13 @@ def register_spoke(payload: RegisterPayload, request: Request):
     store.save_pending_spoke(pending)
     _reg_log_append("new_pending", hostname=payload.hostname, spoke_name=spoke_name,
                     spoke_id=pending.id, tenant_hint=tenant_hint, ip=client_ip)
-    ws_broadcast({
+    asyncio.create_task(ws_broadcast({
         "type": "pending_spoke_registered",
         "hostname": payload.hostname,
         "spoke_name": spoke_name,
         "spoke_id": pending.id,
         "tenant_hint": tenant_hint,
-    })
+    }))
     msg = (
         f"Registration received. Pending approval by tenant '{tenant_hint}'."
         if tenant_hint
@@ -326,32 +420,7 @@ async def post_telemetry(
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
     spoke = _auth_spoke(tenant_id, spoke_id, x_api_key)
-    tenant = store.get_tenant(tenant_id)
-    changed = False
-    previous_config_version = spoke.config_version
-    hostname = str(payload.get("hostname") or "").strip()
-    spoke_name = str(payload.get("spoke_name") or "").strip()
-    telemetry_config = payload.get("config") if isinstance(payload.get("config"), dict) else None
-    if hostname and spoke.hostname != hostname:
-        spoke.hostname = hostname
-        changed = True
-    if spoke_name and spoke.spoke_name != spoke_name:
-        spoke.spoke_name = spoke_name
-        changed = True
-    if not spoke.config and telemetry_config:
-        spoke.config = dict(telemetry_config)
-        spoke.config_version = 1
-        spoke.applied_config_version = 0
-        changed = True
-    if tenant and previous_config_version > 0 and not tenant.hub_config:
-        spoke.config_version = 0
-        spoke.applied_config_version = 0
-        store.ensure_config_clear_command(tenant_id, spoke_id)
-        changed = True
-    if changed:
-        store.save_spoke(spoke)
-    store.update_spoke_telemetry(tenant_id, spoke_id, payload)
-    await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "spoke_id": spoke_id})
+    await _apply_spoke_telemetry(tenant_id, spoke_id, spoke, payload)
     return {"status": "ok"}
 
 
@@ -363,9 +432,7 @@ def get_inbox(
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
     _auth_spoke(tenant_id, spoke_id, x_api_key)
-    store.ensure_config_update_command(tenant_id, spoke_id)
-    commands = store.get_queued_commands(tenant_id, spoke_id)
-    return [{"id": c.id, "target": c.target, "type": c.type, "payload": c.payload} for c in commands]
+    return _get_spoke_inbox(tenant_id, spoke_id)
 
 
 class AckResultPayload(BaseModel):
@@ -391,37 +458,50 @@ async def ack_command_endpoint(
     x_api_key: str = Header(..., alias="X-API-Key"),
 ):
     _auth_spoke(tenant_id, spoke_id, x_api_key)
-    command = store.get_command(tenant_id, spoke_id, payload.command_id)
-    result = payload.result.model_dump(exclude_none=True) if payload.result else None
-    store.ack_command(tenant_id, spoke_id, payload.command_id, result)
-    if command and command.type == "config_update" and (result or {}).get("success", True):
-        version = int((command.payload or {}).get("__config_version", 0) or 0)
-        if version > 0:
-            store.mark_spoke_config_applied(tenant_id, spoke_id, version)
-    if result and result.get("task_type"):
-        task_status = "success" if result.get("success") else "failure"
-        store.append_audit(
-            AuditEntry(
-                spoke_id=spoke_id,
-                tenant_id=tenant_id,
-                task_type=result.get("task_type", "command_ack"),
-                execution_mode="distributed",
-                status=task_status,
-                detail=result.get("detail", ""),
-                initiated_by="spoke",
-                result=result,
-            )
-        )
-        await ws_broadcast(
-            {
-                "type": "task_result",
-                "tenant_id": tenant_id,
-                "spoke_id": spoke_id,
-                "task_type": result.get("task_type", "command_ack"),
-                "status": task_status,
-            }
-        )
-    return {"status": "ok"}
+    return await _handle_spoke_ack(tenant_id, spoke_id, payload)
+
+
+@router.websocket("/{tenant_id}/spokes/{spoke_id}/ws")
+async def spoke_websocket(
+    websocket: WebSocket,
+    tenant_id: str,
+    spoke_id: str,
+    api_key: str = Query(""),
+):
+    try:
+        _auth_spoke(tenant_id, spoke_id, api_key)
+    except HTTPException as exc:
+        await websocket.close(code=4401 if exc.status_code == 401 else 4403, reason=str(exc.detail))
+        return
+
+    await register_spoke(websocket, tenant_id, spoke_id)
+    await push_spoke_commands(tenant_id, spoke_id)
+    try:
+        await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+        while True:
+            data = await websocket.receive_json()
+            msg_type = str(data.get("type") or "telemetry").strip().lower()
+            if msg_type == "telemetry":
+                payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
+                spoke = _auth_spoke(tenant_id, spoke_id, api_key)
+                await _apply_spoke_telemetry(tenant_id, spoke_id, spoke, payload)
+                await websocket.send_json({"type": "telemetry_ack", "ts": _now().isoformat()})
+                await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+                await push_spoke_commands(tenant_id, spoke_id)
+            elif msg_type == "ack":
+                raw_payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
+                payload = AckPayload(**raw_payload)
+                await _handle_spoke_ack(tenant_id, spoke_id, payload)
+                await websocket.send_json({"type": "ack_ok", "command_id": payload.command_id})
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+            elif msg_type == "sync":
+                await push_spoke_commands(tenant_id, spoke_id)
+                await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await unregister_spoke(tenant_id, spoke_id, websocket)
 
 
 @router.get("/{tenant_id}/spokes/{spoke_id}/central-feed")
@@ -432,22 +512,4 @@ async def get_spoke_central_feed(
 ):
     """Return hub-polled Aruba Central data for a spoke to consume in centralized mode."""
     _auth_spoke(tenant_id, spoke_id, x_api_key)
-    from ..tasks import _hub_central_status
-
-    tenant_data = _hub_central_status.get(tenant_id, {})
-    spoke_data = tenant_data.get("spokes", {}).get(spoke_id, {})
-    token_valid = bool(tenant_data.get("token_valid", False))
-    token_state_str = tenant_data.get("token_state", "not_configured")
-    return {
-        "status": spoke_data.get("status", {}),
-        "wireless_clients": spoke_data.get("wireless_clients", {}),
-        "hardware_alerts": spoke_data.get("hardware_alerts", []),
-        "client_count_status": {},
-        "token_valid": token_valid,
-        "token_state": {
-            "state": token_state_str if token_valid else "not_configured",
-            "detail": tenant_data.get("error", ""),
-        },
-        "site_mappings": spoke_data.get("site_mappings", {}),
-        "monitored_checks": spoke_data.get("monitored_checks", []),
-    }
+    return _build_spoke_central_feed(tenant_id, spoke_id)

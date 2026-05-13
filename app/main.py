@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from . import store
 from .auth import ensure_admin
 from .config import get_settings
-from .ws import ws_connect
+from .ws import set_main_loop, ws_connect
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     store.init_store()
     ensure_admin()
+    set_main_loop(asyncio.get_running_loop())
     logger.info(f"Hub starting — data dir: {settings.data_dir}")
 
     from . import tasks
