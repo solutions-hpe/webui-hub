@@ -446,6 +446,26 @@ def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
 
 
 
+def _hub_github_config(tenant: Tenant | None) -> dict[str, Any]:
+    if not tenant or not tenant.github_config_enc:
+        return {}
+    try:
+        cfg = decrypt_dict(tenant.github_config_enc)
+    except Exception:
+        logger.warning("Unable to decrypt GitHub config for tenant %s", tenant.id if tenant else "unknown")
+        return {}
+    return {
+        "repo_branch": str(cfg.get("sim_repo_branch") or "").strip(),
+        "github_token": str(cfg.get("github_token") or "").strip(),
+    }
+
+
+
+def tenant_has_spoke_config_payload(tenant: Tenant | None) -> bool:
+    return any(value is not None for value in _build_spoke_config_payload(tenant).values())
+
+
+
 def _hub_central_config(tenant: Tenant | None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     if not tenant or not tenant.aruba_config_enc:
         return None, None
@@ -517,6 +537,7 @@ def _hub_notification_config(tenant: Tenant | None) -> dict[str, Any]:
 
 def _build_spoke_config_payload(tenant: Tenant | None) -> dict[str, Any]:
     payload = _hub_core_config(tenant)
+    payload.update(_hub_github_config(tenant))
     modes = _tenant_processing_modes(tenant)
     central_api, central_config = _hub_central_config(tenant)
     notifications = _hub_notification_config(tenant)

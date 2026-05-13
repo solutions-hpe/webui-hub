@@ -177,7 +177,7 @@ async def _apply_spoke_telemetry(tenant_id: str, spoke_id: str, spoke, payload: 
         spoke.config_version = 1
         spoke.applied_config_version = 0
         changed = True
-    if tenant and previous_config_version > 0 and not tenant.hub_config:
+    if tenant and previous_config_version > 0 and not store.tenant_has_spoke_config_payload(tenant):
         spoke.config_version = 0
         spoke.applied_config_version = 0
         store.ensure_config_clear_command(tenant_id, spoke_id)
