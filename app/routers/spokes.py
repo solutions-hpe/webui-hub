@@ -14,6 +14,49 @@ from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, PendingSpoke, User
 from ..ws import push_spoke_commands, register_spoke, unregister_spoke, ws_broadcast
 
+# Imported lazily inside the handler to avoid a circular import at module load time.
+# _handle_spoke_backup_progress(spoke_id, payload_dict) is defined in backups.py.
+async def _relay_backup_progress(spoke_id: str, msg_type: str, data: dict) -> None:
+    """Forward backup_progress / reseed_progress messages from a spoke to the backup subsystem."""
+    from .backups import BackupProgressPayload, backup_jobs, _refresh_backup_job_status, _RESEED_ERROR_STATES
+    import asyncio
+    raw = data.get("payload") if isinstance(data.get("payload"), dict) else data
+    # Ensure spoke_id propagates for reseed jobs (agent may omit it)
+    if spoke_id and not raw.get("spoke_id"):
+        raw = dict(raw)
+        raw["spoke_id"] = spoke_id
+    try:
+        payload = BackupProgressPayload(**raw)
+    except Exception as exc:
+        logger.warning("Invalid %s payload from spoke %s: %s", msg_type, spoke_id, exc)
+        return
+    job = backup_jobs.get(payload.job_id)
+    if job is None:
+        logger.debug("Received %s for unknown job %s from spoke %s — ignoring", msg_type, payload.job_id, spoke_id)
+        return
+    if job.get("type") == "reseed":
+        spoke_state = job.get("spoke_status", {}).get(payload.spoke_id or spoke_id)
+        if spoke_state is None:
+            logger.warning("Reseed progress from unknown spoke %s in job %s", payload.spoke_id or spoke_id, payload.job_id)
+            return
+        retry_count = int(spoke_state.get("retry_count", 0))
+        next_status = payload.status
+        if payload.status in _RESEED_ERROR_STATES:
+            retry_count += 1
+            if retry_count <= 3:
+                next_status = "retrying"
+                from .backups import _retry_reseed_after_delay
+                asyncio.create_task(_retry_reseed_after_delay(job["job_id"], job["tenant_id"], payload.spoke_id or spoke_id, retry_count))
+        spoke_state.update({"status": next_status, "step": payload.step, "error": payload.error, "retry_count": retry_count, "updated_at": datetime.utcnow().isoformat()})
+    else:
+        vm_state = job.get("vm_status", {}).get(payload.vm_id)
+        if vm_state is None:
+            logger.warning("Backup progress for unknown vm_id %s in job %s", payload.vm_id, payload.job_id)
+            return
+        vm_state.update({"status": payload.status, "pct": payload.pct, "size": payload.size, "file": payload.file, "error": payload.error})
+    _refresh_backup_job_status(job)
+    await ws_broadcast({"type": "backup_progress", "job": job})
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -504,6 +547,8 @@ async def spoke_websocket(
                 elif msg_type == "sync":
                     await push_spoke_commands(tenant_id, spoke_id)
                     await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+                elif msg_type in {"backup_progress", "reseed_progress"}:
+                    await _relay_backup_progress(spoke_id, msg_type, data)
             except WebSocketDisconnect:
                 raise
             except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
