@@ -90,6 +90,7 @@ def health():
 
 
 @app.get("/api/init")
+# intentionally unauthenticated; returns only {"mode": "hub"}
 def api_init():
     return {"mode": "hub"}
 

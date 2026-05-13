@@ -816,7 +816,21 @@ def purge_expired_commands() -> int:
         for queue_file in base.glob("*/queue/*.json"):
             raw = _read_json(queue_file) or []
             before = len(raw)
-            fresh = [c for c in raw if datetime.fromisoformat(c["expires_at"]) > now]
+            fresh = []
+            for row in raw:
+                try:
+                    expires_at = datetime.fromisoformat(str(row.get("expires_at") or ""))
+                except ValueError as exc:
+                    logger.warning(
+                        "Skipping command %s in %s due to invalid expires_at %r: %s",
+                        row.get("id", "unknown"),
+                        queue_file,
+                        row.get("expires_at"),
+                        exc,
+                    )
+                    continue
+                if expires_at > now:
+                    fresh.append(row)
             if len(fresh) < before:
                 _write_json(queue_file, fresh)
                 total += before - len(fresh)

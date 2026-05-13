@@ -7,8 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Core
+    env: str = Field(default="dev", validation_alias=AliasChoices("ENV"))
     secret_key: str = "change-me-in-production"
-    webui_secret_key: str = ""  # Fernet master key for secrets at rest (auto-generated if empty)
+    webui_secret_key: str = ""  # Fernet master key for secrets at rest (required outside dev)
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 480
 
@@ -55,4 +56,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if not settings.webui_secret_key and str(settings.env or "").strip().lower() != "dev":
+        raise RuntimeError("WEBUI_SECRET_KEY must be set in production")
+    return settings

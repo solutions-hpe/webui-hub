@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+import logging
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -13,10 +14,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import auth, store
+from ..aruba import validate_cluster_url
 from ..crypto import decrypt_dict, encrypt_dict
 from ..data_models import AuditEntry, Command, Spoke, Tenant, User
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 FAIL_STATUSES = {"error", "fail", "failed", "degraded", "critical"}
 PASS_STATUSES = {"ok", "pass", "passed", "healthy", "connected"}
@@ -345,7 +348,8 @@ def _require_sim_repo_config(tenant: Tenant) -> tuple[str, str, str, str]:
 def _github_error_detail(response: httpx.Response) -> str:
     try:
         payload = response.json()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to parse GitHub error payload (%s): %s", response.status_code, exc)
         payload = {}
     return payload.get("message") or response.text or f"GitHub API error ({response.status_code})"
 
@@ -368,6 +372,13 @@ async def _fetch_simulation_conf_from_github(tenant: Tenant) -> tuple[str, str, 
         raise HTTPException(status_code=502, detail=f"GitHub returned unreadable simulation.conf content: {exc}") from exc
     return content, str(payload.get("sha") or ""), branch
 
+
+
+def _validated_cluster_url_or_400(cluster_url: str) -> str:
+    try:
+        return validate_cluster_url(cluster_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid cluster_url: {exc}") from exc
 
 
 def _queue_repo_sync_for_all_spokes(tenant_id: str, current_user: User) -> int:
@@ -784,11 +795,12 @@ async def get_aggregate_central_status(
     spokes = _approved_spokes(resolved_tenant_id)
 
     if mode == "centralized":
-        from ..tasks import _hub_central_status
+        from ..tasks import _cache_updated_at, _hub_central_status
 
-        tenant_data = _hub_central_status.get(resolved_tenant_id, {})
-        token_valid = bool(tenant_data.get("token_valid", False))
-        token_state = tenant_data.get("token_state", "not_configured")
+        is_stale = time.time() - _cache_updated_at.get(resolved_tenant_id, 0) > 300
+        tenant_data = {} if is_stale else _hub_central_status.get(resolved_tenant_id, {})
+        token_valid = False if is_stale else bool(tenant_data.get("token_valid", False))
+        token_state = "stale" if is_stale else tenant_data.get("token_state", "not_configured")
         spokes_out = []
         spoke_map = {spoke.id: spoke for spoke in spokes}
         for spoke_id, spoke_data in tenant_data.get("spokes", {}).items():
@@ -899,6 +911,8 @@ async def hub_central_devices(
     if not all([cluster_url, client_id, client_secret, customer_id]):
         return {"devices": [], "count": 0, "warning": "Central API credentials incomplete."}
 
+    cluster_url = _validated_cluster_url_or_400(cluster_url)
+
     try:
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
@@ -916,21 +930,32 @@ async def hub_central_devices(
             headers = {"Authorization": f"Bearer {access_token}", "X-API-KEY": customer_id}
 
             site_id = None
+            site_lookup_error = ""
             try:
                 sh_resp = await client.get(
                     f"{cluster_url}/network-monitoring/v1alpha1/sites-health",
                     headers=headers,
                     timeout=20,
                 )
-                if sh_resp.status_code == 200:
+                if sh_resp.status_code != 200:
+                    site_lookup_error = f"Sites health fetch failed: {sh_resp.status_code}"
+                else:
                     for item in sh_resp.json().get("items", []):
                         sname = item.get("siteName") or item.get("site_name") or ""
                         if sname.lower() == site.lower():
                             site_id = item.get("siteId") or item.get("site_id")
                             break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Central site lookup failed for tenant %s site %s: %s", resolved_tid, site, exc)
+                site_lookup_error = str(exc)
 
+            if site_lookup_error:
+                return {
+                    "devices": [],
+                    "count": 0,
+                    "warning": "Failed to look up site in Central.",
+                    "error": site_lookup_error,
+                }
             if not site_id:
                 return {"devices": [], "count": 0, "warning": f"Site '{site}' not found in Central."}
 
@@ -968,8 +993,11 @@ async def hub_central_devices(
 
             return {"devices": devices, "count": len(devices)}
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        return {"devices": [], "count": 0, "warning": f"Error fetching devices: {exc}"}
+        logger.warning("Error fetching Central devices for tenant %s site %s: %s", resolved_tid, site, exc)
+        return {"devices": [], "count": 0, "warning": "Error fetching devices.", "error": str(exc)}
 
 
 @router.get("/central/site-alerts")
@@ -999,6 +1027,8 @@ async def hub_central_site_alerts(
     if not all([cluster_url, client_id, client_secret]):
         return {"alerts": [], "count": 0, "warning": "Central API credentials incomplete."}
 
+    cluster_url = _validated_cluster_url_or_400(cluster_url)
+
     try:
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
@@ -1023,13 +1053,16 @@ async def hub_central_site_alerts(
                 site_id = None
                 health_score = None
                 site_found = False
+                site_lookup_error = ""
                 try:
                     sh_resp = await client.get(
                         f"{cluster_url}/network-monitoring/v1alpha1/sites-health",
                         headers=headers,
                         timeout=20,
                     )
-                    if sh_resp.status_code == 200:
+                    if sh_resp.status_code != 200:
+                        site_lookup_error = f"Sites health fetch failed: {sh_resp.status_code}"
+                    else:
                         for item in sh_resp.json().get("items", []):
                             sname = item.get("siteName") or item.get("site_name") or ""
                             if sname.lower() == site.lower():
@@ -1037,9 +1070,17 @@ async def hub_central_site_alerts(
                                 site_id = item.get("siteId") or item.get("site_id")
                                 health_score = int(item.get("healthScore", item.get("health_score", 100)))
                                 break
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Central alerts site lookup failed for tenant %s site %s: %s", resolved_tid, site, exc)
+                    site_lookup_error = str(exc)
 
+                if site_lookup_error:
+                    return {
+                        "alerts": [],
+                        "count": 0,
+                        "warning": "Failed to look up site in Central.",
+                        "error": site_lookup_error,
+                    }
                 if not site_found:
                     return {"alerts": [], "count": 0, "warning": f"Site '{site}' not found in Central."}
 
@@ -1057,6 +1098,7 @@ async def hub_central_site_alerts(
                     })
 
                 if site_id:
+                    device_fetch_error = ""
                     try:
                         params: dict[str, Any] = {"limit": 500, "filter": f"siteId eq '{site_id}'"}
                         dev_resp = await client.get(
@@ -1065,7 +1107,9 @@ async def hub_central_site_alerts(
                             params=params,
                             timeout=20,
                         )
-                        if dev_resp.status_code == 200:
+                        if dev_resp.status_code != 200:
+                            device_fetch_error = f"Devices fetch failed: {dev_resp.status_code}"
+                        else:
                             _TYPE_MAP = {
                                 "ACCESS_POINT": ("AP_DOWN", "AP Down"),
                                 "SWITCH": ("SWITCH_DOWN", "Switch Down"),
@@ -1089,10 +1133,19 @@ async def hub_central_site_alerts(
                                     "ts": ts_now,
                                     "message": f"{dev.get('model', dtype)} — status: {dev.get('status', 'Unknown')} | IP: {dev.get('ipv4') or dev.get('ip', '—')}",
                                 })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Central device alert fetch failed for tenant %s site %s: %s", resolved_tid, site, exc)
+                        device_fetch_error = str(exc)
+                    if device_fetch_error:
+                        return {
+                            "alerts": alerts,
+                            "count": len(alerts),
+                            "warning": "Failed to fetch site devices from Central.",
+                            "error": device_fetch_error,
+                        }
             else:
                 thirty_days_ago = ts_now - 30 * 86400
+                alerts_fetch_error = ""
                 for path in ["/monitoring/v1/alerts", "/monitoring/v2/alerts"]:
                     try:
                         resp = await client.get(
@@ -1116,17 +1169,33 @@ async def hub_central_site_alerts(
                                     "ts": alert.get("timestamp") or alert.get("raised_at", ""),
                                     "message": alert.get("details") or alert.get("description", ""),
                                 })
+                            alerts_fetch_error = ""
                             break
                         if resp.status_code == 404:
                             continue
-                    except Exception:
-                        break
+                        alerts_fetch_error = f"{path} returned {resp.status_code}"
+                        logger.warning("Central alerts fetch failed for tenant %s site %s via %s: %s", resolved_tid, site, path, resp.status_code)
+                    except Exception as exc:
+                        logger.warning("Central alerts fetch failed for tenant %s site %s via %s: %s", resolved_tid, site, path, exc)
+                        alerts_fetch_error = str(exc)
+                        continue
+
+                if alerts_fetch_error and not alerts:
+                    return {
+                        "alerts": [],
+                        "count": 0,
+                        "warning": "Failed to fetch site alerts from Central.",
+                        "error": alerts_fetch_error,
+                    }
 
             warning = None if alerts else "No alerts detected for this site."
             return {"alerts": alerts, "count": len(alerts), "warning": warning}
 
+    except HTTPException:
+        raise
     except Exception as exc:
-        return {"alerts": [], "count": 0, "warning": f"Error fetching alerts: {exc}"}
+        logger.warning("Error fetching Central alerts for tenant %s site %s: %s", resolved_tid, site, exc)
+        return {"alerts": [], "count": 0, "warning": "Error fetching alerts.", "error": str(exc)}
 
 
 @router.post("/aggregate/central")

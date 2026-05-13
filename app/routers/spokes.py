@@ -1,11 +1,13 @@
 """Spoke relay endpoints — used by spoke servers."""
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
@@ -13,6 +15,7 @@ from ..data_models import AuditEntry, PendingSpoke, User
 from ..ws import push_spoke_commands, register_spoke, unregister_spoke, ws_broadcast
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # In-memory registration log — last 100 attempts (survives until container restart)
 _REG_LOG_MAX = 100
@@ -468,8 +471,9 @@ async def spoke_websocket(
     spoke_id: str,
     api_key: str = Query(""),
 ):
+    connection_api_key = str(api_key or "")
     try:
-        _auth_spoke(tenant_id, spoke_id, api_key)
+        spoke = _auth_spoke(tenant_id, spoke_id, connection_api_key)
     except HTTPException as exc:
         await websocket.close(code=4401 if exc.status_code == 401 else 4403, reason=str(exc.detail))
         return
@@ -479,25 +483,37 @@ async def spoke_websocket(
     try:
         await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
         while True:
-            data = await websocket.receive_json()
-            msg_type = str(data.get("type") or "telemetry").strip().lower()
-            if msg_type == "telemetry":
-                payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
-                spoke = _auth_spoke(tenant_id, spoke_id, api_key)
-                await _apply_spoke_telemetry(tenant_id, spoke_id, spoke, payload)
-                await websocket.send_json({"type": "telemetry_ack", "ts": _now().isoformat()})
-                await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
-                await push_spoke_commands(tenant_id, spoke_id)
-            elif msg_type == "ack":
-                raw_payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
-                payload = AckPayload(**raw_payload)
-                await _handle_spoke_ack(tenant_id, spoke_id, payload)
-                await websocket.send_json({"type": "ack_ok", "command_id": payload.command_id})
-            elif msg_type == "ping":
-                await websocket.send_json({"type": "pong"})
-            elif msg_type == "sync":
-                await push_spoke_commands(tenant_id, spoke_id)
-                await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+            try:
+                data = await websocket.receive_json()
+                if not isinstance(data, dict):
+                    raise ValueError("WebSocket payload must be a JSON object")
+                msg_type = str(data.get("type") or "telemetry").strip().lower()
+                if msg_type == "telemetry":
+                    payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
+                    await _apply_spoke_telemetry(tenant_id, spoke_id, spoke, payload)
+                    await websocket.send_json({"type": "telemetry_ack", "ts": _now().isoformat()})
+                    await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+                    await push_spoke_commands(tenant_id, spoke_id)
+                elif msg_type == "ack":
+                    raw_payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
+                    payload = AckPayload(**raw_payload)
+                    await _handle_spoke_ack(tenant_id, spoke_id, payload)
+                    await websocket.send_json({"type": "ack_ok", "command_id": payload.command_id})
+                elif msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                elif msg_type == "sync":
+                    await push_spoke_commands(tenant_id, spoke_id)
+                    await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
+            except WebSocketDisconnect:
+                raise
+            except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
+                logger.warning("Invalid spoke websocket payload for %s/%s: %s", tenant_id, spoke_id, exc)
+                await websocket.send_json({"type": "error", "error": str(exc)})
+                continue
+            except Exception as exc:
+                logger.warning("Spoke websocket processing failed for %s/%s: %s", tenant_id, spoke_id, exc)
+                await websocket.send_json({"type": "error", "error": str(exc)})
+                continue
     except WebSocketDisconnect:
         pass
     finally:

@@ -4,8 +4,8 @@ The module builds a single Fernet instance from ``WEBUI_SECRET_KEY`` and uses
 it for API keys, Aruba Central credentials, notification settings, and other
 secrets that must be stored at rest. Callers typically serialize structured
 data with ``encrypt_dict``/``decrypt_dict`` and use the string helpers for
-single values. If no key is configured, an ephemeral key is generated so local
-development can start, but encrypted values will not survive restart.
+single values. In ``dev`` only, an ephemeral key is generated when no key is
+configured; other environments must provide a valid Fernet key.
 """
 from __future__ import annotations
 
@@ -30,18 +30,15 @@ def _get_fernet() -> Fernet:
             import logging
 
             logging.getLogger(__name__).warning(
-                "WEBUI_SECRET_KEY not set — generated ephemeral key. "
+                "WEBUI_SECRET_KEY not set in dev — generated ephemeral key. "
                 "Secrets will not survive restart. Set WEBUI_SECRET_KEY in .env"
             )
         try:
-            _fernet = Fernet(
-                key.encode() if len(key) == 44 else base64.urlsafe_b64encode(bytes.fromhex(key))
-            )
-        except Exception:
-            import hashlib
-
-            raw = hashlib.sha256(key.encode()).digest()
-            _fernet = Fernet(base64.urlsafe_b64encode(raw))
+            _fernet = Fernet(key.encode())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid WEBUI_SECRET_KEY: must be a 32-byte URL-safe base64 Fernet key"
+            ) from exc
     return _fernet
 
 

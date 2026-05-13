@@ -22,7 +22,7 @@ from typing import Any
 import httpx
 
 from . import store
-from .aruba import ArubaClient
+from .aruba import ArubaClient, validate_cluster_url
 from .crypto import decrypt_dict
 from .data_models import AuditEntry, Command
 from .config import get_settings
@@ -37,6 +37,17 @@ gkill_state: dict[str, Any] = {"value": "off", "last_fetched": 0.0, "error": Non
 spoke_online: dict[str, dict[str, bool]] = {}
 # Hub-side Aruba Central status cache: tenant_id → polled status
 _hub_central_status: dict[str, dict] = {}
+_cache_updated_at: dict[str, float] = {}
+
+
+def _set_hub_central_status(tenant_id: str, payload: dict[str, Any]) -> None:
+    _hub_central_status[tenant_id] = payload
+    _cache_updated_at[tenant_id] = time.time()
+
+
+def _clear_hub_central_status(tenant_id: str) -> None:
+    _hub_central_status.pop(tenant_id, None)
+    _cache_updated_at.pop(tenant_id, None)
 
 
 def _now() -> datetime:
@@ -250,6 +261,7 @@ def _get_aruba_client(tenant_id: str) -> ArubaClient | None:
         return None
     try:
         cfg = decrypt_dict(tenant.aruba_config_enc)
+        cfg["cluster_url"] = validate_cluster_url(cfg.get("cluster_url", ""))
         cfg_hash = hashlib.md5(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()
         cached = _aruba_clients.get(tenant_id)
         if cached and _aruba_client_hashes.get(tenant_id) == cfg_hash:
@@ -270,7 +282,9 @@ async def aruba_poller() -> None:
     await asyncio.sleep(60)
     while True:
         try:
-            for tenant in store.list_tenants():
+            tenants = store.list_tenants()
+            active_tenant_ids = {tenant.id for tenant in tenants}
+            for tenant in tenants:
                 spokes = [spoke for spoke in store.list_spokes(tenant.id) if spoke.status == "approved"]
                 if not spokes:
                     continue
@@ -294,21 +308,24 @@ async def aruba_poller() -> None:
 
                 centralized_spokes = [spoke for spoke in spokes if spoke.processing_mode.resolve("aruba_polling") == "centralized"]
                 if not centralized_spokes:
-                    _hub_central_status.pop(tenant.id, None)
+                    _clear_hub_central_status(tenant.id)
                     continue
                 if not client or not client.is_configured():
-                    _hub_central_status[tenant.id] = {"spokes": {}, "token_valid": False, "token_state": "not_configured"}
+                    _set_hub_central_status(tenant.id, {"spokes": {}, "token_valid": False, "token_state": "not_configured"})
                     continue
 
                 try:
                     findings = await client.poll_alerts_and_insights()
                 except Exception as exc:
-                    _hub_central_status[tenant.id] = {
-                        "spokes": {},
-                        "token_valid": False,
-                        "token_state": "error",
-                        "error": str(exc),
-                    }
+                    _set_hub_central_status(
+                        tenant.id,
+                        {
+                            "spokes": {},
+                            "token_valid": False,
+                            "token_state": "error",
+                            "error": str(exc),
+                        },
+                    )
                     for spoke in centralized_spokes:
                         store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
                     continue
@@ -446,20 +463,34 @@ async def aruba_poller() -> None:
                             "monitored_checks": list(monitored_checks),
                         }
 
-                    _hub_central_status[tenant.id] = {
-                        "spokes": spokes_status,
-                        "token_valid": True,
-                        "token_state": "connected",
-                    }
+                    _set_hub_central_status(
+                        tenant.id,
+                        {
+                            "spokes": spokes_status,
+                            "token_valid": True,
+                            "token_state": "connected",
+                        },
+                    )
                 except Exception as exc:
-                    _hub_central_status[tenant.id] = {
-                        "spokes": {},
-                        "token_valid": False,
-                        "token_state": "error",
-                        "error": str(exc),
-                    }
+                    _set_hub_central_status(
+                        tenant.id,
+                        {
+                            "spokes": {},
+                            "token_valid": False,
+                            "token_state": "error",
+                            "error": str(exc),
+                        },
+                    )
                     for spoke in centralized_spokes:
                         store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
+
+            for tenant_id in list(_hub_central_status):
+                if tenant_id not in active_tenant_ids:
+                    _clear_hub_central_status(tenant_id)
+            for tenant_id in list(_aruba_clients):
+                if tenant_id not in active_tenant_ids:
+                    _aruba_clients.pop(tenant_id, None)
+                    _aruba_client_hashes.pop(tenant_id, None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

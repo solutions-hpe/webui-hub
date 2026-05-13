@@ -4,7 +4,9 @@ import asyncio
 import json
 from typing import Set
 
-from fastapi import WebSocket
+from fastapi import HTTPException, WebSocket, WebSocketDisconnect
+
+from .auth import decode_access_token
 
 browser_connections: Set[WebSocket] = set()
 spoke_connections: dict[tuple[str, str], WebSocket] = {}
@@ -16,13 +18,75 @@ def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
     _main_loop = loop
 
 
-async def ws_connect(websocket: WebSocket) -> None:
+def _extract_ws_token(message: str) -> str:
+    candidate = str(message or "").strip()
+    if not candidate:
+        return ""
+    if not candidate.startswith("{"):
+        return candidate
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    token = payload.get("token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    inner = payload.get("payload")
+    if isinstance(inner, dict):
+        nested = inner.get("token")
+        if isinstance(nested, str):
+            return nested.strip()
+    return ""
+
+
+async def _close_unauthorized(websocket: WebSocket, reason: str) -> None:
+    await websocket.close(code=4401, reason=reason)
+
+
+async def _authenticate_browser_websocket(websocket: WebSocket) -> bool:
+    token = str(websocket.query_params.get("token") or "").strip()
+    if token:
+        try:
+            decode_access_token(token)
+        except HTTPException:
+            await _close_unauthorized(websocket, "Invalid credentials")
+            return False
+        await websocket.accept()
+        return True
+
     await websocket.accept()
+    try:
+        token = _extract_ws_token(await websocket.receive_text())
+    except WebSocketDisconnect:
+        return False
+    except Exception:
+        await _close_unauthorized(websocket, "Authentication required")
+        return False
+
+    if not token:
+        await _close_unauthorized(websocket, "Authentication required")
+        return False
+
+    try:
+        decode_access_token(token)
+    except HTTPException:
+        await _close_unauthorized(websocket, "Invalid credentials")
+        return False
+    return True
+
+
+async def ws_connect(websocket: WebSocket) -> None:
+    if not await _authenticate_browser_websocket(websocket):
+        return
     browser_connections.add(websocket)
     try:
         while True:
             await websocket.receive_text()
     except Exception:
+        pass
+    finally:
         browser_connections.discard(websocket)
 
 

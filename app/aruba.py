@@ -9,15 +9,44 @@ Central tenants into Hub tenants.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def validate_cluster_url(cluster_url: str) -> str:
+    normalized = str(cluster_url or "").strip().rstrip("/")
+    if not normalized:
+        raise ValueError("cluster_url is required")
+
+    parsed = urlparse(normalized)
+    if parsed.scheme != "https":
+        raise ValueError("cluster_url must use https")
+    if not parsed.hostname:
+        raise ValueError("cluster_url must include a hostname")
+
+    try:
+        addrinfo = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"cluster_url hostname could not be resolved: {exc}") from exc
+
+    for _, _, _, _, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError(
+                f"cluster_url resolves to disallowed address {ip}"
+            )
+
+    return normalized
 
 
 @dataclass
