@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.0] — 2026-05-13
+
+Initial stable production release of the Hub platform on `main`. The `2.x` entries below capture the development history that led to this v1.0 cut.
+
+### Added
+- Multi-tenant FastAPI hub with JSON file storage under `/data/`, HTTPS on port `8443`, and self-signed certificate generation at startup
+- Role-based auth with **superadmin**, **admin**, and **operator** roles
+- Spoke registration, approval, tenant-scoped command queueing, and WebSocket relay between hub and spokes
+- Aruba Central MSP integration plus per-tenant/per-spoke processing modes for centralized or distributed execution
+- Teams/email notifications, ACME / Let's Encrypt renewal hooks, 7-day spoke audit history, 24-hour command queue TTL, GKill polling, heartbeat monitoring, and reclone schedule checks
+- Azure blob backup system with `app/crypto.py`, `app/routers/backups.py`, encrypted Azure key storage, installer SAS generation, Proxmox VM backup triggering, and `BackupConfig` defaults for `csvmstorage` / `vms`
+- `deploy-azure-quickstart.sh`, which generates `WEBUI_SECRET_KEY`, `SECRET_KEY`, `ADMIN_PASSWORD`, `ENCRYPTION_KEY`, and `INSTALLER_API_KEY`, then saves them to `.deploy-secrets.env`
+- Aggregate fleet reclone retries with exponential backoff, the Hub Central tab for cross-spoke simulation/client aggregation, VM backup and reseed controls in the hub UI, and the superadmin reseed panel exposed to all hub users
+
 ## [2.1.0] — 2026-05-10
 
 ### Changed

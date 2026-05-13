@@ -4,8 +4,9 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-JSON%20Hub-009688)
 ![Docker](https://img.shields.io/badge/deployment-Docker%20%7C%20ACI%20%7C%20BYOD-2496ED)
 ![TLS](https://img.shields.io/badge/TLS-self--signed%20by%20default-success)
+![Release](https://img.shields.io/badge/release-v1.0.0-success)
 
-Hub is the central management plane for the HPE Client-Sim hub-and-spoke platform. It replaces the legacy `webui` application and its PostgreSQL/SQLAlchemy stack with a FastAPI-based, multi-tenant backend that stores operational state in JSON under `/data/`. The browser UI is now sourced from the shared `cs-webui` repository instead of being maintained directly in `webui-hub`; Hub serves that frontend and injects `WEBUI_MODE=hub` at runtime.
+Hub is the central management plane for the HPE Client-Sim hub-and-spoke platform. Version **v1.0.0** on `main` is the initial stable production release. It replaces the legacy `webui` application and its PostgreSQL/SQLAlchemy stack with a FastAPI-based, multi-tenant backend that stores operational state in JSON under `/data/`. The browser UI is now sourced from the shared `cs-webui` repository instead of being maintained directly in `webui-hub`; Hub serves that frontend and injects `WEBUI_MODE=hub` at runtime.
 
 ## Overview
 
@@ -63,6 +64,17 @@ Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webu
 - For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
 
 
+## Backup & Azure Storage
+
+Hub v1.0 includes an Azure-backed VM backup path for spoke Proxmox hosts. The storage account key is **never** stored in plaintext: a superadmin sends it to `POST /api/backup/config/key`, where Hub encrypts it with `ENCRYPTION_KEY` before saving `azure_key_enc` in the JSON store. The default backup target is the private Azure Blob container `csvmstorage/vms`.
+
+Key pieces of the flow:
+
+- `GET /api/backup/installer/sas-token` returns a **2-hour read-only container SAS URL** after the caller supplies `X-Installer-Key` matching `INSTALLER_API_KEY`.
+- Hub-triggered Proxmox backup jobs use the stored Azure account key to enqueue spoke backup work and upload VM snapshots into Azure Blob Storage.
+- The Proxmox installer and reseed flows use the SAS URL so they can download private blobs without ever receiving the raw storage account key.
+- Hub mode in `cs-webui` exposes VM backup, reseed, and recovery controls through the VM Server workflows.
+
 ## Quick Start (Docker)
 
 ### 1) Generate keys
@@ -71,6 +83,8 @@ Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webu
 export WEBUI_SECRET_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
 export ADMIN_PASSWORD='change-this-now'
+export ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+export INSTALLER_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 ```
 
 ### 2) Copy the example environment file
@@ -85,6 +99,8 @@ Edit `.env` and set at minimum:
 WEBUI_SECRET_KEY=...
 SECRET_KEY=...
 ADMIN_PASSWORD=...
+ENCRYPTION_KEY=...
+INSTALLER_API_KEY=...
 ```
 
 ### 3) Start the stack
@@ -110,7 +126,17 @@ https://localhost:8443
 - Docker Engine with Compose support
 - A persistent Docker volume or bind mount for `/data`
 - Access to the matching `cs-webui` branch (`lrb` for development, `main` for production)
-- Secure values for `WEBUI_SECRET_KEY`, `SECRET_KEY`, and `ADMIN_PASSWORD`
+- Secure values for `WEBUI_SECRET_KEY`, `SECRET_KEY`, `ADMIN_PASSWORD`, `ENCRYPTION_KEY`, and `INSTALLER_API_KEY`
+
+#### Required environment variables
+
+```bash
+export WEBUI_SECRET_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
+export ADMIN_PASSWORD='change-this-now'
+export ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+export INSTALLER_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+```
 
 #### Steps
 
@@ -156,7 +182,15 @@ TLS_KEY_PATH=/data/tls/key.pem
 
 ### Azure Container Instance (ACI)
 
-`deploy-azure.sh` builds the image in Azure Container Registry, provisions Azure File Share storage for `/data`, and creates an Azure Container Instance. Many local deployments use `~/Documents/deploy-hub-azure.sh` as a wrapper around the same rollout flow.
+For v1.0 production deployments, **`deploy-azure-quickstart.sh` is the recommended path**. It generates all five required secrets (`WEBUI_SECRET_KEY`, `SECRET_KEY`, `ADMIN_PASSWORD`, `ENCRYPTION_KEY`, `INSTALLER_API_KEY`), saves them to `.deploy-secrets.env` (gitignored), and then calls `deploy-azure.sh`.
+
+#### Recommended quick deployment path
+
+```bash
+bash deploy-azure-quickstart.sh
+```
+
+Use `deploy-azure.sh` directly when you want to supply secrets and Azure naming inputs yourself. Many local deployments also use `~/Documents/deploy-hub-azure.sh` as a wrapper around the same rollout flow.
 
 #### Prerequisites
 
@@ -170,6 +204,8 @@ TLS_KEY_PATH=/data/tls/key.pem
 export WEBUI_SECRET_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 export SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(48))")
 export ADMIN_PASSWORD='change-this-now'
+export ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+export INSTALLER_API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 ```
 
 #### Optional deployment variables
@@ -199,7 +235,7 @@ The script will:
 - Build and push the Hub image
 - Create a storage account and Azure File Share
 - Deploy the container with `/data` mounted from Azure Files
-- Inject `WEBUI_SECRET_KEY` and `SECRET_KEY` as secure environment variables
+- Inject `WEBUI_SECRET_KEY`, `SECRET_KEY`, `ADMIN_PASSWORD`, `ENCRYPTION_KEY`, and `INSTALLER_API_KEY` as secure environment variables
 
 Resulting endpoint format:
 
@@ -268,8 +304,10 @@ Runtime configuration comes from environment variables or `.env`.
 | Variable | Default | Required | Description |
 |---|---:|---|---|
 | `HUB_PORT` | `8443` | No | HTTPS listener port used by Docker Compose, ACI, and BYOD start scripts. |
-| `WEBUI_SECRET_KEY` | empty | **Yes** in production | Fernet master key for encrypting secrets at rest. If omitted, Hub generates an ephemeral key and encrypted values will not survive restart. |
+| `WEBUI_SECRET_KEY` | empty | **Yes** in production | Fernet master key for core Hub secrets at rest. If omitted, Hub generates an ephemeral key and encrypted values will not survive restart. |
 | `SECRET_KEY` | `change-me-in-production` | **Yes** in production | JWT signing key for login sessions. |
+| `ENCRYPTION_KEY` | empty | **Yes** for backup/reseed | Fernet key used by `app/crypto.py` to encrypt the Azure storage account key at rest before it is written to the JSON store. |
+| `INSTALLER_API_KEY` | empty | **Yes** for hub-assisted installs/backups | Shared secret required by `GET /api/backup/installer/sas-token`. Installers send it as `X-Installer-Key` to obtain a short-lived read-only SAS URL for Azure blob downloads. |
 | `ALGORITHM` | `HS256` | No | JWT signing algorithm. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `480` | No | JWT access token lifetime in minutes. |
 | `FIRST_ADMIN_USERNAME` | `admin` | No | Username used for the bootstrap superadmin account. |

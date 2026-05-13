@@ -2,11 +2,13 @@
 
 ## Overview
 
-The `redeploy-runbook.ps1` script runs hourly in Azure Automation. It checks GitHub for new commits on the `lrb` branch — if a new commit exists since last deploy, it deletes and recreates the ACI container to pull the updated image.
+The `redeploy-runbook.ps1` script runs hourly in Azure Automation. It checks GitHub for new commits on the `main` branch — if a new commit exists since last deploy, it deletes and recreates the ACI container to pull the updated image.
+
+GitHub Actions now publishes a production `:main` image tag as well as the existing `:lrb` development tag. This runbook should track `main`.
 
 **CI Pipeline flow:**
 ```
-git push → GitHub Actions builds image → pushes to ghcr.io/solutions-hpe/webui-hub:lrb
+git push → GitHub Actions builds image → pushes to ghcr.io/solutions-hpe/webui-hub:main (and :lrb for dev)
                                              ↓ (within ~1 hour)
                             Azure Automation detects new SHA → redeploys ACI
 ```
