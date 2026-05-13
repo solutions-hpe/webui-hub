@@ -60,7 +60,7 @@ Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webu
 
 - `app/main.py` serves `static/index.html` and replaces `{{WEBUI_MODE}}` with `hub` before returning the page.
 - `static/index.html`, `static/app.js`, and `static/style.css` are sourced from `cs-webui`.
-- Branch alignment matters: `lrb` is the development branch and `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
+- Branch alignment matters: `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
 - For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
 
 
@@ -125,7 +125,7 @@ https://localhost:8443
 
 - Docker Engine with Compose support
 - A persistent Docker volume or bind mount for `/data`
-- Access to the matching `cs-webui` branch (`lrb` for development, `main` for production)
+- Access to the `cs-webui` repository at the `main` branch
 - Secure values for `WEBUI_SECRET_KEY`, `SECRET_KEY`, `ADMIN_PASSWORD`, `ENCRYPTION_KEY`, and `INSTALLER_API_KEY`
 
 #### Required environment variables
@@ -245,7 +245,7 @@ https://<dns-label>.<region>.azurecontainer.io:8443
 
 ### GitHub Actions image build
 
-`.github/workflows/build-push.yml` runs on pushes to `main` and `lrb`. The workflow:
+`.github/workflows/build-push.yml` runs on pushes to `main`. The workflow:
 
 1. checks out `webui-hub`
 2. clones `cs-webui` from the matching branch, falling back to `main` if that branch does not exist

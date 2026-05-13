@@ -4,11 +4,9 @@
 
 The `redeploy-runbook.ps1` script runs hourly in Azure Automation. It checks GitHub for new commits on the `main` branch — if a new commit exists since last deploy, it deletes and recreates the ACI container to pull the updated image.
 
-GitHub Actions now publishes a production `:main` image tag as well as the existing `:lrb` development tag. This runbook should track `main`.
-
 **CI Pipeline flow:**
 ```
-git push → GitHub Actions builds image → pushes to ghcr.io/solutions-hpe/webui-hub:main (and :lrb for dev)
+git push → GitHub Actions builds image → pushes to ghcr.io/solutions-hpe/webui-hub:main
                                              ↓ (within ~1 hour)
                             Azure Automation detects new SHA → redeploys ACI
 ```
@@ -72,7 +70,7 @@ In **Azure Portal → Automation Account → Credentials → Add a credential**:
 | `HubAdminPassword` | String | Yes | your `ADMIN_PASSWORD` value |
 | `HubWebuiSecretKey` | String | Yes | your `WEBUI_SECRET_KEY` value |
 | `HubSecretKey` | String | Yes | your `SECRET_KEY` value |
-| `StorageAccountKey` | String | Yes | Azure Storage Account key for `lrbcshub` |
+| `StorageAccountKey` | String | Yes | Azure Storage Account key for `cshubdata` |
 
 **Via REST API** (use this if the Portal method doesn't work or you need to update values):
 
@@ -90,14 +88,14 @@ set_var() {
 set_var "HubAdminPassword"  "your-admin-password"
 set_var "HubWebuiSecretKey" "your-webui-secret-key"
 set_var "HubSecretKey"      "your-secret-key"
-set_var "StorageAccountKey" "$(az storage account keys list --account-name lrbcshub --resource-group LRB --query '[0].value' -o tsv)"
+set_var "StorageAccountKey" "$(az storage account keys list --account-name cshubdata --resource-group CS --query '[0].value' -o tsv)"
 ```
 
 To get the storage key:
 ```bash
 az storage account keys list \
-  --account-name lrbcshub \
-  --resource-group LRB \
+  --account-name cshubdata \
+  --resource-group CS \
   --query "[0].value" -o tsv
 ```
 
