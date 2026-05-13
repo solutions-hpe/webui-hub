@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Optional
+from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -9,26 +12,38 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from .. import auth, store
-from ..data_models import BackupConfig, User
+from ..data_models import BackupConfig, Command, User
 from ..ws import send_spoke_command, ws_broadcast
 
 router = APIRouter()
 backup_jobs: dict[str, dict[str, Any]] = {}
 _LOCALHOSTS = {"127.0.0.1", "::1", "localhost"}
+_RESEED_RETRY_DELAYS = {1: 300, 2: 900, 3: 1800}
+_RESEED_SUCCESS_STATES = {"done", "completed"}
+_RESEED_ERROR_STATES = {"error", "failed"}
 
 
 class TriggerBackupRequest(BaseModel):
     azure_key: str
 
 
+class ReseedRequest(BaseModel):
+    template_name: str
+    latest_blob: str
+    spoke_ids: list[str]
+    vm_id: int = 100
+
+
 class BackupProgressPayload(BaseModel):
     job_id: str
-    vm_id: int
+    vm_id: Optional[int] = None
     status: str
     pct: int = 0
     size: Optional[int] = None
     file: Optional[str] = None
     error: Optional[str] = None
+    spoke_id: Optional[str] = None
+    step: Optional[str] = None
 
 
 def _require_superadmin(current_user: User) -> None:
@@ -50,6 +65,154 @@ def _xml_local_name(tag: str) -> str:
 def _is_local_request(request: Request) -> bool:
     client = request.client.host if request.client else ""
     return client in _LOCALHOSTS
+
+
+def _parse_blob_entries(xml_text: str) -> list[dict[str, Any]]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise HTTPException(status_code=502, detail=f"Invalid Azure Blob API response: {exc}")
+
+    blobs: list[dict[str, Any]] = []
+    for blob in root.iter():
+        if _xml_local_name(blob.tag) != "Blob":
+            continue
+        entry: dict[str, Any] = {"name": "", "size": 0, "last_modified": ""}
+        for child in blob:
+            tag = _xml_local_name(child.tag)
+            if tag == "Name":
+                entry["name"] = child.text or ""
+            elif tag == "Properties":
+                for prop in child:
+                    prop_tag = _xml_local_name(prop.tag)
+                    if prop_tag == "Content-Length":
+                        try:
+                            entry["size"] = int(prop.text or "0")
+                        except ValueError:
+                            entry["size"] = 0
+                    elif prop_tag == "Last-Modified":
+                        entry["last_modified"] = prop.text or ""
+        if entry["name"]:
+            blobs.append(entry)
+    return blobs
+
+
+def _build_reseed_command_payload(
+    backup_config: BackupConfig,
+    job_id: str,
+    template_name: str,
+    blob_url: str,
+    vm_id: int,
+) -> dict[str, Any]:
+    return {
+        "cmd_type": "reseed",
+        "job_id": job_id,
+        "blob_url": blob_url,
+        "vm_id": vm_id,
+        "template_name": template_name,
+        "azure_account": backup_config.azure_account,
+        "azure_container": backup_config.azure_container,
+        "retry_max": 3,
+    }
+
+
+def _blob_last_modified_key(blob: dict[str, Any]) -> datetime:
+    value = str(blob.get("last_modified") or "").strip()
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _build_spoke_command(command_id: str, command_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": command_id,
+        "target": "spoke",
+        "type": command_type,
+        "payload": payload,
+    }
+
+
+async def _send_or_queue_reseed_command(
+    tenant_id: str,
+    spoke_id: str,
+    job_id: str,
+    command_payload: dict[str, Any],
+    *,
+    retry_count: int = 0,
+) -> str:
+    command_id = f"{job_id}-{spoke_id}-{retry_count}"
+    command = _build_spoke_command(command_id, "reseed", dict(command_payload))
+    if await send_spoke_command(tenant_id, spoke_id, command):
+        return "sent"
+
+    store.enqueue_command(
+        Command(
+            id=command_id,
+            spoke_id=spoke_id,
+            tenant_id=tenant_id,
+            type="reseed",
+            target="spoke",
+            payload=dict(command_payload),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        )
+    )
+    return "queued"
+
+
+def _refresh_backup_job_status(job: dict[str, Any]) -> None:
+    if job.get("type") == "reseed":
+        spoke_states = [state.get("status") for state in job.get("spoke_status", {}).values()]
+        if not spoke_states:
+            job["status"] = "completed"
+        elif all(state in _RESEED_SUCCESS_STATES for state in spoke_states):
+            job["status"] = "completed"
+        elif all(state in _RESEED_SUCCESS_STATES | _RESEED_ERROR_STATES for state in spoke_states):
+            job["status"] = "failed" if any(state in _RESEED_ERROR_STATES for state in spoke_states) else "completed"
+        else:
+            job["status"] = "running"
+        return
+
+    vm_states = list(job.get("vm_status", {}).values())
+    if vm_states and all(state["status"] in {"done", "error"} for state in vm_states):
+        job["status"] = "failed" if any(state["status"] == "error" for state in vm_states) else "completed"
+
+
+async def _retry_reseed_after_delay(job_id: str, tenant_id: str, spoke_id: str, retry_count: int) -> None:
+    delay = _RESEED_RETRY_DELAYS.get(retry_count)
+    if delay is None:
+        return
+
+    await asyncio.sleep(delay)
+    job = backup_jobs.get(job_id)
+    if not job or job.get("type") != "reseed":
+        return
+
+    spoke_state = job.get("spoke_status", {}).get(spoke_id)
+    if not spoke_state or spoke_state.get("status") != "retrying" or spoke_state.get("retry_count") != retry_count:
+        return
+
+    dispatch_status = await _send_or_queue_reseed_command(
+        tenant_id,
+        spoke_id,
+        job_id,
+        job["command_payload"],
+        retry_count=retry_count,
+    )
+    spoke_state.update(
+        {
+            "status": "running" if dispatch_status == "sent" else "queued",
+            "step": "retry_sent" if dispatch_status == "sent" else "retry_queued",
+            "last_retry_at": datetime.utcnow().isoformat(),
+        }
+    )
+    _refresh_backup_job_status(job)
+    await ws_broadcast({"type": "backup_progress", "job": job})
 
 
 @router.get("/backup/config", response_model=BackupConfig)
@@ -113,12 +276,7 @@ async def trigger_backup(
             for vm_id in vm_ids
         },
     }
-    command = {
-        "id": job_id,
-        "target": "spoke",
-        "type": "backup",
-        "payload": command_payload,
-    }
+    command = _build_spoke_command(job_id, "backup", command_payload)
 
     sent = False
     try:
@@ -147,12 +305,143 @@ def get_backup_job_status(job_id: str, current_user: User = Depends(auth.get_cur
     return _get_backup_job(job_id)
 
 
+@router.get("/backup/templates")
+async def list_templates(_: User = Depends(auth.get_current_user)):
+    backup_config = store.load_backup_config()
+    url = f"https://{backup_config.azure_account}.blob.core.windows.net/{backup_config.azure_container}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, params={"restype": "container", "comp": "list"})
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"Azure Blob API error: {exc.response.status_code}")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Azure Blob API request failed: {exc}")
+
+    templates: dict[str, dict[str, Any]] = {}
+    for blob in _parse_blob_entries(response.text):
+        parts = blob["name"].split("/")
+        template_name = parts[0] if len(parts) > 1 else blob["name"]
+        current = templates.get(template_name)
+        if current is None or _blob_last_modified_key(blob) > _blob_last_modified_key(current):
+            templates[template_name] = {
+                "name": template_name,
+                "latest_blob": blob["name"],
+                "size": blob["size"],
+                "last_modified": blob["last_modified"],
+            }
+
+    return {"templates": sorted(templates.values(), key=lambda template: template["name"])}
+
+
+@router.post("/backup/reseed")
+async def trigger_reseed(
+    tenant_id: str,
+    req: ReseedRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    auth.require_tenant_access(tenant_id, current_user)
+    backup_config = store.load_backup_config()
+
+    if req.spoke_ids == ["all"]:
+        spoke_ids = [spoke.id for spoke in store.list_spokes(tenant_id) if spoke.status == "approved"]
+    else:
+        spoke_ids = []
+        for spoke_id in req.spoke_ids:
+            spoke = store.get_spoke(tenant_id, spoke_id)
+            if not spoke:
+                raise HTTPException(status_code=404, detail=f"Spoke not found: {spoke_id}")
+            if spoke.status != "approved":
+                raise HTTPException(status_code=409, detail=f"Spoke is not approved: {spoke_id}")
+            spoke_ids.append(spoke_id)
+
+    if not spoke_ids:
+        raise HTTPException(status_code=400, detail="No approved spokes available for reseed")
+
+    job_id = str(uuid4())[:8]
+    blob_url = (
+        f"https://{backup_config.azure_account}.blob.core.windows.net/"
+        f"{backup_config.azure_container}/{req.latest_blob}"
+    )
+    command_payload = _build_reseed_command_payload(
+        backup_config,
+        job_id,
+        req.template_name,
+        blob_url,
+        req.vm_id,
+    )
+
+    backup_jobs[job_id] = {
+        "job_id": job_id,
+        "type": "reseed",
+        "tenant_id": tenant_id,
+        "template_name": req.template_name,
+        "latest_blob": req.latest_blob,
+        "blob_url": blob_url,
+        "vm_id": req.vm_id,
+        "started_at": datetime.utcnow().isoformat(),
+        "status": "running",
+        "command_payload": command_payload,
+        "spoke_status": {
+            spoke_id: {"status": "pending", "step": None, "retry_count": 0, "error": None}
+            for spoke_id in spoke_ids
+        },
+    }
+
+    job = backup_jobs[job_id]
+    for spoke_id in spoke_ids:
+        dispatch_status = await _send_or_queue_reseed_command(tenant_id, spoke_id, job_id, command_payload)
+        job["spoke_status"][spoke_id].update(
+            {
+                "status": "running" if dispatch_status == "sent" else "queued",
+                "step": "command_sent" if dispatch_status == "sent" else "queued_offline",
+            }
+        )
+
+    return {"job_id": job_id, "spoke_count": len(spoke_ids)}
+
+
 @router.post("/backup/progress")
 async def update_backup_progress(payload: BackupProgressPayload, request: Request):
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Local access required")
 
     job = _get_backup_job(payload.job_id)
+    if job.get("type") == "reseed":
+        if not payload.spoke_id:
+            raise HTTPException(status_code=400, detail="spoke_id is required for reseed progress")
+
+        spoke_state = job.get("spoke_status", {}).get(payload.spoke_id)
+        if spoke_state is None:
+            raise HTTPException(status_code=404, detail="Spoke not found in reseed job")
+
+        next_status = payload.status
+        retry_count = int(spoke_state.get("retry_count", 0))
+        if payload.status in _RESEED_ERROR_STATES:
+            retry_count += 1
+            if retry_count <= 3:
+                next_status = "retrying"
+                asyncio.create_task(
+                    _retry_reseed_after_delay(job["job_id"], job["tenant_id"], payload.spoke_id, retry_count)
+                )
+
+        spoke_state.update(
+            {
+                "status": next_status,
+                "step": payload.step,
+                "error": payload.error,
+                "retry_count": retry_count,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        )
+        _refresh_backup_job_status(job)
+        await ws_broadcast({"type": "backup_progress", "job": job})
+        return {"status": "ok"}
+
+    if payload.vm_id is None:
+        raise HTTPException(status_code=400, detail="vm_id is required for backup progress")
+
     vm_state = job["vm_status"].get(payload.vm_id)
     if vm_state is None:
         raise HTTPException(status_code=404, detail="VM not found in backup job")
@@ -167,10 +456,7 @@ async def update_backup_progress(payload: BackupProgressPayload, request: Reques
         }
     )
 
-    vm_states = list(job["vm_status"].values())
-    if vm_states and all(state["status"] in {"done", "error"} for state in vm_states):
-        job["status"] = "failed" if any(state["status"] == "error" for state in vm_states) else "completed"
-
+    _refresh_backup_job_status(job)
     await ws_broadcast({"type": "backup_progress", "job": job})
     return {"status": "ok"}
 
@@ -201,31 +487,4 @@ async def list_backup_blobs(tenant_id: str, spoke_id: str, current_user: User = 
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Azure Blob API request failed: {exc}")
 
-    try:
-        root = ET.fromstring(response.text)
-    except ET.ParseError as exc:
-        raise HTTPException(status_code=502, detail=f"Invalid Azure Blob API response: {exc}")
-
-    blobs: list[dict[str, Any]] = []
-    for blob in root.iter():
-        if _xml_local_name(blob.tag) != "Blob":
-            continue
-        entry: dict[str, Any] = {"name": None, "size": None, "last_modified": None}
-        for child in blob:
-            tag = _xml_local_name(child.tag)
-            if tag == "Name":
-                entry["name"] = child.text or ""
-            elif tag == "Properties":
-                for prop in child:
-                    prop_tag = _xml_local_name(prop.tag)
-                    if prop_tag == "Content-Length":
-                        try:
-                            entry["size"] = int(prop.text or "0")
-                        except ValueError:
-                            entry["size"] = None
-                    elif prop_tag == "Last-Modified":
-                        entry["last_modified"] = prop.text or ""
-        if entry["name"]:
-            blobs.append(entry)
-
-    return blobs
+    return _parse_blob_entries(response.text)
