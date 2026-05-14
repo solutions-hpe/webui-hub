@@ -1,6 +1,7 @@
 """Spoke relay endpoints — used by spoke servers."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -242,7 +243,8 @@ async def _apply_spoke_telemetry(tenant_id: str, spoke_id: str, spoke, payload: 
         changed = True
     if changed:
         store.save_spoke(spoke)
-    store.update_spoke_telemetry(tenant_id, spoke_id, payload)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, store.update_spoke_telemetry, tenant_id, spoke_id, payload)
     await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "spoke_id": spoke_id})
 
 
