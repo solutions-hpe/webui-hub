@@ -84,6 +84,10 @@ fi
 echo "▶ Fetching ACR credentials..."
 ACR_PWD=$(az acr credential show --name "$ACR_NAME" --query 'passwords[0].value' -o tsv)
 
+# ── Stamp VERSION with git SHA so browsers cache-bust on each deploy ──
+GIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "dev")
+echo "$GIT_SHA" > "$SCRIPT_DIR/VERSION"
+
 # ── Build and push image ──────────────────────────────────────────
 echo "▶ Building and pushing image to ACR..."
 az acr build --registry "$ACR_NAME" --image "$IMAGE" "$SCRIPT_DIR" --output none
