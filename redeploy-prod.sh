@@ -29,6 +29,8 @@ if [ ! -f "$SECRETS_FILE" ]; then
 fi
 # shellcheck disable=SC1090
 source "$SECRETS_FILE"
+# Allow secrets file to override DNS_LABEL
+DNS_LABEL="${DNS_LABEL:-cs-hub}"
 
 for var in ADMIN_PASSWORD SECRET_KEY ENCRYPTION_KEY INSTALLER_API_KEY WEBUI_SECRET_KEY; do
     if [ -z "${!var:-}" ]; then
@@ -106,6 +108,7 @@ az container create \
     --registry-login-server "$ACR_SERVER" \
     --registry-username "$ACR_NAME" \
     --registry-password "$ACR_PWD" \
+    --dns-name-label "$DNS_LABEL" \
     --ports "$HUB_PORT" \
     --protocol TCP \
     --cpu 1 \
@@ -133,7 +136,7 @@ az container create \
 HUB_IP=$(az container show \
     --name "$CONTAINER_NAME" \
     --resource-group "$RG" \
-    --query 'ipAddress.ip' -o tsv)
+    --query 'ipAddress.fqdn' -o tsv)
 
 # ── Verify mount succeeded ────────────────────────────────────────
 echo "▶ Checking for volume mount errors..."
@@ -169,7 +172,8 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  ✅ Hub redeployed successfully!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  URL : https://$HUB_IP:$HUB_PORT"
+echo "  URL  : https://$HUB_IP:$HUB_PORT"
+echo "  FQDN : $DNS_LABEL.$LOCATION.azurecontainer.io"
 echo ""
-echo "  ⚠  IP may have changed — update spoke hub URL if needed."
+echo "  ⚠  IP may have changed but FQDN stays stable — spoke config unchanged."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
