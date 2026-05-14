@@ -63,6 +63,28 @@ class AssignRoleRequest(BaseModel):
     role: Literal["admin", "viewer", "operator"]
 
 
+class HubAuthConfigRequest(BaseModel):
+    auth_provider: str
+    auth_ldap_url: str = ""
+    auth_ldap_bind_dn: str = ""
+    auth_ldap_bind_password: str = ""
+    auth_ldap_user_base: str = ""
+    auth_ldap_user_filter: str = ""
+    auth_ldap_group_superadmin: str = ""
+    auth_ldap_group_tenant_admin: str = ""
+    auth_ldap_tenant_id: str = ""
+    auth_radius_host: str = ""
+    auth_radius_port: int = 1812
+    auth_radius_secret: str = ""
+    auth_radius_role_attr: str = "Filter-Id"
+    auth_radius_superadmin_val: str = "superadmin"
+    auth_tacacs_host: str = ""
+    auth_tacacs_port: int = 49
+    auth_tacacs_secret: str = ""
+    auth_tacacs_superadmin_priv: int = 15
+    auth_default_role: str = "superadmin"
+
+
 def _normalize_notification_config(payload: NotificationConfigRequest) -> dict[str, Any]:
     to_emails = payload.to_emails
     if isinstance(to_emails, str):
@@ -343,7 +365,11 @@ def get_gkill_state(_: User = Depends(auth.require_superadmin)):
 
 @router.get("/superadmin/auth-providers")
 def get_auth_provider_status(_: User = Depends(auth.require_superadmin)):
+    from ..auth_providers import get_enabled_providers
+
     settings = get_settings()
+    enabled = set(get_enabled_providers())
+    config = store.load_auth_config()
     return {
         "providers": [
             {
@@ -360,18 +386,93 @@ def get_auth_provider_status(_: User = Depends(auth.require_superadmin)):
             },
             {
                 "name": "ldap",
-                "enabled": settings.ldap_enabled,
-                "implemented": False,
+                "enabled": "ldap" in enabled,
+                "implemented": True,
                 "description": "LDAP / Active Directory",
             },
             {
                 "name": "radius",
-                "enabled": settings.radius_enabled,
-                "implemented": False,
+                "enabled": "radius" in enabled,
+                "implemented": True,
                 "description": "RADIUS",
             },
-        ]
+            {
+                "name": "tacacs",
+                "enabled": "tacacs" in enabled,
+                "implemented": True,
+                "description": "TACACS+",
+            },
+        ],
+        "active_provider": config.auth_provider,
     }
+
+
+@router.get("/superadmin/auth-config")
+def get_auth_config(_: User = Depends(auth.require_superadmin)):
+    config = store.load_auth_config()
+    return {
+        "auth_provider": config.auth_provider,
+        "auth_ldap_url": config.auth_ldap_url,
+        "auth_ldap_bind_dn": config.auth_ldap_bind_dn,
+        "auth_ldap_bind_password_configured": bool(config.auth_ldap_bind_password_enc),
+        "auth_ldap_user_base": config.auth_ldap_user_base,
+        "auth_ldap_user_filter": config.auth_ldap_user_filter,
+        "auth_ldap_group_superadmin": config.auth_ldap_group_superadmin,
+        "auth_ldap_group_tenant_admin": config.auth_ldap_group_tenant_admin,
+        "auth_ldap_tenant_id": config.auth_ldap_tenant_id,
+        "auth_radius_host": config.auth_radius_host,
+        "auth_radius_port": config.auth_radius_port,
+        "auth_radius_secret_configured": bool(config.auth_radius_secret_enc),
+        "auth_radius_role_attr": config.auth_radius_role_attr,
+        "auth_radius_superadmin_val": config.auth_radius_superadmin_val,
+        "auth_tacacs_host": config.auth_tacacs_host,
+        "auth_tacacs_port": config.auth_tacacs_port,
+        "auth_tacacs_secret_configured": bool(config.auth_tacacs_secret_enc),
+        "auth_tacacs_superadmin_priv": config.auth_tacacs_superadmin_priv,
+        "auth_default_role": config.auth_default_role,
+    }
+
+
+@router.post("/superadmin/auth-config")
+def save_auth_config_endpoint(payload: HubAuthConfigRequest, _: User = Depends(auth.require_superadmin)):
+    config = store.load_auth_config()
+    config.auth_provider = payload.auth_provider
+    config.auth_ldap_url = payload.auth_ldap_url
+    config.auth_ldap_bind_dn = payload.auth_ldap_bind_dn
+    if payload.auth_ldap_bind_password:
+        config.auth_ldap_bind_password_enc = encrypt_str(payload.auth_ldap_bind_password)
+    config.auth_ldap_user_base = payload.auth_ldap_user_base
+    config.auth_ldap_user_filter = payload.auth_ldap_user_filter or "(&(objectClass=user)(sAMAccountName={username}))"
+    config.auth_ldap_group_superadmin = payload.auth_ldap_group_superadmin
+    config.auth_ldap_group_tenant_admin = payload.auth_ldap_group_tenant_admin
+    config.auth_ldap_tenant_id = payload.auth_ldap_tenant_id
+    config.auth_radius_host = payload.auth_radius_host
+    config.auth_radius_port = payload.auth_radius_port
+    if payload.auth_radius_secret:
+        config.auth_radius_secret_enc = encrypt_str(payload.auth_radius_secret)
+    config.auth_radius_role_attr = payload.auth_radius_role_attr
+    config.auth_radius_superadmin_val = payload.auth_radius_superadmin_val
+    config.auth_tacacs_host = payload.auth_tacacs_host
+    config.auth_tacacs_port = payload.auth_tacacs_port
+    if payload.auth_tacacs_secret:
+        config.auth_tacacs_secret_enc = encrypt_str(payload.auth_tacacs_secret)
+    config.auth_tacacs_superadmin_priv = payload.auth_tacacs_superadmin_priv
+    config.auth_default_role = payload.auth_default_role
+    store.save_auth_config(config)
+    return {"status": "ok"}
+
+
+@router.post("/superadmin/auth-test")
+async def test_auth_config_endpoint(payload: dict, _: User = Depends(auth.require_superadmin)):
+    from ..auth_providers import test_auth_provider
+
+    config = store.load_auth_config()
+    return await test_auth_provider(
+        payload.get("provider", config.auth_provider),
+        config,
+        payload.get("username", ""),
+        payload.get("password", ""),
+    )
 
 
 @router.get("/superadmin/pending-spokes")

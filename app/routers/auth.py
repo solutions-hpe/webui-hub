@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from .. import auth, store
 from ..config import get_settings
 
-ALL_PROVIDERS = ["password", "oidc", "ldap", "radius"]
-IMPLEMENTED_PROVIDERS = {"password"}
+ALL_PROVIDERS = ["password", "oidc", "ldap", "radius", "tacacs"]
+IMPLEMENTED_PROVIDERS = {"password", "ldap", "radius", "tacacs"}
 
 router = APIRouter()
 
@@ -54,21 +54,23 @@ def list_auth_providers():
 
 @router.post("/login", response_model=TokenResponse)
 async def login(payload: LoginRequest):
-    from ..auth_providers import AuthProviderError, get_enabled_providers, ldap_authenticate, radius_authenticate
+    from .. import store as _store
+    from ..auth_providers import get_enabled_providers, ldap_authenticate, radius_authenticate, tacacs_authenticate
 
     settings = get_settings()
     user = auth.authenticate_user(payload.username, payload.password)
 
-    if not user and settings.ldap_enabled:
+    if not user:
+        config = _store.load_auth_config()
+        provider = str(config.auth_provider or "local").strip().lower()
         try:
-            user = await ldap_authenticate(payload.username, payload.password)
-        except AuthProviderError:
-            pass
-
-    if not user and settings.radius_enabled:
-        try:
-            user = await radius_authenticate(payload.username, payload.password)
-        except AuthProviderError:
+            if provider == "ldap":
+                user = await ldap_authenticate(payload.username, payload.password)
+            elif provider == "radius":
+                user = await radius_authenticate(payload.username, payload.password)
+            elif provider == "tacacs":
+                user = await tacacs_authenticate(payload.username, payload.password)
+        except Exception:
             pass
 
     if not user:

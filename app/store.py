@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from .config import get_settings
 from .crypto import decrypt_dict, decrypt_str, encrypt_str, generate_api_key
-from .data_models import AuditEntry, BackupConfig, Command, Spoke, PendingSpoke, Tenant, User
+from .data_models import AuditEntry, BackupConfig, Command, HubAuthConfig, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
 
@@ -53,6 +53,7 @@ def _data_dir() -> Path:
 
 DATA_DIR = _data_dir()
 _BACKUP_CONFIG_FILE = DATA_DIR / "backup_config.json"
+_AUTH_CONFIG_FILE = _data_dir() / "auth_config.json"
 
 
 def _read_json(path: Path) -> Any:
@@ -111,6 +112,19 @@ def load_backup_config() -> BackupConfig:
 def save_backup_config(config: BackupConfig) -> None:
     with _lock:
         _write_json(_BACKUP_CONFIG_FILE, config.model_dump(mode="json"))
+
+
+def load_auth_config() -> HubAuthConfig:
+    with _lock:
+        raw = _read_json(_AUTH_CONFIG_FILE)
+        if not raw:
+            return HubAuthConfig()
+        return HubAuthConfig(**raw)
+
+
+def save_auth_config(config: HubAuthConfig) -> None:
+    with _lock:
+        _write_json(_AUTH_CONFIG_FILE, config.model_dump(mode="json"))
 
 
 def get_user(username: str) -> Optional[User]:

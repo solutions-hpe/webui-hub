@@ -150,3 +150,25 @@ class BackupConfig(BaseModel):
     azure_account: str = "csvmstorage"
     azure_container: str = "vms"
     azure_key_enc: str = "gAAAAABqBJh3Y-hvGAVJXju-Cp2qBDjR73zbyYoJ1ukCCd2JoWbYhemtXxlTVdHmYqOrKs9NjfAvNGnD1s-mC7MA8hDN8jE2-smgeh_SHeqCTXzIqi1GwWV82gf-kQNe_j6OgO7CeXMZeWHOjTgV1Q780Z0yRsQ5KCZAiaJdMy7doyqd8sQnR-ZGBeaxHXQJmXs2tlX-bkWo"
+
+class HubAuthConfig(BaseModel):
+    auth_provider: str = "local"
+    auth_ldap_url: str = ""
+    auth_ldap_bind_dn: str = ""
+    auth_ldap_bind_password_enc: str = ""
+    auth_ldap_user_base: str = ""
+    auth_ldap_user_filter: str = "(&(objectClass=user)(sAMAccountName={username}))"
+    auth_ldap_group_superadmin: str = ""
+    auth_ldap_group_tenant_admin: str = ""
+    auth_ldap_tenant_id: str = ""
+    auth_radius_host: str = ""
+    auth_radius_port: int = 1812
+    auth_radius_secret_enc: str = ""
+    auth_radius_role_attr: str = "Filter-Id"
+    auth_radius_superadmin_val: str = "superadmin"
+    auth_tacacs_host: str = ""
+    auth_tacacs_port: int = 49
+    auth_tacacs_secret_enc: str = ""
+    auth_tacacs_superadmin_priv: int = 15
+    auth_default_role: str = "superadmin"
+

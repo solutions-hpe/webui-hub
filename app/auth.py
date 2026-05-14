@@ -23,6 +23,8 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    if not hashed:
+        return False
     return pwd_context.verify(plain.encode()[:72], hashed)
 
 
@@ -36,7 +38,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 def authenticate_user(username: str, password: str) -> Optional[User]:
     user = store.get_user(username)
-    if not user or not verify_password(password, user.hashed_password):
+    if not user or not user.hashed_password or not verify_password(password, user.hashed_password):
         return None
     return user
 
