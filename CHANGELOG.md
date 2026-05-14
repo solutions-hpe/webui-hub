@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.1] — 2026-05-14
+
+### Added
+- **T3 wireless device management** — new `/api/routers/t3.py` router supporting full MAC profile lifecycle and OUI pool administration.
+- MAC profile builder: `PUT /{tenant_id}/spokes/{spoke_id}/t3/mac-profile` stores a list of `{vendor, oui, count}` entries (≤ 25 total interfaces) and automatically queues a `t3_mac_update` command for the target spoke.
+- OUI pool management: `GET/PUT /api/oui-pool`, `POST /api/oui-pool/import-csv` (superadmin), `GET /api/oui-pool/export-csv`.
+- T3 device visibility: `GET /{tenant_id}/spokes/{spoke_id}/t3/devices` surfaces T3 client telemetry from spoke relay payloads.
+- Re-push endpoints: `POST /t3/push-mac` and `POST /t3/push-oui-pool` re-queue existing profiles to a spoke without requiring a full profile edit.
+- `MacProfileEntry`, `MacProfile`, and `OuiPoolEntry` Pydantic models in `data_models.py`.
+- Store functions: `get/save/delete_mac_profile`, `list_mac_profiles`, `get/save_oui_pool_raw` in `store.py`.
+- T3 data files: `/data/{tenant_id}/mac_profiles.json` (per-spoke profiles) and `/data/oui_pool.json` (global reference pool).
+
+### Changed
+- `app/main.py` now registers the T3 router (`prefix="/api"`, tag `"t3"`) alongside the backups router.
+
 ## [1.0.0] — 2026-05-13
 
 Initial stable production release of the Hub platform on `main`. The `2.x` entries below capture the development history that led to this v1.0 cut.

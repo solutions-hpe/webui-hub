@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from .config import get_settings
 from .crypto import decrypt_dict, decrypt_str, encrypt_str, generate_api_key
-from .data_models import AuditEntry, BackupConfig, Command, HubAuthConfig, Spoke, PendingSpoke, Tenant, User
+from .data_models import AuditEntry, BackupConfig, Command, HubAuthConfig, MacProfile, MacProfileEntry, OuiPoolEntry, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
 
@@ -918,3 +918,79 @@ def init_store() -> None:
     base = _data_dir()
     for d in [base, base / "pending"]:
         d.mkdir(parents=True, exist_ok=True)
+
+
+# ── T3 MAC Profile store ──────────────────────────────────────────────────────
+
+def _mac_profiles_path(tenant_id: str) -> Path:
+    return _data_dir() / tenant_id / "mac_profiles.json"
+
+
+def _oui_pool_path() -> Path:
+    return _data_dir() / "oui_pool.json"
+
+
+def get_mac_profile(tenant_id: str, spoke_id: str) -> Optional[MacProfile]:
+    with _lock:
+        raw = _read_json(_mac_profiles_path(tenant_id)) or {}
+        data = raw.get(spoke_id)
+        if not data:
+            return None
+        return MacProfile(**data)
+
+
+def save_mac_profile(tenant_id: str, spoke_id: str, profile: MacProfile) -> None:
+    with _lock:
+        path = _mac_profiles_path(tenant_id)
+        raw = _read_json(path) or {}
+        raw[spoke_id] = profile.model_dump(mode="json")
+        _write_json(path, raw)
+
+
+def list_mac_profiles(tenant_id: str) -> dict[str, MacProfile]:
+    with _lock:
+        raw = _read_json(_mac_profiles_path(tenant_id)) or {}
+        result = {}
+        for spoke_id, data in raw.items():
+            try:
+                result[spoke_id] = MacProfile(**data)
+            except Exception:
+                pass
+        return result
+
+
+def delete_mac_profile(tenant_id: str, spoke_id: str) -> None:
+    with _lock:
+        path = _mac_profiles_path(tenant_id)
+        raw = _read_json(path) or {}
+        if spoke_id in raw:
+            del raw[spoke_id]
+            _write_json(path, raw)
+
+
+def get_oui_pool() -> list[OuiPoolEntry]:
+    with _lock:
+        raw = _read_json(_oui_pool_path()) or []
+        result = []
+        for item in raw:
+            try:
+                result.append(OuiPoolEntry(**item))
+            except Exception:
+                pass
+        return result
+
+
+def save_oui_pool(entries: list[OuiPoolEntry]) -> None:
+    with _lock:
+        _write_json(_oui_pool_path(), [e.model_dump(mode="json") for e in entries])
+
+
+def get_oui_pool_raw() -> list[dict]:
+    """Return raw dicts for API serialization without model overhead."""
+    with _lock:
+        return _read_json(_oui_pool_path()) or []
+
+
+def save_oui_pool_raw(entries: list[dict]) -> None:
+    with _lock:
+        _write_json(_oui_pool_path(), entries)

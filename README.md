@@ -466,6 +466,16 @@ Hub heartbeat monitoring treats a spoke as offline after 300 seconds without tel
 | Per-spoke processing mode | `PATCH` | `/api/{tenant_id}/spokes/{spoke_id}/processing-mode` | superadmin, admin |
 | Processing summary | `GET` | `/api/{tenant_id}/processing-summary` | superadmin, admin, operator |
 | Audit | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/audit` | superadmin, admin, operator |
+| T3 devices | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/t3/devices` | superadmin, admin, operator |
+| T3 mac-profile | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile` | superadmin, admin, operator |
+| T3 mac-profile save | `PUT` | `/api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile` | superadmin, admin |
+| T3 mac-profile delete | `DELETE` | `/api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile` | superadmin, admin |
+| T3 push mac | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/t3/push-mac` | superadmin, admin |
+| T3 push oui-pool | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/t3/push-oui-pool` | superadmin, admin |
+| OUI pool | `GET` | `/api/oui-pool` | all |
+| OUI pool replace | `PUT` | `/api/oui-pool` | superadmin |
+| OUI pool import | `POST` | `/api/oui-pool/import-csv` | superadmin |
+| OUI pool export | `GET` | `/api/oui-pool/export-csv` | all |
 
 ### Superadmin (JWT + superadmin role)
 
@@ -594,6 +604,7 @@ All persistent state lives under `DATA_DIR`.
 /data/
 ├── users.json
 ├── tenants.json
+├── oui_pool.json
 ├── pending/
 │   └── <pending-spoke-id>.json
 ├── tls/
@@ -601,6 +612,7 @@ All persistent state lives under `DATA_DIR`.
 │   └── key.pem
 └── <tenant_id>/
     ├── spokes.json
+    ├── mac_profiles.json
     ├── queue/
     │   └── <spoke_id>.json
     └── audit/
@@ -613,8 +625,10 @@ All persistent state lives under `DATA_DIR`.
 |---|---|
 | `/data/users.json` | All Hub user accounts, bcrypt password hashes, superadmin flag, and tenant role assignments |
 | `/data/tenants.json` | Tenant metadata plus encrypted Aruba and notification settings |
+| `/data/oui_pool.json` | Global OUI reference pool used by the T3 MAC profile builder |
 | `/data/pending/*.json` | Spoke registrations waiting for superadmin approval |
 | `/data/{tenant_id}/spokes.json` | Approved spokes, labels, runtime config, processing mode, telemetry, last seen timestamps |
+| `/data/{tenant_id}/mac_profiles.json` | T3 MAC profiles keyed by spoke ID |
 | `/data/{tenant_id}/queue/*.json` | Pending, delivered, and executed commands with 24-hour TTL |
 | `/data/{tenant_id}/audit/*.json` | Rolling 7-day task and action history per spoke |
 | `/data/tls/*` | Generated self-signed cert and key unless overridden |
@@ -630,6 +644,100 @@ All persistent state lives under `DATA_DIR`.
 - **Self-signed TLS is convenient, not trust-managed** — use your own cert for enterprise deployments.
 - **Tenant scoping is enforced in routes** for both data access and command execution.
 
+## T3 Wireless Device Management
+
+T3 devices are virtual wireless interfaces running on a Raspberry Pi (or equivalent Linux host). Each spoke can manage up to **25 virtual `vwlan` interfaces**, each programmed with a vendor-specific MAC address derived from an OUI pool. Hub provides fleet-wide MAC profile management and OUI pool administration.
+
+### Architecture
+
+```text
+Hub UI  ──── PUT mac-profile ────► Hub stores profile + queues t3_mac_update command
+                                            │
+                                    spoke polls /inbox
+                                            │
+                               spoke writes mac_config.json locally
+                                            │
+                          T3 device polls GET /api/scripts/t3/mac_config.json
+                                            │
+                       wireless.sh detects hash change → gen_macs.sh regenerates interfaces
+```
+
+### T3 API endpoints (tenant-scoped, JWT)
+
+| Method | Path | Role | Purpose |
+|---|---|---|---|
+| `GET` | `/api/{tenant_id}/spokes/{spoke_id}/t3/devices` | operator | T3 devices visible in spoke telemetry |
+| `GET` | `/api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile` | operator | Stored MAC profile for a spoke |
+| `PUT` | `/api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile` | admin | Save profile and queue push command |
+| `DELETE` | `/api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile` | admin | Remove stored profile |
+| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/t3/push-mac` | admin | Re-queue push of existing profile |
+| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/t3/push-oui-pool` | admin | Push global OUI pool to a spoke |
+
+### OUI pool endpoints (global, JWT)
+
+| Method | Path | Role | Purpose |
+|---|---|---|---|
+| `GET` | `/api/oui-pool` | all | Return all OUI reference entries |
+| `PUT` | `/api/oui-pool` | superadmin | Replace the OUI pool |
+| `POST` | `/api/oui-pool/import-csv` | superadmin | Import `vendor,oui,device_type` CSV |
+| `GET` | `/api/oui-pool/export-csv` | all | Download pool as CSV |
+
+### MAC profile format
+
+A MAC profile is a list of entries passed to `PUT /api/{tenant_id}/spokes/{spoke_id}/t3/mac-profile`:
+
+```json
+{
+  "entries": [
+    { "vendor": "Apple",     "oui": "3c:15:c2", "count": 5 },
+    { "vendor": "Samsung",   "oui": "a4:50:46", "count": 4 },
+    { "vendor": "Microsoft", "oui": "60:45:bd", "count": 3 }
+  ]
+}
+```
+
+- `oui` — first three octets of the MAC address in lowercase colon notation
+- `count` — number of `vwlan` interfaces to configure with this vendor's OUI
+- Total `count` across all entries must be ≤ 25
+
+Saving a profile automatically queues a `t3_mac_update` command. The spoke applies the profile by writing `mac_config.json` locally; T3 devices then pull it on the next update cycle.
+
+### Hub-queued T3 command types
+
+| Command | Payload | Effect on spoke |
+|---|---|---|
+| `t3_mac_update` | `{mac_config: [{vendor, oui, count}, ...]}` | Writes `t3_mac_config.json` to spoke disk |
+| `t3_oui_pool_update` | `{oui_pool: [{vendor, oui, device_type}, ...]}` | Writes `t3_oui_pool.json` to spoke disk |
+
+### T3 telemetry
+
+Spokes include a `t3` section in every telemetry push:
+
+```json
+{
+  "t3": {
+    "device_count": 5,
+    "devices": [{ "hostname": "...", "hw_type": "t3", ... }],
+    "mac_config_present": true,
+    "mac_config_hash": "abc123def456...",
+    "oui_pool_present": true
+  }
+}
+```
+
+The `mac_config_hash` is an MD5 of the on-disk `mac_config.json`. Operators can compare this against the profile last pushed from Hub to verify the T3 devices have picked up the latest configuration.
+
+### Data layout for T3
+
+```text
+/data/
+├── oui_pool.json                          ← global OUI reference pool
+└── <tenant_id>/
+    └── mac_profiles.json                  ← dict keyed by spoke_id
+```
+
+---
+
 ## Spoke Integration Status
 
 The `client-sim/webui-spoke/server.py` integration work for Hub is complete. The five spoke behaviors below have been implemented and are kept here as a reference.
@@ -641,7 +749,7 @@ The `client-sim/webui-spoke/server.py` integration work for Hub is complete. The
 3. **Implemented: move all relay traffic to tenant-scoped routes**
    - Use `/api/{tenant_id}/spokes/{spoke_id}/telemetry`, `/inbox`, and `/ack` with `X-API-Key`.
 4. **Implemented: handle Hub-driven command types**
-   - Support `config_update`, `aruba_config_update`, `notification_push`, `gkill_update`, `reclone_schedule`, `repo_sync`, and `auto_recovery` as inbox items.
+   - Support `config_update`, `aruba_config_update`, `notification_push`, `gkill_update`, `reclone_schedule`, `repo_sync`, `auto_recovery`, `t3_mac_update`, and `t3_oui_pool_update` as inbox items.
 5. **Implemented: send richer ACK payloads back to Hub**
    - Include `command_id`, `status`, and `result` fields such as `success`, `task_type`, `detail`, `output`, and `timestamp` so Hub can populate audit history.
 

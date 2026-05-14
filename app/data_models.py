@@ -172,3 +172,32 @@ class HubAuthConfig(BaseModel):
     auth_tacacs_superadmin_priv: int = 15
     auth_default_role: str = "superadmin"
 
+
+class MacProfileEntry(BaseModel):
+    """One vendor entry in a mac_config.json profile."""
+
+    vendor: str
+    oui: str      # e.g. "3c:15:c2"
+    count: int = 1
+
+
+class MacProfile(BaseModel):
+    """Stored mac_config profile for a spoke's T3 devices."""
+
+    spoke_id: str
+    tenant_id: str
+    entries: list[MacProfileEntry] = Field(default_factory=list)
+    updated_at: datetime = Field(default_factory=_now)
+    updated_by: str = ""
+
+    @property
+    def total_interfaces(self) -> int:
+        return sum(e.count for e in self.entries)
+
+
+class OuiPoolEntry(BaseModel):
+    """Single row in the global OUI reference pool."""
+
+    vendor: str
+    oui: str          # e.g. "3c:15:c2"
+    device_type: str  # e.g. "iPhone 11 Pro"

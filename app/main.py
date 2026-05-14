@@ -20,6 +20,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 STATIC_DIR = FRONTEND_DIR / "static"
 TEMPLATE_DIR = FRONTEND_DIR / "templates"
+SHARED_DIR = BASE_DIR / "shared"
 
 
 @asynccontextmanager
@@ -56,6 +57,7 @@ app = FastAPI(title="Hub — Client-Sim Central Platform", lifespan=lifespan)
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.mount("/shared", StaticFiles(directory=str(SHARED_DIR)), name="shared")
 
 
 @app.websocket("/ws")
@@ -65,6 +67,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 from .routers import auth as auth_router
 from .routers import aggregate, backups, checks, commands, settings as settings_router, sites, spokes, superadmin, workspaces
+from .routers import t3 as t3_router
 
 app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
 app.include_router(spokes.router, prefix="/api", tags=["spokes"])
@@ -76,6 +79,7 @@ app.include_router(commands.router, prefix="/api", tags=["commands"])
 app.include_router(settings_router.router, prefix="/api", tags=["settings"])
 app.include_router(aggregate.router, prefix="/api", tags=["aggregate"])
 app.include_router(backups.router, prefix="/api", tags=["backups"])
+app.include_router(t3_router.router, prefix="/api", tags=["t3"])
 
 
 @app.get("/api/health")
