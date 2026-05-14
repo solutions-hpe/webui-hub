@@ -132,8 +132,13 @@ az container create \
     --restart-policy Always \
     --output none
 
-# ── Get IP ────────────────────────────────────────────────────────
+# ── Get IP and FQDN ───────────────────────────────────────────────
 HUB_IP=$(az container show \
+    --name "$CONTAINER_NAME" \
+    --resource-group "$RG" \
+    --query 'ipAddress.ip' -o tsv)
+
+HUB_FQDN=$(az container show \
     --name "$CONTAINER_NAME" \
     --resource-group "$RG" \
     --query 'ipAddress.fqdn' -o tsv)
@@ -141,7 +146,7 @@ HUB_IP=$(az container show \
 # ── Verify mount succeeded ────────────────────────────────────────
 echo "▶ Checking for volume mount errors..."
 MOUNT_ERR=$(az container show --name "$CONTAINER_NAME" --resource-group "$RG" \
-    --query "instanceView.events[?contains(message,'Azure File Volume')].message" -o tsv 2>/dev/null || true)
+    --query "instanceView.events[?contains(message,'Failed') && contains(message,'Azure File Volume')].message" -o tsv 2>/dev/null || true)
 
 if [ -n "$MOUNT_ERR" ]; then
     echo "❌ Azure File Volume mount error detected:"
@@ -172,7 +177,8 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  ✅ Hub redeployed successfully!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  URL  : https://$HUB_IP:$HUB_PORT"
+echo "  URL  : https://$HUB_FQDN:$HUB_PORT"
+echo "  IP   : $HUB_IP"
 echo "  FQDN : $DNS_LABEL.$LOCATION.azurecontainer.io"
 echo ""
 echo "  ⚠  IP may have changed but FQDN stays stable — spoke config unchanged."
