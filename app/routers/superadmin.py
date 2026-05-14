@@ -308,9 +308,16 @@ class HubConfigRequest(BaseModel):
 
 # ── Onboarding PSK ────────────────────────────────────────────────────────────
 
+def _psk_require_tenant_admin(tenant_id: str, current_user: User = Depends(auth.get_current_user)) -> str:
+    auth.require_tenant_access(tenant_id, current_user)
+    if not current_user.is_superadmin and current_user.get_role(tenant_id) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return tenant_id
+
+
 @router.get("/tenant/{tenant_id}/onboarding-psk")
 def get_onboarding_psk_status(
-    tenant_id: str = Depends(_require_tenant_admin),
+    tenant_id: str = Depends(_psk_require_tenant_admin),
 ):
     """Return whether an onboarding PSK is configured for this tenant (never returns the value)."""
     tenant = store.get_tenant(tenant_id)
@@ -321,7 +328,7 @@ def get_onboarding_psk_status(
 
 @router.post("/tenant/{tenant_id}/onboarding-psk")
 def generate_onboarding_psk(
-    tenant_id: str = Depends(_require_tenant_admin),
+    tenant_id: str = Depends(_psk_require_tenant_admin),
 ):
     """Generate (or regenerate) an onboarding PSK for this tenant.
 
@@ -339,7 +346,7 @@ def generate_onboarding_psk(
 
 @router.delete("/tenant/{tenant_id}/onboarding-psk", status_code=204)
 def revoke_onboarding_psk(
-    tenant_id: str = Depends(_require_tenant_admin),
+    tenant_id: str = Depends(_psk_require_tenant_admin),
 ):
     """Revoke the onboarding PSK. Spokes can no longer auto-approve until a new one is generated."""
     tenant = store.get_tenant(tenant_id)
