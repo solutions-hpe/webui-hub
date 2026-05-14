@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, ValidationError
 
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
-from ..data_models import AuditEntry, PendingSpoke, User
+from ..data_models import AuditEntry, Command, PendingSpoke, User
 from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, unregister_spoke, ws_broadcast
 
 # Imported lazily inside the handler to avoid a circular import at module load time.
@@ -165,6 +165,18 @@ def _auth_spoke(tenant_id: str, spoke_id: str, api_key: str):
             raise exc
         raise HTTPException(status_code=401, detail="Invalid credentials") from exc
     return spoke
+
+
+def _require_tenant_access(tenant_id: str, current_user: User) -> str:
+    auth.require_tenant_access(tenant_id, current_user)
+    return tenant_id
+
+
+def _require_tenant_admin(tenant_id: str, current_user: User) -> str:
+    auth.require_tenant_access(tenant_id, current_user)
+    if not current_user.is_superadmin and current_user.get_role(tenant_id) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return tenant_id
 
 
 def _require_spoke_admin(spoke_id: str, current_user: User) -> tuple[str, Any]:
@@ -455,6 +467,46 @@ def delete_spoke(spoke_id: str, current_user: User = Depends(auth.get_current_us
     tenant_id, _ = _require_spoke_admin(spoke_id, current_user)
     store.delete_spoke(tenant_id, spoke_id)
     return {"ok": True}
+
+
+@router.get("/{tenant_id}/spokes/{spoke_id}/config")
+def get_spoke_config(tenant_id: str, spoke_id: str, current_user: User = Depends(auth.get_current_user)):
+    """Return the spoke's current applied config and telemetry-reported settings."""
+    resolved_tenant_id = _require_tenant_access(tenant_id, current_user)
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    return {"config": spoke.config or {}, "telemetry": spoke.telemetry or {}}
+
+
+@router.post("/{tenant_id}/spokes/{spoke_id}/config")
+async def push_spoke_config(
+    tenant_id: str,
+    spoke_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Push a config_update command to the spoke."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+
+    next_config = dict(spoke.config or {})
+    next_config.update(body or {})
+    spoke.config = next_config
+    spoke.config_version = (spoke.config_version or 0) + 1
+    store.save_spoke(spoke)
+    store.enqueue_command(
+        Command(
+            spoke_id=spoke_id,
+            tenant_id=resolved_tenant_id,
+            type="config_update",
+            payload={**next_config, "__config_version": spoke.config_version},
+            expires_at=_now() + timedelta(minutes=10),
+        )
+    )
+    return {"ok": True, "config_version": spoke.config_version}
 
 
 @router.post("/{tenant_id}/spokes/{spoke_id}/telemetry")
