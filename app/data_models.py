@@ -72,6 +72,7 @@ class Tenant(BaseModel):
     })
     hub_config_enabled: bool = False
     hub_config: dict[str, Any] = Field(default_factory=dict)
+    onboarding_psk_enc: str = ""  # Encrypted PSK for spoke auto-approval
     created_at: datetime = Field(default_factory=_now)
     created_by: str = ""
 

@@ -293,6 +293,7 @@ class RegisterPayload(BaseModel):
     label: str = ""
     spoke_name: str = ""
     tenant_id_hint: str = ""  # Optional: tenant ID pre-entered on spoke
+    onboarding_psk: str = ""  # Optional: PSK for auto-approval without human review
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -376,6 +377,60 @@ def register_spoke(payload: RegisterPayload, request: Request):
             "tenant_id": tenant_id,
             "api_key": api_key,
         }
+
+    # ── PSK auto-approve ──────────────────────────────────────────────────────
+    # If the spoke supplies tenant_id_hint + spoke_name + onboarding_psk and the
+    # PSK matches what the tenant has configured, skip the approval queue entirely.
+    psk_provided = payload.onboarding_psk.strip()
+    if tenant_hint and spoke_name and psk_provided:
+        tenant_obj = store.get_tenant(tenant_hint)
+        psk_valid = False
+        if tenant_obj and tenant_obj.onboarding_psk_enc:
+            try:
+                psk_valid = (decrypt_str(tenant_obj.onboarding_psk_enc) == psk_provided)
+            except Exception:
+                psk_valid = False
+
+        if psk_valid:
+            _ensure_name_available_for_tenant(
+                spoke_name, tenant_hint,
+                hostname=payload.hostname,
+                exclude_spoke_id=requested_spoke_id,
+                log_context={"spoke_id": requested_spoke_id, "ip": client_ip},
+            )
+            from ..data_models import Spoke as SpokeModel
+            plain_key = generate_api_key()
+            auto_spoke = SpokeModel(
+                **({"id": requested_spoke_id} if requested_spoke_id else {}),
+                tenant_id=tenant_hint,
+                hostname=payload.hostname,
+                label=payload.label or payload.hostname,
+                spoke_name=spoke_name,
+                seed_config=payload.config,
+                config=payload.config.copy(),
+                status="approved",
+                api_key_enc=encrypt_str(plain_key),
+            )
+            store.save_spoke(auto_spoke)
+            _reg_log_append("psk_auto_approved", hostname=payload.hostname,
+                            spoke_name=spoke_name, spoke_id=auto_spoke.id,
+                            tenant_id=tenant_hint, ip=client_ip)
+            asyncio.create_task(ws_broadcast({
+                "type": "spoke_approved",
+                "spoke_id": auto_spoke.id,
+                "tenant_id": tenant_hint,
+                "auto": True,
+            }))
+            return {
+                "spoke_id": auto_spoke.id,
+                "status": "approved",
+                "tenant_id": tenant_hint,
+                "api_key": plain_key,
+            }
+        else:
+            _reg_log_append("psk_rejected", hostname=payload.hostname,
+                            spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip)
+    # ── End PSK auto-approve ──────────────────────────────────────────────────
 
     existing = store.get_pending_spoke(requested_spoke_id) if requested_spoke_id else None
     if not existing:

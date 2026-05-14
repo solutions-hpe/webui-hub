@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from .. import auth, store
 from ..aruba import ArubaClient
 from ..config import get_settings
-from ..crypto import encrypt_dict, encrypt_str, generate_api_key
+from ..crypto import encrypt_dict, encrypt_str, decrypt_str, generate_api_key
 from ..data_models import Command, Spoke, Tenant, User
 
 router = APIRouter()
@@ -304,6 +304,49 @@ def update_tenant_notification_config(
 class HubConfigRequest(BaseModel):
     hub_config_enabled: bool
     hub_config: dict[str, Any] = Field(default_factory=dict)
+
+
+# ── Onboarding PSK ────────────────────────────────────────────────────────────
+
+@router.get("/tenant/{tenant_id}/onboarding-psk")
+def get_onboarding_psk_status(
+    tenant_id: str = Depends(_require_tenant_admin),
+):
+    """Return whether an onboarding PSK is configured for this tenant (never returns the value)."""
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"has_psk": bool(tenant.onboarding_psk_enc)}
+
+
+@router.post("/tenant/{tenant_id}/onboarding-psk")
+def generate_onboarding_psk(
+    tenant_id: str = Depends(_require_tenant_admin),
+):
+    """Generate (or regenerate) an onboarding PSK for this tenant.
+
+    Returns the plain PSK exactly once — store it securely.
+    Auto-approves any spoke that registers with the correct tenant_id + spoke_name + PSK.
+    """
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    plain_psk = generate_api_key()  # 32-byte URL-safe random token
+    tenant.onboarding_psk_enc = encrypt_str(plain_psk)
+    store.save_tenant(tenant)
+    return {"psk": plain_psk, "warning": "Store this value securely — it will not be shown again."}
+
+
+@router.delete("/tenant/{tenant_id}/onboarding-psk", status_code=204)
+def revoke_onboarding_psk(
+    tenant_id: str = Depends(_require_tenant_admin),
+):
+    """Revoke the onboarding PSK. Spokes can no longer auto-approve until a new one is generated."""
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    tenant.onboarding_psk_enc = ""
+    store.save_tenant(tenant)
 
 
 @router.get("/tenant/{tenant_id}/hub-config")
