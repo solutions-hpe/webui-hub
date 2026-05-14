@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, PendingSpoke, User
-from ..ws import push_spoke_commands, register_spoke, unregister_spoke, ws_broadcast
+from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, unregister_spoke, ws_broadcast
 
 # Imported lazily inside the handler to avoid a circular import at module load time.
 # _handle_spoke_backup_progress(spoke_id, payload_dict) is defined in backups.py.
@@ -521,7 +521,7 @@ async def spoke_websocket(
         await websocket.close(code=4401 if exc.status_code == 401 else 4403, reason=str(exc.detail))
         return
 
-    await register_spoke(websocket, tenant_id, spoke_id)
+    await ws_register_spoke(websocket, tenant_id, spoke_id)
     await push_spoke_commands(tenant_id, spoke_id)
     try:
         await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
