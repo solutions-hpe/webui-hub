@@ -322,11 +322,15 @@ def register_spoke(payload: RegisterPayload, request: Request):
                         spoke_id=requested_spoke_id, ip=client_ip)
         requested_spoke_id = ""
 
-    # Validate tenant hint if provided
-    if tenant_hint and not store.get_tenant(tenant_hint):
-        _reg_log_append("invalid_tenant_hint", hostname=payload.hostname,
-                        spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip)
-        tenant_hint = ""  # Silently ignore invalid tenant IDs
+    # Validate tenant hint if provided; resolve by id or name
+    if tenant_hint:
+        resolved = store.get_tenant_by_hint(tenant_hint)
+        if resolved:
+            tenant_hint = resolved.id  # normalize to canonical id
+        else:
+            _reg_log_append("invalid_tenant_hint", hostname=payload.hostname,
+                            spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip)
+            tenant_hint = ""  # Silently ignore invalid tenant IDs
 
     approved = store.get_approved_spoke_by_id(requested_spoke_id) if requested_spoke_id else None
     if not approved:
@@ -397,7 +401,7 @@ def register_spoke(payload: RegisterPayload, request: Request):
     # PSK matches what the tenant has configured, skip the approval queue entirely.
     psk_provided = payload.onboarding_psk.strip()
     if tenant_hint and spoke_name and psk_provided:
-        tenant_obj = store.get_tenant(tenant_hint)
+        tenant_obj = store.get_tenant(tenant_hint)  # tenant_hint already normalized to id above
         psk_valid = False
         if tenant_obj and tenant_obj.onboarding_psk_enc:
             try:
