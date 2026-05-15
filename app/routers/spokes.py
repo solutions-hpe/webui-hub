@@ -17,7 +17,7 @@ from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, unreg
 
 # Auth/credential keys that must never be stored or pushed by the hub
 _AUTH_KEYS: set[str] = {
-    "admin_password", "auth_provider",
+    "admin_password", "auth_provider", "local_users",
     "auth_ldap_url", "auth_ldap_bind_dn", "auth_ldap_bind_password",
     "auth_ldap_user_base", "auth_ldap_user_filter",
     "auth_ldap_group_admin", "auth_ldap_group_viewer",

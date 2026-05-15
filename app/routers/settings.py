@@ -1,6 +1,7 @@
 """Tenant settings management endpoints."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
@@ -247,6 +248,29 @@ def _processing_mode_from_payload(payload: ProcessingModeUpdateRequest) -> Proce
     return ProcessingMode(**payload.model_dump())
 
 
+async def _save_config_updates_to_approved_spokes(tenant_id: str, spokes: list[Spoke]) -> None:
+    # save_spoke() is synchronous and rewrites spoke state on disk, so persist all
+    # version bumps before enqueuing config_update commands that read them back.
+    await asyncio.gather(*[asyncio.to_thread(store.save_spoke, spoke) for spoke in spokes])
+    for spoke in spokes:
+        store.ensure_config_update_command(tenant_id, spoke.id)
+
+
+def _push_config_updates_to_approved_spokes(tenant_id: str) -> int:
+    spokes = []
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        spokes.append(spoke)
+
+    if not spokes:
+        return 0
+
+    asyncio.run(_save_config_updates_to_approved_spokes(tenant_id, spokes))
+    return len(spokes)
+
+
 @router.get("/acme/status")
 def get_acme_status(current_user: User = Depends(auth.get_current_user)):
     _require_any_admin(current_user)
@@ -295,13 +319,7 @@ def patch_tenant_settings(
 
     pushed_count = 0
     if changed:
-        for spoke in store.list_spokes(tenant_id):
-            if spoke.status != "approved":
-                continue
-            spoke.config_version += 1
-            store.save_spoke(spoke)
-            store.ensure_config_update_command(tenant_id, spoke.id)
-            pushed_count += 1
+        pushed_count = _push_config_updates_to_approved_spokes(tenant_id)
 
     return {
         "use_all_dongles": bool((tenant.hub_config or {}).get("use_all_dongles", False)),
@@ -321,12 +339,7 @@ def update_aruba_settings(
     tenant.aruba_config_enc = encrypt_dict(cfg)
     tenant.aruba_cid = payload.customer_id or tenant.aruba_cid
     store.save_tenant(tenant)
-    for spoke in store.list_spokes(tenant_id):
-        if spoke.status != "approved":
-            continue
-        spoke.config_version += 1
-        store.save_spoke(spoke)
-        store.ensure_config_update_command(tenant_id, spoke.id)
+    _push_config_updates_to_approved_spokes(tenant_id)
     return _serialize_aruba_config(tenant)
 
 
@@ -340,12 +353,7 @@ def update_notification_settings(
     tenant = _get_tenant(tenant_id)
     tenant.notification_config_enc = encrypt_dict(_normalize_notification_config(payload))
     store.save_tenant(tenant)
-    for spoke in store.list_spokes(tenant_id):
-        if spoke.status != "approved":
-            continue
-        spoke.config_version += 1
-        store.save_spoke(spoke)
-        store.ensure_config_update_command(tenant_id, spoke.id)
+    _push_config_updates_to_approved_spokes(tenant_id)
     return _serialize_notification_config(tenant)
 
 
@@ -413,14 +421,7 @@ def update_tenant_processing_modes(
     tenant.processing_modes = updated
     store.save_tenant(tenant)
 
-    pushed_count = 0
-    for spoke in store.list_spokes(tenant_id):
-        if spoke.status != "approved":
-            continue
-        spoke.config_version += 1
-        store.save_spoke(spoke)
-        store.ensure_config_update_command(tenant_id, spoke.id)
-        pushed_count += 1
+    pushed_count = _push_config_updates_to_approved_spokes(tenant_id)
 
     return {"processing_modes": tenant.processing_modes, "pushed_to_spokes": pushed_count}
 
