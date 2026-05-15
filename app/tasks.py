@@ -38,6 +38,13 @@ spoke_online: dict[str, dict[str, bool]] = {}
 # Hub-side Aruba Central status cache: tenant_id → polled status
 _hub_central_status: dict[str, dict] = {}
 _cache_updated_at: dict[str, float] = {}
+# Per-tenant rolling 60-min client count samples: tenant_id → {wsite → [(ts, count), ...]}
+_hub_client_samples: dict[str, dict[str, list[tuple[float, int]]]] = {}
+_hub_client_baseline: dict[str, dict[str, dict[str, float]]] = {}
+
+HUB_CLIENT_COUNT_MIN_SAMPLES = 3
+HUB_CLIENT_COUNT_DROP_PCT = 25.0
+HUB_CLIENT_WINDOW_SECS = 3600
 
 
 def _set_hub_central_status(tenant_id: str, payload: dict[str, Any]) -> None:
@@ -277,6 +284,129 @@ def _get_aruba_client(tenant_id: str) -> ArubaClient | None:
         return None
 
 
+def _load_hub_client_baseline(tenant_id: str) -> None:
+    if tenant_id in _hub_client_baseline:
+        return
+    tenant = store.get_tenant(tenant_id)
+    saved = ((tenant.hub_config or {}).get("hub_client_baseline", {}) if tenant else {}) or {}
+    baseline: dict[str, dict[str, float]] = {}
+    if isinstance(saved, dict):
+        for wsite, info in saved.items():
+            if not isinstance(info, dict):
+                continue
+            try:
+                hourly_avg = float(info.get("hourly_avg") or 0.0)
+                recorded_at = float(info.get("recorded_at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            baseline[str(wsite)] = {"hourly_avg": hourly_avg, "recorded_at": recorded_at}
+    _hub_client_baseline[tenant_id] = baseline
+
+
+def _refresh_hub_client_baseline(tenant_id: str) -> None:
+    tenant_samples = _hub_client_samples.get(tenant_id, {})
+    baseline = _hub_client_baseline.setdefault(tenant_id, {})
+    for wsite, samples in tenant_samples.items():
+        if len(samples) < HUB_CLIENT_COUNT_MIN_SAMPLES:
+            continue
+        baseline[wsite] = {
+            "hourly_avg": sum(sample[1] for sample in samples) / len(samples),
+            "recorded_at": samples[-1][0],
+        }
+
+
+def _persist_hub_client_baseline(tenant_id: str) -> None:
+    tenant = store.get_tenant(tenant_id)
+    if not tenant:
+        return
+    baseline = _hub_client_baseline.get(tenant_id, {})
+    payload = {
+        str(wsite): {
+            "hourly_avg": float(info.get("hourly_avg") or 0.0),
+            "recorded_at": float(info.get("recorded_at") or 0.0),
+        }
+        for wsite, info in baseline.items()
+        if isinstance(info, dict)
+    }
+    hub_config = dict(tenant.hub_config or {})
+    if hub_config.get("hub_client_baseline") == payload:
+        return
+    hub_config["hub_client_baseline"] = payload
+    tenant.hub_config = hub_config
+    store.save_tenant(tenant)
+
+
+def _hub_client_count_payload(tenant_id: str, site_mappings: dict[str, str]) -> dict[str, Any]:
+    _load_hub_client_baseline(tenant_id)
+    tenant_samples = _hub_client_samples.get(tenant_id, {})
+    baseline = _hub_client_baseline.get(tenant_id, {})
+    result: dict[str, Any] = {}
+    for wsite, samples in tenant_samples.items():
+        if not samples:
+            continue
+        current = samples[-1][1]
+        site_name = site_mappings.get(wsite, wsite)
+        if len(samples) < HUB_CLIENT_COUNT_MIN_SAMPLES:
+            saved = baseline.get(wsite)
+            if saved:
+                avg = float(saved.get("hourly_avg") or 0.0)
+                drop_pct = max(0.0, (avg - current) / avg * 100.0) if avg >= 1 else 0.0
+                status = "DEGRADED" if drop_pct >= HUB_CLIENT_COUNT_DROP_PCT else "OK"
+                result[wsite] = {
+                    "site_name": site_name,
+                    "current": current,
+                    "hourly_avg": avg,
+                    "drop_pct": drop_pct,
+                    "status": status,
+                    "ts": samples[-1][0],
+                    "baseline_stale": True,
+                    "baseline_recorded_at": saved.get("recorded_at"),
+                }
+            else:
+                result[wsite] = {
+                    "site_name": site_name,
+                    "current": current,
+                    "hourly_avg": current,
+                    "drop_pct": 0.0,
+                    "status": "NO_DATA",
+                    "ts": samples[-1][0],
+                    "baseline_stale": False,
+                }
+            continue
+        avg = sum(sample[1] for sample in samples) / len(samples)
+        drop_pct = max(0.0, (avg - current) / avg * 100.0) if avg >= 1 else 0.0
+        status = "DEGRADED" if drop_pct >= HUB_CLIENT_COUNT_DROP_PCT else "OK"
+        result[wsite] = {
+            "site_name": site_name,
+            "current": current,
+            "hourly_avg": avg,
+            "drop_pct": drop_pct,
+            "status": status,
+            "ts": samples[-1][0],
+            "baseline_stale": False,
+        }
+    return result
+
+
+async def hub_baseline_saver() -> None:
+    await asyncio.sleep(HUB_CLIENT_WINDOW_SECS)
+    while True:
+        try:
+            active_tenant_ids = {tenant.id for tenant in store.list_tenants()}
+            for tenant_id in list(_hub_client_baseline):
+                if tenant_id not in active_tenant_ids:
+                    _hub_client_baseline.pop(tenant_id, None)
+                    _hub_client_samples.pop(tenant_id, None)
+                    continue
+                _refresh_hub_client_baseline(tenant_id)
+                _persist_hub_client_baseline(tenant_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Hub baseline saver error: %s", exc)
+        await asyncio.sleep(HUB_CLIENT_WINDOW_SECS)
+
+
 async def aruba_poller() -> None:
     """Poll Aruba Central every 5 minutes per tenant. Centralized or push config to islands."""
     await asyncio.sleep(60)
@@ -311,7 +441,16 @@ async def aruba_poller() -> None:
                     _clear_hub_central_status(tenant.id)
                     continue
                 if not client or not client.is_configured():
-                    _set_hub_central_status(tenant.id, {"spokes": {}, "token_valid": False, "token_state": "not_configured"})
+                    _set_hub_central_status(
+                        tenant.id,
+                        {
+                            "spokes": {},
+                            "token_valid": False,
+                            "token_state": "not_configured",
+                            "client_count_status": {},
+                            "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
+                        },
+                    )
                     continue
 
                 try:
@@ -324,7 +463,22 @@ async def aruba_poller() -> None:
                             "token_valid": False,
                             "token_state": "error",
                             "error": str(exc),
+                            "client_count_status": {},
+                            "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },
+                    )
+                    await ws_broadcast(
+                        {
+                            "type": "aruba_update",
+                            "tenant_id": tenant.id,
+                            "findings": [],
+                            "status": {},
+                            "wireless_clients": {},
+                            "hardware_alerts": [],
+                            "client_count_status": {},
+                            "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
+                            "token_state": {"state": "error", "detail": str(exc)},
+                        }
                     )
                     for spoke in centralized_spokes:
                         store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
@@ -338,129 +492,122 @@ async def aruba_poller() -> None:
                     store.append_audit(
                         _audit(spoke.id, tenant.id, "aruba_poll", "centralized", "success", f"{len(findings)} findings")
                     )
-                    await ws_broadcast(
-                        {
-                            "type": "aruba_update",
-                            "tenant_id": tenant.id,
-                            "spoke_id": spoke.id,
-                            "findings": finding_payload,
-                        }
-                    )
 
                 try:
                     site_raw: dict[str, dict[str, Any]] = {}
-                    spoke_inputs: dict[str, dict[str, Any]] = {}
-                    unique_sites: set[str] = set()
-                    hw_check_ids: set[str] = set()
-                    for spoke in centralized_spokes:
-                        central = spoke.telemetry.get("central", {}) if isinstance(spoke.telemetry, dict) else {}
-                        site_mappings = central.get("site_mappings", {}) if isinstance(central.get("site_mappings"), dict) else {}
-                        monitored_checks = central.get("monitored_checks", []) if isinstance(central.get("monitored_checks"), list) else []
-                        hardware_checks = central.get("hardware_checks", []) if isinstance(central.get("hardware_checks"), list) else []
-                        spoke_inputs[spoke.id] = {
-                            "site_mappings": dict(site_mappings),
-                            "monitored_checks": list(monitored_checks),
-                            "hardware_checks": list(hardware_checks),
-                        }
-                        unique_sites.update(
-                            str(site_name).strip()
-                            for site_name in site_mappings.values()
-                            if str(site_name).strip()
-                        )
-                        hw_check_ids.update(
-                            str(check.get("id") or "").strip()
-                            for check in hardware_checks
-                            if isinstance(check, dict) and str(check.get("id") or "").strip()
-                        )
+                    spokes_status: dict[str, dict[str, Any]] = {}
+                    hub_sites_cfg = store.get_tenant_central_sites_config(tenant.id)
+                    hub_site_mappings = hub_sites_cfg.get("site_mappings", {}) if isinstance(hub_sites_cfg.get("site_mappings"), dict) else {}
+                    hub_monitored_checks = hub_sites_cfg.get("monitored_checks", []) if isinstance(hub_sites_cfg.get("monitored_checks"), list) else []
+                    hub_hardware_checks = hub_sites_cfg.get("hardware_checks", []) if isinstance(hub_sites_cfg.get("hardware_checks"), list) else []
+                    unique_sites = {
+                        str(site_name).strip()
+                        for site_name in hub_site_mappings.values()
+                        if str(site_name).strip()
+                    }
+                    hw_check_ids = {
+                        str(check.get("id") or "").strip()
+                        for check in hub_hardware_checks
+                        if isinstance(check, dict) and str(check.get("id") or "").strip()
+                    }
 
                     for central_site in unique_sites:
                         site_raw[central_site] = await client.poll_site_data(central_site, hw_check_ids=hw_check_ids)
 
                     now = time.time()
-                    spokes_status: dict[str, dict[str, Any]] = {}
-                    for spoke in centralized_spokes:
-                        spoke_input = spoke_inputs.get(spoke.id, {})
-                        site_mappings = spoke_input.get("site_mappings", {})
-                        monitored_checks = spoke_input.get("monitored_checks", [])
-                        hardware_checks = spoke_input.get("hardware_checks", [])
-                        status: dict[str, dict[str, Any]] = {}
-                        wireless_clients: dict[str, int] = {}
-                        hardware_alerts: list[dict[str, Any]] = []
-                        hw_sites: dict[str, dict[str, list[str]]] = {
-                            str(check.get("id")): {}
-                            for check in hardware_checks
-                            if isinstance(check, dict) and str(check.get("id") or "").strip()
-                        }
+                    cutoff = now - HUB_CLIENT_WINDOW_SECS
+                    _load_hub_client_baseline(tenant.id)
+                    tenant_samples = _hub_client_samples.setdefault(tenant.id, {})
+                    for wsite, central_site in hub_site_mappings.items():
+                        raw = site_raw.get(central_site, {})
+                        wl_count = int(raw.get("client_count") or raw.get("wireless_clients") or 0)
+                        samples = tenant_samples.setdefault(wsite, [])
+                        samples.append((now, wl_count))
+                        tenant_samples[wsite] = [sample for sample in samples if sample[0] >= cutoff]
+                    _refresh_hub_client_baseline(tenant.id)
+                    client_count_status = _hub_client_count_payload(tenant.id, hub_site_mappings)
 
-                        for wsite, central_site in site_mappings.items():
-                            raw = site_raw.get(central_site, {})
-                            alert_type_counts = raw.get("alert_type_counts", {}) if isinstance(raw.get("alert_type_counts"), dict) else {}
-                            insight_cat_counts = raw.get("insight_cat_counts", {}) if isinstance(raw.get("insight_cat_counts"), dict) else {}
-                            site_hw_devices = raw.get("hw_devices", {}) if isinstance(raw.get("hw_devices"), dict) else {}
-                            site_status: dict[str, Any] = {}
+                    aggregated_status: dict[str, dict[str, Any]] = {}
+                    aggregated_wireless_clients: dict[str, int] = {}
+                    hw_sites: dict[str, dict[str, list[str]]] = {
+                        str(check.get("id")): {}
+                        for check in hub_hardware_checks
+                        if isinstance(check, dict) and str(check.get("id") or "").strip()
+                    }
 
-                            for check in monitored_checks:
-                                if not isinstance(check, dict):
-                                    continue
-                                check_type = str(check.get("type") or "")
-                                check_id = str(check.get("id") or "").strip()
-                                check_name = str(check.get("name") or check_id)
-                                if not check_id:
-                                    continue
-                                if check_type == "alert":
-                                    count = int(alert_type_counts.get(check_id, 0) or 0)
-                                elif check_type == "insight":
-                                    count = int(insight_cat_counts.get(check_id, 0) or 0)
-                                else:
-                                    continue
-                                site_status[check_id] = {
-                                    "status": "OK" if count > 0 else "ERROR",
-                                    "count": count,
-                                    "check_name": check_name,
-                                    "check_type": check_type,
-                                    "ts": now,
-                                }
+                    for wsite, central_site in hub_site_mappings.items():
+                        raw = site_raw.get(central_site, {})
+                        alert_type_counts = raw.get("alert_type_counts", {}) if isinstance(raw.get("alert_type_counts"), dict) else {}
+                        insight_cat_counts = raw.get("insight_cat_counts", {}) if isinstance(raw.get("insight_cat_counts"), dict) else {}
+                        site_hw_devices = raw.get("hw_devices", {}) if isinstance(raw.get("hw_devices"), dict) else {}
+                        site_status: dict[str, Any] = {}
 
-                            status[wsite] = site_status
-                            wireless_clients[wsite] = int(raw.get("wireless_clients") or 0)
+                        for check in hub_monitored_checks:
+                            if not isinstance(check, dict):
+                                continue
+                            check_type = str(check.get("type") or "")
+                            check_id = str(check.get("id") or "").strip()
+                            check_name = str(check.get("name") or check_id)
+                            if not check_id:
+                                continue
+                            if check_type == "alert":
+                                count = int(alert_type_counts.get(check_id, 0) or 0)
+                            elif check_type == "insight":
+                                count = int(insight_cat_counts.get(check_id, 0) or 0)
+                            else:
+                                continue
+                            site_status[check_id] = {
+                                "status": "OK" if count > 0 else "ERROR",
+                                "count": count,
+                                "check_name": check_name,
+                                "check_type": check_type,
+                                "ts": now,
+                            }
 
-                            for check in hardware_checks:
-                                if not isinstance(check, dict):
-                                    continue
-                                check_id = str(check.get("id") or "").strip()
-                                if not check_id:
-                                    continue
-                                devices_for_check = site_hw_devices.get(check_id, {}) if isinstance(site_hw_devices.get(check_id), dict) else {}
-                                device_names = sorted(str(name).strip() for name in devices_for_check if str(name).strip())
-                                if device_names:
-                                    hw_sites.setdefault(check_id, {})[wsite] = device_names
+                        aggregated_status[wsite] = site_status
+                        aggregated_wireless_clients[wsite] = int(raw.get("wireless_clients") or raw.get("client_count") or 0)
 
-                        for check in hardware_checks:
+                        for check in hub_hardware_checks:
                             if not isinstance(check, dict):
                                 continue
                             check_id = str(check.get("id") or "").strip()
                             if not check_id:
                                 continue
-                            devices_by_site = hw_sites.get(check_id, {})
-                            hardware_alerts.append(
-                                {
-                                    "id": check_id,
-                                    "name": check.get("name") or check_id,
-                                    "device_type": check.get("device_type") or check_id,
-                                    "total": sum(len(devices) for devices in devices_by_site.values()),
-                                    "sites": {
-                                        wsite: {"site_name": site_mappings.get(wsite, wsite), "devices": devices}
-                                        for wsite, devices in devices_by_site.items()
-                                    },
-                                }
-                            )
+                            devices_for_check = site_hw_devices.get(check_id, {}) if isinstance(site_hw_devices.get(check_id), dict) else {}
+                            device_names = sorted(str(name).strip() for name in devices_for_check if str(name).strip())
+                            if device_names:
+                                hw_sites.setdefault(check_id, {})[wsite] = device_names
 
+                    aggregated_hardware_alerts: list[dict[str, Any]] = []
+                    for check in hub_hardware_checks:
+                        if not isinstance(check, dict):
+                            continue
+                        check_id = str(check.get("id") or "").strip()
+                        if not check_id:
+                            continue
+                        devices_by_site = hw_sites.get(check_id, {})
+                        aggregated_hardware_alerts.append(
+                            {
+                                "id": check_id,
+                                "name": check.get("name") or check_id,
+                                "device_type": check.get("device_type") or check_id,
+                                "total": sum(len(devices) for devices in devices_by_site.values()),
+                                "sites": {
+                                    wsite: {"site_name": hub_site_mappings.get(wsite, wsite), "devices": devices}
+                                    for wsite, devices in devices_by_site.items()
+                                },
+                            }
+                        )
+
+                    for spoke in centralized_spokes:
                         spokes_status[spoke.id] = {
-                            "status": status,
-                            "wireless_clients": wireless_clients,
-                            "hardware_alerts": hardware_alerts,
-                            "site_mappings": dict(site_mappings),
-                            "monitored_checks": list(monitored_checks),
+                            "status": dict(aggregated_status),
+                            "wireless_clients": dict(aggregated_wireless_clients),
+                            "hardware_alerts": list(aggregated_hardware_alerts),
+                            "client_count_status": dict(client_count_status),
+                            "site_mappings": dict(hub_site_mappings),
+                            "monitored_checks": list(hub_monitored_checks),
+                            "hardware_checks": list(hub_hardware_checks),
                         }
 
                     _set_hub_central_status(
@@ -469,7 +616,22 @@ async def aruba_poller() -> None:
                             "spokes": spokes_status,
                             "token_valid": True,
                             "token_state": "connected",
+                            "client_count_status": client_count_status,
+                            "central_sites_config": hub_sites_cfg,
                         },
+                    )
+                    await ws_broadcast(
+                        {
+                            "type": "aruba_update",
+                            "tenant_id": tenant.id,
+                            "findings": finding_payload,
+                            "status": aggregated_status,
+                            "wireless_clients": aggregated_wireless_clients,
+                            "hardware_alerts": aggregated_hardware_alerts,
+                            "client_count_status": client_count_status,
+                            "central_sites_config": hub_sites_cfg,
+                            "token_state": {"state": "connected", "detail": ""},
+                        }
                     )
                 except Exception as exc:
                     _set_hub_central_status(
@@ -479,7 +641,22 @@ async def aruba_poller() -> None:
                             "token_valid": False,
                             "token_state": "error",
                             "error": str(exc),
+                            "client_count_status": {},
+                            "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },
+                    )
+                    await ws_broadcast(
+                        {
+                            "type": "aruba_update",
+                            "tenant_id": tenant.id,
+                            "findings": finding_payload,
+                            "status": {},
+                            "wireless_clients": {},
+                            "hardware_alerts": [],
+                            "client_count_status": {},
+                            "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
+                            "token_state": {"state": "error", "detail": str(exc)},
+                        }
                     )
                     for spoke in centralized_spokes:
                         store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
@@ -487,6 +664,10 @@ async def aruba_poller() -> None:
             for tenant_id in list(_hub_central_status):
                 if tenant_id not in active_tenant_ids:
                     _clear_hub_central_status(tenant_id)
+            for tenant_id in list(_hub_client_samples):
+                if tenant_id not in active_tenant_ids:
+                    _hub_client_samples.pop(tenant_id, None)
+                    _hub_client_baseline.pop(tenant_id, None)
             for tenant_id in list(_aruba_clients):
                 if tenant_id not in active_tenant_ids:
                     _aruba_clients.pop(tenant_id, None)

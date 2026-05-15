@@ -46,6 +46,12 @@ class CentralUpdateRequest(BaseModel):
     hub_central_config: CentralConfigPayload = Field(default_factory=CentralConfigPayload)
 
 
+class CentralSitesConfigPayload(BaseModel):
+    site_mappings: dict[str, str] = Field(default_factory=dict)
+    monitored_checks: list[dict[str, Any]] = Field(default_factory=list)
+    hardware_checks: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class SimulationConfUpdateRequest(BaseModel):
     content: str = ""
 
@@ -417,12 +423,29 @@ def _central_mode(tenant: Tenant) -> str:
 
 
 
+def _normalize_central_sites_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    raw = config if isinstance(config, dict) else {}
+    site_mappings = raw.get("site_mappings") if isinstance(raw.get("site_mappings"), dict) else {}
+    monitored_checks = raw.get("monitored_checks") if isinstance(raw.get("monitored_checks"), list) else []
+    hardware_checks = raw.get("hardware_checks") if isinstance(raw.get("hardware_checks"), list) else []
+    return {
+        "site_mappings": {
+            str(wsite).strip(): str(site_name).strip()
+            for wsite, site_name in site_mappings.items()
+            if str(wsite).strip() and str(site_name).strip()
+        },
+        "monitored_checks": [check for check in monitored_checks if isinstance(check, dict)],
+        "hardware_checks": [check for check in hardware_checks if isinstance(check, dict)],
+    }
+
+
 def _aggregate_central_payload(tenant_id: str) -> dict[str, Any]:
     tenant = _get_tenant(tenant_id)
     spokes = _approved_spokes(tenant_id)
     return {
         "tenant_id": tenant_id,
         "hub_central_config": _serialize_hub_central_config(tenant),
+        "central_sites_config": _normalize_central_sites_config(store.get_tenant_central_sites_config(tenant_id)),
         "mode": _central_mode(tenant),
         "spokes": [
             {
@@ -781,6 +804,27 @@ def get_aggregate_central(
     return _aggregate_central_payload(resolved_tenant_id)
 
 
+@router.get("/{tenant_id}/aggregate/central-sites-config")
+def get_tenant_aggregate_central_sites_config(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    return _normalize_central_sites_config(store.get_tenant_central_sites_config(resolved_tenant_id))
+
+
+@router.post("/{tenant_id}/aggregate/central-sites-config")
+def set_tenant_aggregate_central_sites_config(
+    tenant_id: str,
+    payload: CentralSitesConfigPayload,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    config = _normalize_central_sites_config(payload.model_dump())
+    store.set_tenant_central_sites_config(resolved_tenant_id, config)
+    return config
+
+
 @router.get("/aggregate/central-status")
 async def get_aggregate_central_status(
     tenant_id: Optional[str] = Query(default=None),
@@ -801,6 +845,8 @@ async def get_aggregate_central_status(
         tenant_data = {} if is_stale else _hub_central_status.get(resolved_tenant_id, {})
         token_valid = False if is_stale else bool(tenant_data.get("token_valid", False))
         token_state = "stale" if is_stale else tenant_data.get("token_state", "not_configured")
+        client_count_status = {} if is_stale else tenant_data.get("client_count_status", {})
+        central_sites_config = _normalize_central_sites_config(store.get_tenant_central_sites_config(resolved_tenant_id))
         spokes_out = []
         spoke_map = {spoke.id: spoke for spoke in spokes}
         for spoke_id, spoke_data in tenant_data.get("spokes", {}).items():
@@ -830,22 +876,30 @@ async def get_aggregate_central_status(
                 "spoke_online": _is_online(spoke) if spoke else False,
                 "sites": sites,
                 "hardware_alerts": hw_alerts,
+                "client_count_status": spoke_data.get("client_count_status", client_count_status),
             })
         return {
             "tenant_id": resolved_tenant_id,
             "mode": "centralized",
             "token_valid": token_valid,
             "token_state": token_state,
+            "central_sites_config": central_sites_config,
+            "client_count_status": client_count_status,
             "spokes": spokes_out,
         }
 
     spokes_out = []
+    aggregate_client_count_status: dict[str, Any] = {}
     for spoke in spokes:
         central = _central_telemetry(spoke)
         site_mappings = central.get("site_mappings", {})
         status = central.get("status", {})
         wireless = central.get("wireless_clients", {})
         hw_alerts = central.get("hardware_alerts", [])
+        client_count_status = central.get("client_count_status", {}) if isinstance(central.get("client_count_status"), dict) else {}
+        for wsite, info in client_count_status.items():
+            if wsite not in aggregate_client_count_status and isinstance(info, dict):
+                aggregate_client_count_status[wsite] = info
         token_valid_spoke = bool(central.get("token_valid", False))
         token_state_spoke = central.get("token_state", {})
         sites = []
@@ -871,12 +925,14 @@ async def get_aggregate_central_status(
             "token_state": token_state_spoke,
             "sites": sites,
             "hardware_alerts": hw_alerts,
+            "client_count_status": client_count_status,
         })
     return {
         "tenant_id": resolved_tenant_id,
         "mode": "distributed",
         "token_valid": None,
         "token_state": None,
+        "client_count_status": aggregate_client_count_status,
         "spokes": spokes_out,
     }
 

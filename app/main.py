@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(tasks.auto_recovery_check()),
         asyncio.create_task(tasks.schedule_check()),
         asyncio.create_task(tasks.aruba_poller()),
+        asyncio.create_task(tasks.hub_baseline_saver()),
         asyncio.create_task(tasks.check_state_engine()),
         asyncio.create_task(tasks.maintenance_loop()),
         asyncio.create_task(tasks.acme_renewal_check()),

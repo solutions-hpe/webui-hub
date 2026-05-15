@@ -258,6 +258,7 @@ class ArubaClient:
             return {
                 "site_health": None,
                 "wireless_clients": 0,
+                "client_count": 0,
                 "alert_type_counts": {},
                 "insight_cat_counts": {},
                 "hw_devices": {},
@@ -330,6 +331,7 @@ class ArubaClient:
                 return {
                     "site_health": site_health,
                     "wireless_clients": wireless_clients,
+                    "client_count": wireless_clients,
                     "alert_type_counts": alert_type_counts,
                     "insight_cat_counts": insight_cat_counts,
                     "hw_devices": hw_devices,
@@ -402,6 +404,7 @@ class ArubaClient:
         return {
             "site_health": site_health,
             "wireless_clients": wireless_clients,
+            "client_count": wireless_clients,
             "alert_type_counts": alert_type_counts,
             "insight_cat_counts": insight_cat_counts,
             "hw_devices": hw_devices,

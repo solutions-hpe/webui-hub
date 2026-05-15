@@ -265,7 +265,7 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
         "status": spoke_data.get("status", {}),
         "wireless_clients": spoke_data.get("wireless_clients", {}),
         "hardware_alerts": spoke_data.get("hardware_alerts", []),
-        "client_count_status": {},
+        "client_count_status": spoke_data.get("client_count_status", tenant_data.get("client_count_status", {})),
         "token_valid": token_valid,
         "token_state": {
             "state": token_state_str if token_valid else "not_configured",
@@ -273,6 +273,7 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
         },
         "site_mappings": spoke_data.get("site_mappings", {}),
         "monitored_checks": spoke_data.get("monitored_checks", []),
+        "hardware_checks": spoke_data.get("hardware_checks", []),
     }
 
 

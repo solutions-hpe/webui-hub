@@ -221,6 +221,18 @@ def get_tenant_by_hint(hint: str) -> Optional[Tenant]:
     return None
 
 
+def get_tenant_central_sites_config(tenant_id: str) -> dict[str, Any]:
+    tenant = get_tenant(tenant_id)
+    return dict(tenant.central_sites_config or {}) if tenant else {}
+
+
+def set_tenant_central_sites_config(tenant_id: str, config: dict[str, Any]) -> None:
+    tenant = get_tenant(tenant_id)
+    if tenant:
+        tenant.central_sites_config = dict(config or {})
+        save_tenant(tenant)
+
+
 def list_tenants() -> list[Tenant]:
     with _lock:
         return _load_tenants()
