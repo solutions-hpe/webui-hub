@@ -842,6 +842,30 @@ async def update_spokes_via_agent(
     return {"ok": True, "queued": len(spokes), "spoke_ids": [s.id for s in spokes]}
 
 
+@router.post("/{tenant_id}/update-spoke-servers")
+async def force_update_spoke_servers(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Send self_update directly to all spokes — bypasses agent relay.
+    Use this to deploy new spoke server.py before agents can relay commands."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spokes = [s for s in store.list_spokes(resolved_tenant_id) if s.status == "approved"]
+    if not spokes:
+        raise HTTPException(status_code=404, detail="No approved spokes found")
+    queued = 0
+    for spoke in spokes:
+        store.enqueue_command(Command(
+            spoke_id=spoke.id,
+            tenant_id=resolved_tenant_id,
+            type="self_update",
+            payload={},
+            expires_at=_now() + timedelta(minutes=10),
+        ))
+        queued += 1
+    return {"ok": True, "queued": queued, "spoke_ids": [s.id for s in spokes]}
+
+
 @router.post("/{tenant_id}/spokes/{spoke_id}/config")
 async def push_spoke_config(
     tenant_id: str,
