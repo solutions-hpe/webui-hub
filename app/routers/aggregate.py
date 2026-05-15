@@ -143,7 +143,14 @@ def _setting_toggle(value: Any) -> bool:
 
 
 
-def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, bool]:
+def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, int, bool]:
+    """Return (used_slots, total_slots, dongle_count, auto_provision).
+
+    used_slots   — provisioned VMs (active entries in usb_state)
+    total_slots  — effective capacity = min(dongle_count, usb_max_slots)
+    dongle_count — raw USB dongles physically present
+    auto_provision — whether auto-provision is enabled on this spoke
+    """
     proxmox = _telemetry_dict(spoke, "proxmox")
     api_server = _telemetry_dict(spoke, "api_server")
     usb_devices = _telemetry_list(spoke, "usb_devices") or (proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else [])
@@ -153,8 +160,14 @@ def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, bool]:
         1 for entry in usb_state
         if isinstance(entry, dict) and entry.get("prov_status") in ("active", "provisioning", "tearing_down", "missing")
     ) if usb_state else 0
+    # Dongle count = physically present USB devices reported by the agent
+    present_usb = proxmox.get("present_usb")
+    if isinstance(present_usb, list):
+        dongle_count = len(present_usb)
+    else:
+        dongle_count = _coerce_int(proxmox.get("usb_count") or 0, 0, minimum=0)
     spoke_config = spoke.config or {}
-    total_slots = _coerce_int(
+    usb_max_slots = _coerce_int(
         spoke_config.get("usb_max_slots")
         or api_server.get("usb_max_slots")
         or proxmox.get("usb_max_slots")
@@ -162,12 +175,18 @@ def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, bool]:
         0,
         minimum=0,
     )
+    # Effective capacity: if max_slots is configured, cap at min(dongles, max_slots);
+    # otherwise fall back to raw dongle count.
+    if usb_max_slots > 0:
+        total_slots = min(dongle_count, usb_max_slots)
+    else:
+        total_slots = dongle_count
     auto_provision = _setting_toggle(
         spoke_config.get("usb_auto_provision")
         or api_server.get("usb_auto_provision")
         or proxmox.get("usb_auto_provision")
     )
-    return used_slots, total_slots, auto_provision
+    return used_slots, total_slots, dongle_count, auto_provision
 
 
 
@@ -758,7 +777,7 @@ def get_usb_provisioning_status(
     auto_provision_on = False
     spokes_out: list[dict[str, Any]] = []
     for spoke in _approved_spokes(resolved_tenant_id):
-        used, total, auto_provision = _spoke_usb_capacity(spoke)
+        used, total, dongles, auto_provision = _spoke_usb_capacity(spoke)
         total_slots += total
         used_slots += used
         auto_provision_on = auto_provision_on or auto_provision
@@ -767,16 +786,47 @@ def get_usb_provisioning_status(
             "spoke_name": spoke.spoke_name or spoke.hostname,
             "used": used,
             "total": total,
+            "dongle_count": dongles,
             "auto_provision": auto_provision,
         })
     spokes_out.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
+    total_dongles = sum(s.get("dongle_count", 0) for s in spokes_out)
     return {
         "tenant_id": resolved_tenant_id,
         "total_slots": total_slots,
         "used_slots": used_slots,
+        "total_dongles": total_dongles,
         "auto_provision_on": auto_provision_on,
         "spokes": spokes_out,
     }
+
+
+@router.post("/{tenant_id}/aggregate/toggle-auto-provision")
+def toggle_auto_provision(
+    tenant_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Toggle usb_auto_provision on/off for all approved spokes in this tenant."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    enable: bool = bool(body.get("enable", False))
+    new_val = "on" if enable else "off"
+    updated = 0
+    for spoke in _approved_spokes(resolved_tenant_id):
+        next_config = dict(spoke.config or {})
+        next_config["usb_auto_provision"] = new_val
+        spoke.config = next_config
+        spoke.config_version = (spoke.config_version or 0) + 1
+        store.save_spoke(spoke)
+        store.enqueue_command(Command(
+            spoke_id=spoke.id,
+            tenant_id=resolved_tenant_id,
+            type="config_update",
+            payload={**next_config, "__config_version": spoke.config_version},
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ))
+        updated += 1
+    return {"ok": True, "auto_provision": new_val, "updated_spokes": updated}
 
 
 @router.get("/aggregate/api-server")
