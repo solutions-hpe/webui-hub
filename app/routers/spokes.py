@@ -819,6 +819,29 @@ async def get_update_status(
     return job
 
 
+@router.post("/{tenant_id}/update-spokes")
+async def update_spokes_via_agent(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue an update_spoke command to each spoke's proxmox agent so the agent
+    calls the spoke's /api/self-update endpoint.  Useful when spokes are too old
+    to handle the self_update WS command directly."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spokes = [s for s in store.list_spokes(resolved_tenant_id) if s.status == "approved"]
+    if not spokes:
+        raise HTTPException(status_code=404, detail="No approved spokes found")
+    for spoke in spokes:
+        store.enqueue_command(Command(
+            spoke_id=spoke.id,
+            tenant_id=resolved_tenant_id,
+            type="proxmox_agent_command",
+            payload={"action": "update_spoke"},
+            expires_at=_now() + timedelta(minutes=10),
+        ))
+    return {"ok": True, "queued": len(spokes), "spoke_ids": [s.id for s in spokes]}
+
+
 @router.post("/{tenant_id}/spokes/{spoke_id}/config")
 async def push_spoke_config(
     tenant_id: str,
