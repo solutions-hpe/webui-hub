@@ -696,12 +696,14 @@ def _spoke_versions_snapshot(tenant_id: str) -> dict[str, dict[str, Any]]:
 
 
 async def _poll_update_job(job_id: str, tenant_id: str) -> None:
-    """Background task: poll telemetry every 15s and detect version changes."""
+    """Background task: poll telemetry every 15s, detect version changes.
+    As soon as a spoke's proxmox agent is confirmed updated, immediately
+    enqueue that spoke's self_update (no fixed delay needed since the WS
+    connection is persistent and the command is delivered in real time)."""
     job = _update_jobs.get(job_id)
     if not job:
         return
     deadline = time.time() + 600  # 10-minute timeout
-    # Agent updates are expected within ~90s; spokes within ~4min
     while time.time() < deadline:
         await asyncio.sleep(15)
         job = _update_jobs.get(job_id)
@@ -717,23 +719,38 @@ async def _poll_update_job(job_id: str, tenant_id: str) -> None:
             health = (tel.get("api_server") or {}).get("health") or {}
             cur_agent = proxmox.get("agent_version")
             cur_spoke = health.get("installer_version") or health.get("version")
+
+            # Check agent version — as soon as it changes, enqueue spoke self_update
             if sd["agent_status"] == "pending":
                 if cur_agent and cur_agent != sd["agent_version_before"]:
                     sd["agent_status"] = "updated"
                     sd["agent_version_after"] = cur_agent
+                    # Agent confirmed updated — immediately trigger spoke self_update
+                    store.enqueue_command(Command(
+                        spoke_id=spoke.id,
+                        tenant_id=tenant_id,
+                        type="self_update",
+                        payload={},
+                        expires_at=_now() + timedelta(minutes=10),
+                    ))
                 else:
                     all_done = False
+
+            # Check spoke version
             if sd["spoke_status"] == "pending":
                 if cur_spoke and cur_spoke != sd["spoke_version_before"]:
                     sd["spoke_status"] = "updated"
                     sd["spoke_version_after"] = cur_spoke
                 else:
                     all_done = False
+
         await ws_broadcast({"type": "update_job_status", "job_id": job_id, "job": job})
         if all_done:
             job["completed"] = True
             job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            await ws_broadcast({"type": "update_job_status", "job_id": job_id, "job": job})
             return
+
     # Timeout — mark anything still pending as timed out
     for sd in job["spokes"].values():
         if sd["agent_status"] == "pending":
@@ -770,7 +787,9 @@ async def update_all_spokes(
 
     spoke_ids = [s.id for s in spokes]
 
-    # Step 1: enqueue proxmox agent updates immediately
+    # Enqueue proxmox agent updates immediately for all spokes.
+    # The polling task (_poll_update_job) will enqueue each spoke's self_update
+    # as soon as it detects that spoke's agent version has changed in telemetry.
     for spoke in spokes:
         store.enqueue_command(Command(
             spoke_id=spoke.id,
@@ -780,19 +799,6 @@ async def update_all_spokes(
             expires_at=_now() + timedelta(minutes=10),
         ))
 
-    # Step 2: enqueue spoke self-updates after 2-minute delay
-    async def _delayed_spoke_updates() -> None:
-        await asyncio.sleep(120)
-        for sid in spoke_ids:
-            store.enqueue_command(Command(
-                spoke_id=sid,
-                tenant_id=resolved_tenant_id,
-                type="self_update",
-                payload={},
-                expires_at=_now() + timedelta(minutes=10),
-            ))
-
-    asyncio.create_task(_delayed_spoke_updates())
     asyncio.create_task(_poll_update_job(job_id, resolved_tenant_id))
 
     return {"ok": True, "job_id": job_id, "spokes": len(spokes), "spoke_ids": spoke_ids}
