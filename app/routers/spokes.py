@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -88,6 +89,46 @@ def _reg_log_append(event: str, **kwargs: Any) -> None:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_USB_VIDPID_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{4}$", re.IGNORECASE)
+_USB_DEVICE_TYPES = {"wireless", "wired", "storage", "generic"}
+
+
+class TenantUsbConfigRequest(BaseModel):
+    usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _is_spoke_online(spoke) -> bool:
+    if not spoke or not spoke.last_seen:
+        return False
+    last_seen = spoke.last_seen
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
+    return (_now() - last_seen).total_seconds() < 600
+
+
+def _normalize_usb_vidpids(items: Any) -> list[dict[str, str]]:
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="usb_vidpids must be a JSON array")
+    deduped: dict[str, dict[str, str]] = {}
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail=f"usb_vidpids[{index}] must be an object")
+        vidpid = str(item.get("vidpid") or "").strip().lower()
+        if not vidpid or not _USB_VIDPID_RE.fullmatch(vidpid):
+            raise HTTPException(status_code=400, detail=f"usb_vidpids[{index}].vidpid must match XXXX:XXXX")
+        device_type = str(item.get("type") or "generic").strip().lower() or "generic"
+        if device_type not in _USB_DEVICE_TYPES:
+            device_type = "generic"
+        deduped[vidpid] = {
+            "vidpid": vidpid,
+            "type": device_type,
+            "label": str(item.get("label") or "").strip(),
+        }
+    return [deduped[key] for key in sorted(deduped)]
 
 
 def _is_valid_uuid(value: str) -> bool:
@@ -571,6 +612,63 @@ def get_spoke_config(tenant_id: str, spoke_id: str, current_user: User = Depends
     return {"config": spoke.config or {}, "telemetry": spoke.telemetry or {}}
 
 
+@router.get("/{tenant_id}/usb-config")
+def get_tenant_usb_config(tenant_id: str, current_user: User = Depends(auth.get_current_user)):
+    resolved_tenant_id = _require_tenant_access(tenant_id, current_user)
+    tenant = store.get_tenant(resolved_tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"usb_vidpids": store.get_tenant_usb_vidpids(resolved_tenant_id)}
+
+
+
+def _queue_spoke_config_push(tenant_id: str, spoke_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    spoke = store.get_spoke(tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+
+    next_config = dict(spoke.config or {})
+    next_config.update(body or {})
+    for key in _AUTH_KEYS:
+        next_config.pop(key, None)
+    spoke.config = next_config
+    spoke.config_version = (spoke.config_version or 0) + 1
+    store.save_spoke(spoke)
+    store.enqueue_command(
+        Command(
+            spoke_id=spoke_id,
+            tenant_id=tenant_id,
+            type="config_update",
+            payload={**next_config, "__config_version": spoke.config_version},
+            expires_at=_now() + timedelta(minutes=10),
+        )
+    )
+    return {"ok": True, "config_version": spoke.config_version}
+
+
+@router.post("/{tenant_id}/usb-config/push-all")
+async def push_tenant_usb_config_to_all_spokes(
+    tenant_id: str,
+    payload: TenantUsbConfigRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = store.set_tenant_usb_vidpids(resolved_tenant_id, _normalize_usb_vidpids(payload.usb_vidpids))
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    pushed_to: list[str] = []
+    online_spokes: list[str] = []
+    for spoke in store.list_spokes(resolved_tenant_id):
+        if spoke.status != "approved":
+            continue
+        _queue_spoke_config_push(resolved_tenant_id, spoke.id, {"usb_vidpids": tenant.usb_vidpids})
+        pushed_to.append(spoke.id)
+        if _is_spoke_online(spoke):
+            online_spokes.append(spoke.id)
+    return {"ok": True, "pushed_to": pushed_to, "online_spokes": online_spokes, "usb_vidpids": tenant.usb_vidpids}
+
+
 @router.post("/{tenant_id}/spokes/{spoke_id}/config")
 async def push_spoke_config(
     tenant_id: str,
@@ -580,28 +678,7 @@ async def push_spoke_config(
 ):
     """Push a config_update command to the spoke."""
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
-    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
-    if not spoke:
-        raise HTTPException(status_code=404, detail="Spoke not found")
-
-    next_config = dict(spoke.config or {})
-    next_config.update(body or {})
-    # Strip all auth/credential fields — these must be set locally on the spoke
-    for key in _AUTH_KEYS:
-        next_config.pop(key, None)
-    spoke.config = next_config
-    spoke.config_version = (spoke.config_version or 0) + 1
-    store.save_spoke(spoke)
-    store.enqueue_command(
-        Command(
-            spoke_id=spoke_id,
-            tenant_id=resolved_tenant_id,
-            type="config_update",
-            payload={**next_config, "__config_version": spoke.config_version},
-            expires_at=_now() + timedelta(minutes=10),
-        )
-    )
-    return {"ok": True, "config_version": spoke.config_version}
+    return _queue_spoke_config_push(resolved_tenant_id, spoke_id, body)
 
 
 @router.post("/{tenant_id}/spokes/{spoke_id}/telemetry")

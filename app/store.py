@@ -482,14 +482,53 @@ def _tenant_processing_modes(tenant: Tenant | None) -> dict[str, str]:
 
 
 
+def _tenant_usb_vidpids(tenant: Tenant | None) -> list[dict[str, Any]]:
+    if not tenant:
+        return []
+    configured = tenant.usb_vidpids if isinstance(tenant.usb_vidpids, list) else []
+    legacy = (tenant.hub_config or {}).get("usb_vidpids")
+    if configured:
+        return [dict(item) for item in configured if isinstance(item, dict)]
+    if isinstance(legacy, list):
+        return [dict(item) for item in legacy if isinstance(item, dict)]
+    return []
+
+
+
+def get_tenant_usb_vidpids(tenant_id: str) -> list[dict[str, Any]]:
+    with _lock:
+        tenant = get_tenant(tenant_id)
+        return _tenant_usb_vidpids(tenant)
+
+
+
+def set_tenant_usb_vidpids(tenant_id: str, usb_vidpids: list[dict[str, Any]]) -> Optional[Tenant]:
+    with _lock:
+        tenants = _load_tenants()
+        for tenant in tenants:
+            if tenant.id != tenant_id:
+                continue
+            tenant.usb_vidpids = [dict(item) for item in (usb_vidpids or []) if isinstance(item, dict)]
+            tenant.hub_config = dict(tenant.hub_config or {})
+            tenant.hub_config["usb_vidpids"] = [dict(item) for item in tenant.usb_vidpids]
+            _save_tenants(tenants)
+            return tenant
+    return None
+
+
+
 def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
     if not tenant:
         return {}
-    return {
+    hub_config = tenant.hub_config or {}
+    payload = {
         key: value
-        for key, value in (tenant.hub_config or {}).items()
-        if key not in _RELAY_CONFIG_KEYS and key not in _HUB_LOCAL_CONFIG_KEYS
+        for key, value in hub_config.items()
+        if key not in _RELAY_CONFIG_KEYS and key not in _HUB_LOCAL_CONFIG_KEYS and key != "usb_vidpids"
     }
+    if tenant.usb_vidpids or "usb_vidpids" in hub_config:
+        payload["usb_vidpids"] = _tenant_usb_vidpids(tenant)
+    return payload
 
 
 

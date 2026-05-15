@@ -72,6 +72,7 @@ class Tenant(BaseModel):
     })
     hub_config_enabled: bool = False
     hub_config: dict[str, Any] = Field(default_factory=dict)
+    usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)
     onboarding_psk_enc: str = ""  # Legacy single PSK — migrated to onboarding_psks_enc on first save
     onboarding_psks_enc: list[str] = Field(default_factory=list)  # List of encrypted PSKs
     created_at: datetime = Field(default_factory=_now)

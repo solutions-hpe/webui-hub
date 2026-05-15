@@ -402,9 +402,11 @@ def get_tenant_hub_config(
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    hub_config = dict(tenant.hub_config or {})
+    hub_config["usb_vidpids"] = store.get_tenant_usb_vidpids(tenant_id)
     return {
         "hub_config_enabled": tenant.hub_config_enabled,
-        "hub_config": tenant.hub_config,
+        "hub_config": hub_config,
         "processing_modes": tenant.processing_modes,
     }
 
@@ -421,6 +423,8 @@ async def update_tenant_hub_config(
         raise HTTPException(status_code=404, detail="Tenant not found")
     tenant.hub_config_enabled = payload.hub_config_enabled
     tenant.hub_config = payload.hub_config or {}
+    if isinstance(tenant.hub_config.get("usb_vidpids"), list):
+        tenant.usb_vidpids = [dict(item) for item in tenant.hub_config.get("usb_vidpids") if isinstance(item, dict)]
     store.save_tenant(tenant)
 
     pushed_count = 0
