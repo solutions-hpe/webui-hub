@@ -88,6 +88,15 @@ ACR_PWD=$(az acr credential show --name "$ACR_NAME" --query 'passwords[0].value'
 GIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "dev")
 echo "$GIT_SHA" > "$SCRIPT_DIR/VERSION"
 
+# ── Copy client-sim INSTALLER_VERSION into build ──────────────────
+CLIENT_SIM_VER_SRC="$SCRIPT_DIR/../client-sim/webui-spoke/INSTALLER_VERSION"
+if [ -f "$CLIENT_SIM_VER_SRC" ]; then
+    cp "$CLIENT_SIM_VER_SRC" "$SCRIPT_DIR/CLIENT_SIM_VERSION"
+    echo "  client-sim version: $(cat "$SCRIPT_DIR/CLIENT_SIM_VERSION")"
+else
+    echo "1.00" > "$SCRIPT_DIR/CLIENT_SIM_VERSION"
+fi
+
 # ── Build and push image ──────────────────────────────────────────
 echo "▶ Building and pushing image to ACR..."
 az acr build --registry "$ACR_NAME" --image "$IMAGE" "$SCRIPT_DIR" --output none

@@ -95,9 +95,14 @@ def health():
 
 
 @app.get("/api/init")
-# intentionally unauthenticated; returns only {"mode": "hub"}
+# intentionally unauthenticated
 def api_init():
-    return {"mode": "hub"}
+    base = Path(__file__).resolve().parent.parent
+    semver_file = base / "frontend" / "SEMVER"
+    client_sim_file = base / "CLIENT_SIM_VERSION"
+    app_version = semver_file.read_text().strip() if semver_file.exists() else "1.00"
+    installer_version = client_sim_file.read_text().strip() if client_sim_file.exists() else "1.00"
+    return {"mode": "hub", "app_version": app_version, "installer_version": installer_version}
 
 
 @app.get("/{full_path:path}", response_class=HTMLResponse)
