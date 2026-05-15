@@ -315,45 +315,83 @@ def _psk_require_tenant_admin(tenant_id: str, current_user: User = Depends(auth.
     return tenant_id
 
 
+def _migrate_legacy_psk(tenant) -> None:
+    """Move legacy onboarding_psk_enc into the list if not already there."""
+    if tenant.onboarding_psk_enc and tenant.onboarding_psk_enc not in tenant.onboarding_psks_enc:
+        tenant.onboarding_psks_enc.insert(0, tenant.onboarding_psk_enc)
+        tenant.onboarding_psk_enc = ""
+
+
+def _get_tenant_psks(tenant) -> list[str]:
+    """Return all decrypted PSKs for a tenant (migrating legacy field if needed)."""
+    _migrate_legacy_psk(tenant)
+    psks = []
+    for enc in tenant.onboarding_psks_enc:
+        try:
+            psks.append(decrypt_str(enc))
+        except Exception:
+            pass
+    return psks
+
+
+def _safe_decrypt_eq(enc: str, plain: str) -> bool:
+    try:
+        return decrypt_str(enc) == plain
+    except Exception:
+        return False
+
+
 @router.get("/tenant/{tenant_id}/onboarding-psk")
-def get_onboarding_psk_status(
+def get_onboarding_psks(
     tenant_id: str = Depends(_psk_require_tenant_admin),
 ):
-    """Return whether an onboarding PSK is configured for this tenant (never returns the value)."""
+    """Return all onboarding PSKs for this tenant (values visible to tenant admins)."""
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    return {"has_psk": bool(tenant.onboarding_psk_enc)}
+    psks = _get_tenant_psks(tenant)
+    return {"psks": psks, "has_psk": bool(psks)}
 
 
 @router.post("/tenant/{tenant_id}/onboarding-psk")
 def generate_onboarding_psk(
     tenant_id: str = Depends(_psk_require_tenant_admin),
 ):
-    """Generate (or regenerate) an onboarding PSK for this tenant.
+    """Generate a new onboarding PSK and add it to the tenant's PSK list.
 
-    Returns the plain PSK exactly once — store it securely.
-    Auto-approves any spoke that registers with the correct tenant_id + spoke_name + PSK.
+    Multiple PSKs may coexist — any valid PSK auto-approves a spoke registration.
     """
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    plain_psk = generate_api_key()  # 32-byte URL-safe random token
-    tenant.onboarding_psk_enc = encrypt_str(plain_psk)
+    plain_psk = generate_api_key()
+    _migrate_legacy_psk(tenant)
+    tenant.onboarding_psks_enc.append(encrypt_str(plain_psk))
     store.save_tenant(tenant)
-    return {"psk": plain_psk, "warning": "Store this value securely — it will not be shown again."}
+    return {"psk": plain_psk, "psks": _get_tenant_psks(tenant)}
 
 
-@router.delete("/tenant/{tenant_id}/onboarding-psk", status_code=204)
+@router.delete("/tenant/{tenant_id}/onboarding-psk", status_code=200)
 def revoke_onboarding_psk(
     tenant_id: str = Depends(_psk_require_tenant_admin),
+    body: dict = None,
 ):
-    """Revoke the onboarding PSK. Spokes can no longer auto-approve until a new one is generated."""
+    """Revoke one specific PSK (pass {\"psk\": \"<value>\"} in body) or all PSKs if no body."""
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    tenant.onboarding_psk_enc = ""
+    _migrate_legacy_psk(tenant)
+    psk_to_revoke = (body or {}).get("psk", "").strip()
+    if psk_to_revoke:
+        tenant.onboarding_psks_enc = [
+            enc for enc in tenant.onboarding_psks_enc
+            if not _safe_decrypt_eq(enc, psk_to_revoke)
+        ]
+    else:
+        tenant.onboarding_psks_enc = []
+        tenant.onboarding_psk_enc = ""
     store.save_tenant(tenant)
+    return {"psks": _get_tenant_psks(tenant), "has_psk": bool(tenant.onboarding_psks_enc)}
 
 
 @router.get("/tenant/{tenant_id}/hub-config")

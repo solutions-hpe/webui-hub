@@ -403,11 +403,18 @@ def register_spoke(payload: RegisterPayload, request: Request):
     if tenant_hint and spoke_name and psk_provided:
         tenant_obj = store.get_tenant(tenant_hint)  # tenant_hint already normalized to id above
         psk_valid = False
-        if tenant_obj and tenant_obj.onboarding_psk_enc:
-            try:
-                psk_valid = (decrypt_str(tenant_obj.onboarding_psk_enc) == psk_provided)
-            except Exception:
-                psk_valid = False
+        if tenant_obj:
+            if tenant_obj.onboarding_psk_enc and tenant_obj.onboarding_psk_enc not in tenant_obj.onboarding_psks_enc:
+                tenant_obj.onboarding_psks_enc.insert(0, tenant_obj.onboarding_psk_enc)
+                tenant_obj.onboarding_psk_enc = ""
+                store.save_tenant(tenant_obj)
+            for enc in tenant_obj.onboarding_psks_enc:
+                try:
+                    if decrypt_str(enc) == psk_provided:
+                        psk_valid = True
+                        break
+                except Exception:
+                    pass
 
         if psk_valid:
             _ensure_name_available_for_tenant(
