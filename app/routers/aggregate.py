@@ -147,7 +147,12 @@ def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, bool]:
     proxmox = _telemetry_dict(spoke, "proxmox")
     api_server = _telemetry_dict(spoke, "api_server")
     usb_devices = _telemetry_list(spoke, "usb_devices") or (proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else [])
-    used_slots = _coerce_int(proxmox.get("usb_count") or len(usb_devices), 0, minimum=0)
+    # Slots in use = provisioned VMs (active entries in usb_state), not raw USB dongle count
+    usb_state = proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else usb_devices
+    used_slots = sum(
+        1 for entry in usb_state
+        if isinstance(entry, dict) and entry.get("prov_status") in ("active", "provisioning", "tearing_down", "missing")
+    ) if usb_state else 0
     spoke_config = spoke.config or {}
     total_slots = _coerce_int(
         spoke_config.get("usb_max_slots")
