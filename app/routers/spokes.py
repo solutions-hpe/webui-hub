@@ -437,6 +437,15 @@ def register_spoke(payload: RegisterPayload, request: Request):
                 api_key_enc=encrypt_str(plain_key),
             )
             store.save_spoke(auto_spoke)
+            # Clean up any stale pending entries for this hostname (e.g. from before
+            # tenant resolution was fixed — those entries may have blank tenant_hint).
+            stale = store.get_pending_by_hostname(payload.hostname)
+            if stale:
+                store.delete_pending_spoke(stale.id)
+            if requested_spoke_id:
+                leftover = store.get_pending_spoke(requested_spoke_id)
+                if leftover:
+                    store.delete_pending_spoke(requested_spoke_id)
             _reg_log_append("psk_auto_approved", hostname=payload.hostname,
                             spoke_name=spoke_name, spoke_id=auto_spoke.id,
                             tenant_id=tenant_hint, ip=client_ip)
@@ -454,7 +463,8 @@ def register_spoke(payload: RegisterPayload, request: Request):
             }
         else:
             _reg_log_append("psk_rejected", hostname=payload.hostname,
-                            spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip)
+                            spoke_name=spoke_name, tenant_hint=tenant_hint, ip=client_ip,
+                            psks_configured=len(tenant_obj.onboarding_psks_enc) if tenant_obj else 0)
     # ── End PSK auto-approve ──────────────────────────────────────────────────
 
     existing = store.get_pending_spoke(requested_spoke_id) if requested_spoke_id else None
