@@ -16,11 +16,11 @@ Hub is designed for operators who need to manage many spoke environments from on
 
 - Multi-tenant management for Aruba Central-backed tenants and manually created tenants
 - Role-based access with **superadmin**, **admin**, and **operator** scopes
-- Registration, approval, and lifecycle management for webui-spoke servers
-- Centralized or distributed execution for Aruba polling, notifications, schedules, gkill, heartbeat, and repo sync
+- Registration, approval, and lifecycle management for webui-spoke servers, including tenant onboarding PSKs for zero-touch spoke approval
+- Centralized or distributed execution for Aruba polling, notifications, schedules, gkill, heartbeat, repo sync, and tenant-level dongle allocation policy
 - JSON file store under `/data/` instead of PostgreSQL, SQLite, or SQLAlchemy
 - HTTPS by default on port **8443** with self-signed certificate generation at startup
-- Local JWT authentication today, with OIDC, LDAP/AD, and RADIUS stubs already wired in
+- Local JWT authentication plus hub-side LDAP/AD, RADIUS, and TACACS+ provider support; OIDC remains stubbed for future work
 - Deployment options for Docker, Azure Container Instance, and BYOD Linux hosts
 - Per-spoke command queue, inbox/ack relay, and 7-day rolling audit history
 
@@ -60,6 +60,8 @@ Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webu
 
 - `app/main.py` serves `static/index.html` and replaces `{{WEBUI_MODE}}` with `hub` before returning the page.
 - `static/index.html`, `static/app.js`, and `static/style.css` are sourced from `cs-webui`.
+- Each hub deploy stamps `VERSION` with the git SHA and serves `app.js` / `style.css` as `...?v=<sha>` so browsers do not keep stale assets.
+- The footer version pills are populated from `frontend/SEMVER` (`CS-WebUI v…`) and `CLIENT_SIM_VERSION` (`GitHub Repo v…`).
 - Branch alignment matters: `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
 - For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
 
@@ -346,6 +348,8 @@ After the service is running:
    - Aruba Central credentials under tenant settings or the superadmin Aruba workflow
    - Notification settings for Teams and/or SMTP if desired
    - Default processing mode for the tenant
+   - **Setup → Tenant Setup → Use All Available Dongles** if the tenant should overflow to the other certified dongle type when the preferred type runs out
+   - **Setup → Onboarding** if you want to generate a PSK for spoke auto-approval
 6. Create additional tenant admins and operators as needed.
 
 ## Spoke Registration
@@ -378,6 +382,19 @@ Response:
 - `201 Created`
 - Status is `pending`
 - Hub stores the registration in `/data/pending/<spoke_id>.json`
+
+### Optional fast path — onboarding PSK auto-approval
+
+Tenant admins can generate a per-tenant onboarding PSK in **Setup → Onboarding**. When a spoke registers with `tenant_id_hint`, `spoke_name`, and a matching `onboarding_psk`, Hub skips the pending queue and immediately returns approved credentials.
+
+Current spoke install command:
+
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/solutions-hpe/client-sim/main/install-lxc.sh) \
+  --hub-url https://hub.example.com:8443 \
+  --hub-tenant <tenant-id> \
+  --hub-psk <psk>
+```
 
 ### Step 2 — superadmin approves and assigns a tenant
 
@@ -458,6 +475,9 @@ Hub heartbeat monitoring treats a spoke as offline after 300 seconds without tel
 | Commands | `POST` | `/api/commands` | superadmin, admin, operator with tenant access |
 | Commands list | `GET` | `/api/{tenant_id}/commands` | superadmin, admin, operator |
 | Repo sync | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/repo-sync` | superadmin, admin, operator |
+| Onboarding PSK status | `GET` | `/api/tenant/{tenant_id}/onboarding-psk` | superadmin, admin |
+| Onboarding PSK generate | `POST` | `/api/tenant/{tenant_id}/onboarding-psk` | superadmin, admin |
+| Onboarding PSK revoke | `DELETE` | `/api/tenant/{tenant_id}/onboarding-psk` | superadmin, admin |
 | Settings | `GET` | `/api/{tenant_id}/settings` | superadmin, admin |
 | Aruba settings | `POST` | `/api/{tenant_id}/settings/aruba` | superadmin, admin |
 | Notification settings | `POST` | `/api/{tenant_id}/settings/notifications` | superadmin, admin |
@@ -535,9 +555,10 @@ If a feature override is not set, Hub falls back to the spoke's `global_mode`.
 
 1. Admin updates tenant or spoke config in Hub.
 2. Hub stores the new JSON payload under `/data`.
-3. Hub queues a command in `/data/{tenant_id}/queue/{spoke_id}.json`.
-4. The spoke polls `/inbox`, receives the command, applies it, and POSTs `/ack`.
-5. Hub records the result in the queue and optionally appends an audit entry.
+3. Before saving or pushing a spoke config payload, Hub strips spoke-local auth fields such as `admin_password`, `auth_provider`, and all LDAP, RADIUS, and TACACS settings.
+4. Hub queues a command in `/data/{tenant_id}/queue/{spoke_id}.json`.
+5. The spoke polls `/inbox`, receives the command, applies it, and POSTs `/ack`.
+6. Hub records the result in the queue and optionally appends an audit entry.
 
 ## Multi-Tenancy
 
@@ -587,14 +608,17 @@ If you replace the self-signed files at `DATA_DIR/tls/cert.pem` and `DATA_DIR/tl
 - **Password / JWT** — implemented and active
   - Passwords are stored as bcrypt hashes
   - `POST /api/auth/login` returns a bearer token
+- **LDAP / Active Directory** — implemented as a hub-side provider
+- **RADIUS** — implemented as a hub-side provider
+- **TACACS+** — implemented as a hub-side provider
+
+These provider settings stay on the hub. They are never pushed to spokes as part of config sync.
 
 ### Stubbed and ready for implementation
 
 - **OIDC / OAuth2 SSO**
-- **LDAP / Active Directory**
-- **RADIUS**
 
-The provider registry and config flags already exist. The flows currently advertise availability state, but only local password authentication is implemented.
+The provider registry and config flags already exist. OIDC is still exposed as future work, while spoke auth remains local to each spoke.
 
 ## Data Layout
 
