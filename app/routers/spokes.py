@@ -15,6 +15,18 @@ from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, Command, PendingSpoke, User
 from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, unregister_spoke, ws_broadcast
 
+# Auth/credential keys that must never be stored or pushed by the hub
+_AUTH_KEYS: set[str] = {
+    "admin_password", "auth_provider",
+    "auth_ldap_url", "auth_ldap_bind_dn", "auth_ldap_bind_password",
+    "auth_ldap_user_base", "auth_ldap_user_filter",
+    "auth_ldap_group_admin", "auth_ldap_group_viewer",
+    "auth_radius_host", "auth_radius_port", "auth_radius_secret",
+    "auth_radius_role_attr", "auth_radius_admin_val",
+    "auth_tacacs_host", "auth_tacacs_port", "auth_tacacs_secret",
+    "auth_tacacs_admin_priv",
+}
+
 # Imported lazily inside the handler to avoid a circular import at module load time.
 # _handle_spoke_backup_progress(spoke_id, payload_dict) is defined in backups.py.
 async def _relay_backup_progress(spoke_id: str, msg_type: str, data: dict) -> None:
@@ -299,6 +311,8 @@ class RegisterPayload(BaseModel):
 
 @router.post("/spokes/register", status_code=201)
 def register_spoke(payload: RegisterPayload, request: Request):
+    # Strip auth/credential keys — the hub must never store or push spoke auth config
+    payload.config = {k: v for k, v in payload.config.items() if k not in _AUTH_KEYS}
     spoke_name = payload.spoke_name.strip() or payload.hostname
     tenant_hint = payload.tenant_id_hint.strip()
     requested_spoke_id = payload.spoke_id.strip().lower()
@@ -551,6 +565,9 @@ async def push_spoke_config(
 
     next_config = dict(spoke.config or {})
     next_config.update(body or {})
+    # Strip all auth/credential fields — these must be set locally on the spoke
+    for key in _AUTH_KEYS:
+        next_config.pop(key, None)
     spoke.config = next_config
     spoke.config_version = (spoke.config_version or 0) + 1
     store.save_spoke(spoke)
