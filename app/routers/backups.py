@@ -44,6 +44,7 @@ class SetAzureKeyRequest(BaseModel):
 
 
 class ReseedRequest(BaseModel):
+    tenant_id: str
     template_name: str
     latest_blob: str
     spoke_ids: list[str]
@@ -404,10 +405,10 @@ async def list_templates(_: User = Depends(auth.get_current_user)):
 
 @router.post("/backup/reseed")
 async def trigger_reseed(
-    tenant_id: str,
     req: ReseedRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
+    tenant_id = req.tenant_id
     auth.require_tenant_access(tenant_id, current_user)
     backup_config = store.load_backup_config()
 
