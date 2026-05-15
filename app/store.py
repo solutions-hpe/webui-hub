@@ -206,15 +206,15 @@ def get_tenant(tenant_id: str) -> Optional[Tenant]:
 
 
 def get_tenant_by_hint(hint: str) -> Optional[Tenant]:
-    """Look up a tenant by id first, then by name (case-insensitive)."""
+    """Look up a tenant by id first, then by name (both case-insensitive)."""
     if not hint:
         return None
     with _lock:
         tenants = _load_tenants()
-        for t in tenants:
-            if t.id == hint:
-                return t
         hint_lower = hint.lower()
+        for t in tenants:
+            if t.id.lower() == hint_lower:
+                return t
         for t in tenants:
             if t.name.lower() == hint_lower:
                 return t
