@@ -48,6 +48,10 @@ class GithubSettingsRequest(BaseModel):
     sim_repo_branch: str = "main"
 
 
+class TenantSettingsPatchRequest(BaseModel):
+    use_all_dongles: Optional[bool] = None
+
+
 class ProcessingModeUpdateRequest(BaseModel):
     global_mode: ModeValue = "centralized"
     aruba_polling: Optional[ModeValue] = None
@@ -264,8 +268,44 @@ def get_tenant_settings(tenant_id: str, current_user: User = Depends(auth.get_cu
         "aruba": _serialize_aruba_config(tenant),
         "notifications": _serialize_notification_config(tenant),
         "github": _serialize_github_config(tenant),
+        "use_all_dongles": bool((tenant.hub_config or {}).get("use_all_dongles", False)),
         "processing_mode": tenant.default_processing_mode.model_dump(),
         "processing_modes": tenant.processing_modes,
+    }
+
+
+@router.patch("/{tenant_id}/settings")
+def patch_tenant_settings(
+    tenant_id: str,
+    payload: TenantSettingsPatchRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    next_hub_config = dict(tenant.hub_config or {})
+    changed = False
+
+    if payload.use_all_dongles is not None:
+        next_hub_config["use_all_dongles"] = bool(payload.use_all_dongles)
+        changed = changed or next_hub_config != (tenant.hub_config or {})
+
+    if changed:
+        tenant.hub_config = next_hub_config
+        store.save_tenant(tenant)
+
+    pushed_count = 0
+    if changed:
+        for spoke in store.list_spokes(tenant_id):
+            if spoke.status != "approved":
+                continue
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant_id, spoke.id)
+            pushed_count += 1
+
+    return {
+        "use_all_dongles": bool((tenant.hub_config or {}).get("use_all_dongles", False)),
+        "pushed_to_spokes": pushed_count,
     }
 
 
