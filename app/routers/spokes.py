@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import re
+import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -15,6 +17,9 @@ from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, Command, PendingSpoke, User
 from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, unregister_spoke, ws_broadcast
+
+# In-memory update job store: job_id -> job dict
+_update_jobs: dict[str, dict[str, Any]] = {}
 
 # Auth/credential keys that must never be stored or pushed by the hub
 _AUTH_KEYS: set[str] = {
@@ -667,6 +672,144 @@ async def push_tenant_usb_config_to_all_spokes(
         if _is_spoke_online(spoke):
             online_spokes.append(spoke.id)
     return {"ok": True, "pushed_to": pushed_to, "online_spokes": online_spokes, "usb_vidpids": tenant.usb_vidpids}
+
+
+def _spoke_versions_snapshot(tenant_id: str) -> dict[str, dict[str, Any]]:
+    """Capture current agent + spoke versions for all approved spokes."""
+    snapshot: dict[str, dict[str, Any]] = {}
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        tel = spoke.telemetry or {}
+        proxmox = tel.get("proxmox") or {}
+        health = (tel.get("api_server") or {}).get("health") or {}
+        snapshot[spoke.id] = {
+            "spoke_name": spoke.spoke_name or spoke.hostname or spoke.id,
+            "agent_version_before": proxmox.get("agent_version"),
+            "agent_version_after": None,
+            "agent_status": "pending",
+            "spoke_version_before": health.get("installer_version") or health.get("version"),
+            "spoke_version_after": None,
+            "spoke_status": "pending",
+        }
+    return snapshot
+
+
+async def _poll_update_job(job_id: str, tenant_id: str) -> None:
+    """Background task: poll telemetry every 15s and detect version changes."""
+    job = _update_jobs.get(job_id)
+    if not job:
+        return
+    deadline = time.time() + 600  # 10-minute timeout
+    # Agent updates are expected within ~90s; spokes within ~4min
+    while time.time() < deadline:
+        await asyncio.sleep(15)
+        job = _update_jobs.get(job_id)
+        if not job:
+            return
+        all_done = True
+        for spoke in store.list_spokes(tenant_id):
+            sd = job["spokes"].get(spoke.id)
+            if not sd:
+                continue
+            tel = spoke.telemetry or {}
+            proxmox = tel.get("proxmox") or {}
+            health = (tel.get("api_server") or {}).get("health") or {}
+            cur_agent = proxmox.get("agent_version")
+            cur_spoke = health.get("installer_version") or health.get("version")
+            if sd["agent_status"] == "pending":
+                if cur_agent and cur_agent != sd["agent_version_before"]:
+                    sd["agent_status"] = "updated"
+                    sd["agent_version_after"] = cur_agent
+                else:
+                    all_done = False
+            if sd["spoke_status"] == "pending":
+                if cur_spoke and cur_spoke != sd["spoke_version_before"]:
+                    sd["spoke_status"] = "updated"
+                    sd["spoke_version_after"] = cur_spoke
+                else:
+                    all_done = False
+        await ws_broadcast({"type": "update_job_status", "job_id": job_id, "job": job})
+        if all_done:
+            job["completed"] = True
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            return
+    # Timeout — mark anything still pending as timed out
+    for sd in job["spokes"].values():
+        if sd["agent_status"] == "pending":
+            sd["agent_status"] = "timeout"
+        if sd["spoke_status"] == "pending":
+            sd["spoke_status"] = "timeout"
+    job["completed"] = True
+    job["completed_at"] = datetime.now(timezone.utc).isoformat()
+    await ws_broadcast({"type": "update_job_status", "job_id": job_id, "job": job})
+
+
+@router.post("/{tenant_id}/update-all")
+async def update_all_spokes(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Trigger proxmox agent update on all spokes, then spoke self-update after a 2-minute delay.
+    Returns a job_id for tracking progress via GET /{tenant_id}/update-status/{job_id}."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spokes = [s for s in store.list_spokes(resolved_tenant_id) if s.status == "approved"]
+    if not spokes:
+        raise HTTPException(status_code=404, detail="No approved spokes found")
+
+    job_id = str(uuid.uuid4())
+    job: dict[str, Any] = {
+        "job_id": job_id,
+        "tenant_id": resolved_tenant_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "completed": False,
+        "completed_at": None,
+        "spokes": _spoke_versions_snapshot(resolved_tenant_id),
+    }
+    _update_jobs[job_id] = job
+
+    spoke_ids = [s.id for s in spokes]
+
+    # Step 1: enqueue proxmox agent updates immediately
+    for spoke in spokes:
+        store.enqueue_command(Command(
+            spoke_id=spoke.id,
+            tenant_id=resolved_tenant_id,
+            type="proxmox_agent_update",
+            payload={},
+            expires_at=_now() + timedelta(minutes=10),
+        ))
+
+    # Step 2: enqueue spoke self-updates after 2-minute delay
+    async def _delayed_spoke_updates() -> None:
+        await asyncio.sleep(120)
+        for sid in spoke_ids:
+            store.enqueue_command(Command(
+                spoke_id=sid,
+                tenant_id=resolved_tenant_id,
+                type="self_update",
+                payload={},
+                expires_at=_now() + timedelta(minutes=10),
+            ))
+
+    asyncio.create_task(_delayed_spoke_updates())
+    asyncio.create_task(_poll_update_job(job_id, resolved_tenant_id))
+
+    return {"ok": True, "job_id": job_id, "spokes": len(spokes), "spoke_ids": spoke_ids}
+
+
+@router.get("/{tenant_id}/update-status/{job_id}")
+async def get_update_status(
+    tenant_id: str,
+    job_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return current status of an update-all job."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    job = _update_jobs.get(job_id)
+    if not job or job["tenant_id"] != resolved_tenant_id:
+        raise HTTPException(status_code=404, detail="Update job not found")
+    return job
 
 
 @router.post("/{tenant_id}/spokes/{spoke_id}/config")
