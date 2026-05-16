@@ -713,7 +713,7 @@ async def fleet_reclone(
         store.save_tenant(tenant)
 
     queued = 0
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     for spoke in _approved_spokes(resolved_tenant_id):
         store.enqueue_command(
             Command(
@@ -827,7 +827,7 @@ def toggle_auto_provision(
             tenant_id=resolved_tenant_id,
             type="config_update",
             payload={**next_config, "__config_version": spoke.config_version},
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         ))
         updated += 1
     return {"ok": True, "auto_provision": new_val, "updated_spokes": updated}

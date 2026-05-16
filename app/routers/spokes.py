@@ -669,7 +669,7 @@ def _queue_spoke_config_push(tenant_id: str, spoke_id: str, body: dict[str, Any]
             tenant_id=tenant_id,
             type="config_update",
             payload={**next_config, "__config_version": spoke.config_version},
-            expires_at=_now() + timedelta(minutes=10),
+            expires_at=_now() + timedelta(hours=24),
         )
     )
     return {"ok": True, "config_version": spoke.config_version}
@@ -755,7 +755,7 @@ async def _poll_update_job(job_id: str, tenant_id: str) -> None:
                         tenant_id=tenant_id,
                         type="self_update",
                         payload={},
-                        expires_at=_now() + timedelta(minutes=10),
+                        expires_at=_now() + timedelta(hours=24),
                     ))
                 else:
                     all_done = False
@@ -820,7 +820,7 @@ async def update_all_spokes(
             tenant_id=resolved_tenant_id,
             type="proxmox_agent_update",
             payload={},
-            expires_at=_now() + timedelta(minutes=10),
+            expires_at=_now() + timedelta(hours=24),
         ))
 
     asyncio.create_task(_poll_update_job(job_id, resolved_tenant_id))
@@ -842,7 +842,7 @@ def update_spoke_proxmox_agent(
         tenant_id=resolved_tenant_id,
         type="proxmox_agent_update",
         payload={},
-        expires_at=_now() + timedelta(minutes=10),
+        expires_at=_now() + timedelta(hours=24),
     ))
     return {"ok": True, "spoke_id": spoke_id}
 
@@ -879,7 +879,7 @@ async def update_spokes_via_agent(
             tenant_id=resolved_tenant_id,
             type="proxmox_agent_command",
             payload={"action": "update_spoke"},
-            expires_at=_now() + timedelta(minutes=10),
+            expires_at=_now() + timedelta(hours=24),
         ))
     return {"ok": True, "queued": len(spokes), "spoke_ids": [s.id for s in spokes]}
 
@@ -902,7 +902,7 @@ async def force_update_spoke_servers(
             tenant_id=resolved_tenant_id,
             type="self_update",
             payload={},
-            expires_at=_now() + timedelta(minutes=10),
+            expires_at=_now() + timedelta(hours=24),
         ))
         queued += 1
     return {"ok": True, "queued": queued, "spoke_ids": [s.id for s in spokes]}
