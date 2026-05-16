@@ -161,7 +161,7 @@ def proxmox_command(
     req: ProxmoxCommandRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
-    auth.require_tenant_access(tenant_id, current_user)
+    auth.require_tenant_member(tenant_id, current_user)
     _get_approved_spoke(tenant_id, spoke_id)
     command = Command(
         spoke_id=spoke_id,

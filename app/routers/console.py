@@ -77,8 +77,8 @@ def _resolve_spoke_node(spoke) -> str:
 
 
 def _require_tenant_admin(tenant_id: str, user: User) -> None:
-    auth.require_tenant_access(tenant_id, user)
-    if not user.is_superadmin and user.get_role(tenant_id) != "admin":
+    auth.require_tenant_member(tenant_id, user)
+    if user.get_role(tenant_id) != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
 
 
@@ -185,10 +185,8 @@ async def create_console_session(
     vmtype: str = Query("qemu"),
     current_user: User = Depends(auth.get_current_user),
 ):
-    auth.require_tenant_access(tenant_id, current_user)
+    auth.require_tenant_member(tenant_id, current_user)
     _cleanup_sessions()
-
-    spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke:
         raise HTTPException(status_code=404, detail="Spoke not found")
     if spoke.status != "approved":

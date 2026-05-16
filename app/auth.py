@@ -96,6 +96,21 @@ def require_tenant_access(tenant_id: str, user: User = Depends(get_current_user)
     return user
 
 
+def require_tenant_member(tenant_id: str, user: User) -> User:
+    """Like require_tenant_access but explicitly blocks superadmin.
+
+    Use this for remote-control endpoints (proxmox-command, console, spoke shell)
+    where only an explicit tenant member should be allowed — even superadmin cannot
+    remote-control a tenant's infrastructure they are not a member of.
+    """
+    if tenant_id not in user.tenant_ids():
+        raise HTTPException(
+            status_code=403,
+            detail="Remote control is restricted to tenant members only",
+        )
+    return user
+
+
 def ensure_admin() -> None:
     """Bootstrap superadmin user on first start."""
     import os
