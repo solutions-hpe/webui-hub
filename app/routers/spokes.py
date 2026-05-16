@@ -828,6 +828,25 @@ async def update_all_spokes(
     return {"ok": True, "job_id": job_id, "spokes": len(spokes), "spoke_ids": spoke_ids}
 
 
+@router.post("/{tenant_id}/spokes/{spoke_id}/update-agent")
+def update_spoke_proxmox_agent(
+    tenant_id: str,
+    spoke_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a proxmox agent update for a single spoke."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke = _get_approved_spoke(resolved_tenant_id, spoke_id)
+    store.enqueue_command(Command(
+        spoke_id=spoke.id,
+        tenant_id=resolved_tenant_id,
+        type="proxmox_agent_update",
+        payload={},
+        expires_at=_now() + timedelta(minutes=10),
+    ))
+    return {"ok": True, "spoke_id": spoke_id}
+
+
 @router.get("/{tenant_id}/update-status/{job_id}")
 async def get_update_status(
     tenant_id: str,
