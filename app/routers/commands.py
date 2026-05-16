@@ -119,6 +119,31 @@ def list_commands(
     return [_serialize_command(command) for command in store.list_commands(tenant_id, spoke_id)]
 
 
+@router.delete("/{tenant_id}/commands")
+def clear_commands(
+    tenant_id: str,
+    spoke_id: Optional[str] = None,
+    current_user: User = Depends(auth.get_current_user),
+):
+    auth.require_tenant_access(tenant_id, current_user)
+    if spoke_id and not store.get_spoke(tenant_id, spoke_id):
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    cleared = store.clear_command_queue(tenant_id, spoke_id)
+    store.append_audit(
+        AuditEntry(
+            spoke_id=spoke_id or "all",
+            tenant_id=tenant_id,
+            task_type="clear_command_queue",
+            execution_mode="hub",
+            status="executed",
+            detail=f"Cleared {cleared} command(s) from queue",
+            initiated_by=current_user.username,
+            result={"cleared": cleared, "spoke_id": spoke_id or "all"},
+        )
+    )
+    return {"ok": True, "cleared": cleared}
+
+
 class ProxmoxCommandRequest(BaseModel):
     action: str
     args: dict[str, Any] = Field(default_factory=dict)

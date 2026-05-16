@@ -903,6 +903,22 @@ def ack_command(tenant_id: str, spoke_id: str, command_id: str, result: Optional
         _save_queue(tenant_id, spoke_id, cmds)
 
 
+def clear_command_queue(tenant_id: str, spoke_id: Optional[str] = None) -> int:
+    """Clear all pending/queued commands for a spoke or all spokes in a tenant. Returns count cleared."""
+    total = 0
+    with _lock:
+        if spoke_id:
+            cmds = _load_queue(tenant_id, spoke_id)
+            total = len(cmds)
+            _save_queue(tenant_id, spoke_id, [])
+        else:
+            for spoke in _load_spokes(tenant_id):
+                cmds = _load_queue(tenant_id, spoke.id)
+                total += len(cmds)
+                _save_queue(tenant_id, spoke.id, [])
+    return total
+
+
 def purge_expired_commands() -> int:
     """Remove command queue entries whose 24-hour TTL has elapsed and return the purge count."""
     total = 0
