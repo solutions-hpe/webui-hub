@@ -691,6 +691,8 @@ def get_aggregate_proxmox(
             "spoke_config": {
                 "usb_max_slots": str((spoke.config or {}).get("usb_max_slots", "24")),
                 "vmid_start": int((spoke.config or {}).get("vmid_start", 0) or 0),
+                "usb_vidpids": (spoke.config or {}).get("usb_vidpids", "[]"),
+                "hostname": spoke.hostname or "",
             },
         })
     hosts.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
