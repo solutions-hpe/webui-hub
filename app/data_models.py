@@ -88,6 +88,8 @@ class Spoke(BaseModel):
     spoke_name: str = ""
     status: str = "pending"
     api_key_enc: Optional[str] = None
+    proxmox_host: str = ""
+    proxmox_token_enc: str = ""
     seed_config: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     processing_mode: ProcessingMode = Field(default_factory=ProcessingMode)

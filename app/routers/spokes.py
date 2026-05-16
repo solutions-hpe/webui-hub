@@ -127,6 +127,11 @@ class TenantUsbConfigRequest(BaseModel):
     usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class SpokeProxmoxCredentialsRequest(BaseModel):
+    proxmox_token: Optional[str] = None
+    proxmox_host: str = ""
+
+
 def _is_spoke_online(spoke) -> bool:
     if not spoke or not spoke.last_seen:
         return False
@@ -639,6 +644,49 @@ def get_spoke_config(tenant_id: str, spoke_id: str, current_user: User = Depends
     if not spoke:
         raise HTTPException(status_code=404, detail="Spoke not found")
     return {"config": spoke.config or {}, "telemetry": spoke.telemetry or {}}
+
+
+@router.get("/{tenant_id}/spokes/{spoke_id}/proxmox-credentials")
+def get_spoke_proxmox_credentials(
+    tenant_id: str,
+    spoke_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    proxmox_host = str(spoke.proxmox_host or "").strip() or str(spoke.hostname or "").strip()
+    return {
+        "proxmox_host": proxmox_host,
+        "proxmox_token_configured": bool(str(spoke.proxmox_token_enc or "").strip()),
+    }
+
+
+@router.put("/{tenant_id}/spokes/{spoke_id}/proxmox-credentials")
+def set_spoke_proxmox_credentials(
+    tenant_id: str,
+    spoke_id: str,
+    payload: SpokeProxmoxCredentialsRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+
+    spoke.proxmox_host = str(payload.proxmox_host or "").strip()
+    if payload.proxmox_token is not None:
+        token = str(payload.proxmox_token).strip()
+        spoke.proxmox_token_enc = encrypt_str(token) if token else ""
+    store.save_spoke(spoke)
+
+    proxmox_host = spoke.proxmox_host or str(spoke.hostname or "").strip()
+    return {
+        "ok": True,
+        "proxmox_host": proxmox_host,
+        "proxmox_token_configured": bool(str(spoke.proxmox_token_enc or "").strip()),
+    }
 
 
 @router.get("/{tenant_id}/usb-config")

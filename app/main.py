@@ -67,10 +67,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
 
 from .routers import auth as auth_router
-from .routers import aggregate, backups, checks, commands, settings as settings_router, sites, spokes, superadmin, workspaces
+from .routers import aggregate, backups, checks, commands, console, settings as settings_router, sites, spokes, superadmin, workspaces
 from .routers import t3 as t3_router
 
 app.include_router(auth_router.router, prefix="/api/auth", tags=["auth"])
+app.include_router(console.router, tags=["console"])
 app.include_router(spokes.router, prefix="/api", tags=["spokes"])
 app.include_router(sites.router, prefix="/api", tags=["sites"])
 app.include_router(superadmin.router, prefix="/api", tags=["superadmin"])
