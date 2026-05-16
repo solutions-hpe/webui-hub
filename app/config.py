@@ -57,6 +57,9 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
-    if not settings.webui_secret_key and str(settings.env or "").strip().lower() != "dev":
+    is_dev = str(settings.env or "").strip().lower() == "dev"
+    if not settings.webui_secret_key and not is_dev:
         raise RuntimeError("WEBUI_SECRET_KEY must be set in production")
+    if settings.secret_key == "change-me-in-production" and not is_dev:
+        raise RuntimeError("SECRET_KEY must be set in production (used for JWT signing)")
     return settings

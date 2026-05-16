@@ -115,7 +115,7 @@ async def notify_check_red(workspace, check):
         try:
             cfg = _normalize_notification_config(json.loads(workspace.notification_config))
         except Exception:
-            pass
+            logger.warning("Malformed notification_config for workspace %s, skipping", getattr(workspace, "name", "unknown"))
     if not cfg.get("enabled"):
         return
     title = f"🔴 Check Failed: {check.check_name}"

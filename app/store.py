@@ -359,7 +359,7 @@ def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Spoke]:
                     if decrypt_str(i.api_key_enc) == api_key:
                         return i
                 except Exception:
-                    pass
+                    logger.warning("Failed to decrypt API key for spoke %s", i.id)
     return None
 
 
@@ -1038,7 +1038,7 @@ def list_mac_profiles(tenant_id: str) -> dict[str, MacProfile]:
             try:
                 result[spoke_id] = MacProfile(**data)
             except Exception:
-                pass
+                logger.warning("Skipping malformed MAC profile for spoke %s", spoke_id)
         return result
 
 
@@ -1059,7 +1059,7 @@ def get_oui_pool() -> list[OuiPoolEntry]:
             try:
                 result.append(OuiPoolEntry(**item))
             except Exception:
-                pass
+                logger.warning("Skipping malformed OUI pool entry: %s", item)
         return result
 
 

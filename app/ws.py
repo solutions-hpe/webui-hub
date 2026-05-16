@@ -58,7 +58,10 @@ async def _authenticate_browser_websocket(websocket: WebSocket) -> bool:
 
     await websocket.accept()
     try:
-        token = _extract_ws_token(await websocket.receive_text())
+        token = _extract_ws_token(await asyncio.wait_for(websocket.receive_text(), timeout=10))
+    except asyncio.TimeoutError:
+        await _close_unauthorized(websocket, "Authentication timeout")
+        return False
     except WebSocketDisconnect:
         return False
     except Exception:

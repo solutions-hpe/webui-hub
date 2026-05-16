@@ -126,6 +126,10 @@ def clear_commands(
     current_user: User = Depends(auth.get_current_user),
 ):
     auth.require_tenant_access(tenant_id, current_user)
+    # Clearing the queue is destructive — require admin or superadmin role
+    role = current_user.get_role(tenant_id) if not current_user.is_superadmin else "superadmin"
+    if role not in ("admin", "superadmin"):
+        raise HTTPException(status_code=403, detail="Admin role required to clear command queue")
     if spoke_id and not store.get_spoke(tenant_id, spoke_id):
         raise HTTPException(status_code=404, detail="Spoke not found")
     cleared = store.clear_command_queue(tenant_id, spoke_id)
