@@ -22,7 +22,12 @@ from typing import Any
 import httpx
 
 from . import store
-from .aruba import ArubaClient, validate_cluster_url
+from .aruba import (
+    ArubaClient,
+    DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS,
+    DEFAULT_NEW_CENTRAL_MONITORED_CHECKS,
+    validate_cluster_url,
+)
 from .crypto import decrypt_dict
 from .data_models import AuditEntry, Command
 from .config import get_settings
@@ -284,6 +289,47 @@ def _get_aruba_client(tenant_id: str) -> ArubaClient | None:
         return None
 
 
+def _normalize_site_token(value: Any) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient) -> dict[str, Any]:
+    config = dict(store.get_tenant_central_sites_config(tenant_id) or {})
+    site_mappings = dict(config.get("site_mappings") or {}) if isinstance(config.get("site_mappings"), dict) else {}
+    monitored_checks = list(config.get("monitored_checks") or []) if isinstance(config.get("monitored_checks"), list) else []
+    hardware_checks = list(config.get("hardware_checks") or []) if isinstance(config.get("hardware_checks"), list) else []
+    changed = False
+
+    discovered_sites = await client.list_sites()
+    existing_wsites = {_normalize_site_token(name) for name in site_mappings}
+    existing_central = {_normalize_site_token(name) for name in site_mappings.values()}
+    for site in discovered_sites:
+        site_name = str((site or {}).get("name") or "").strip()
+        normalized = _normalize_site_token(site_name)
+        if not normalized or normalized in existing_wsites or normalized in existing_central:
+            continue
+        site_mappings[site_name] = site_name
+        existing_wsites.add(normalized)
+        existing_central.add(normalized)
+        changed = True
+
+    if client.api_version == "new_central" and not monitored_checks:
+        monitored_checks = [dict(item) for item in DEFAULT_NEW_CENTRAL_MONITORED_CHECKS]
+        changed = True
+    if client.api_version == "new_central" and not hardware_checks:
+        hardware_checks = [dict(item) for item in DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS]
+        changed = True
+
+    normalized_config = {
+        "site_mappings": {str(wsite).strip(): str(central_site).strip() for wsite, central_site in site_mappings.items() if str(wsite).strip() and str(central_site).strip()},
+        "monitored_checks": [dict(item) for item in monitored_checks if isinstance(item, dict)],
+        "hardware_checks": [dict(item) for item in hardware_checks if isinstance(item, dict)],
+    }
+    if changed:
+        store.set_tenant_central_sites_config(tenant_id, normalized_config)
+    return normalized_config
+
+
 def _load_hub_client_baseline(tenant_id: str) -> None:
     if tenant_id in _hub_client_baseline:
         return
@@ -496,7 +542,7 @@ async def aruba_poller() -> None:
                 try:
                     site_raw: dict[str, dict[str, Any]] = {}
                     spokes_status: dict[str, dict[str, Any]] = {}
-                    hub_sites_cfg = store.get_tenant_central_sites_config(tenant.id)
+                    hub_sites_cfg = await _auto_discover_hub_central_config(tenant.id, client)
                     hub_site_mappings = hub_sites_cfg.get("site_mappings", {}) if isinstance(hub_sites_cfg.get("site_mappings"), dict) else {}
                     hub_monitored_checks = hub_sites_cfg.get("monitored_checks", []) if isinstance(hub_sites_cfg.get("monitored_checks"), list) else []
                     hub_hardware_checks = hub_sites_cfg.get("hardware_checks", []) if isinstance(hub_sites_cfg.get("hardware_checks"), list) else []

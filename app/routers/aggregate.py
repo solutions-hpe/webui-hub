@@ -14,7 +14,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .. import auth, store
-from ..aruba import validate_cluster_url
+from ..aruba import (
+    ArubaClient,
+    DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS,
+    DEFAULT_NEW_CENTRAL_MONITORED_CHECKS,
+    validate_cluster_url,
+)
 from ..crypto import decrypt_dict, encrypt_dict
 from ..data_models import AuditEntry, Command, Spoke, Tenant, User
 
@@ -998,6 +1003,33 @@ async def get_aggregate_central_status(
     }
 
 
+@router.get("/central/available")
+async def hub_central_available(
+    tenant_id: Optional[str] = Query(default=None),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return Aruba Central alert, insight, and hardware catalogs for the hub UI."""
+    resolved_tid = _resolve_tenant_id(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tid)
+    if not tenant.aruba_config_enc:
+        return {"alerts": [], "insights": [], "hardware": [], "warning": "Central not configured on hub."}
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+        cfg["cluster_url"] = validate_cluster_url(cfg.get("cluster_url", ""))
+    except Exception as exc:
+        logger.warning("Unable to read Aruba config for tenant %s: %s", resolved_tid, exc)
+        return {"alerts": [], "insights": [], "hardware": [], "warning": "Could not read Central API config."}
+
+    client = ArubaClient(cfg)
+    if not client.is_configured():
+        return {"alerts": [], "insights": [], "hardware": [], "warning": "Central not configured on hub."}
+    try:
+        return await client.available_checks()
+    except Exception as exc:
+        logger.warning("Unable to fetch Central catalog for tenant %s: %s", resolved_tid, exc)
+        return {"alerts": [], "insights": [], "hardware": [], "warning": str(exc)}
+
+
 @router.get("/central/devices")
 async def hub_central_devices(
     site: str = Query(..., description="Site name to filter devices by"),
@@ -1316,7 +1348,7 @@ async def hub_central_site_alerts(
 
 
 @router.post("/aggregate/central")
-def update_aggregate_central(
+async def update_aggregate_central(
     payload: CentralUpdateRequest,
     tenant_id: Optional[str] = Query(default=None),
     current_user: User = Depends(auth.get_current_user),
@@ -1361,6 +1393,33 @@ def update_aggregate_central(
         spoke.config_version += 1
         store.save_spoke(spoke)
         store.ensure_config_update_command(resolved_tenant_id, spoke.id)
+
+    if mode == "centralized" and tenant.aruba_config_enc:
+        central_sites_config = _normalize_central_sites_config(store.get_tenant_central_sites_config(resolved_tenant_id))
+        if cfg.get("api_version") == "new_central":
+            if not central_sites_config.get("monitored_checks"):
+                central_sites_config["monitored_checks"] = [dict(item) for item in DEFAULT_NEW_CENTRAL_MONITORED_CHECKS]
+            if not central_sites_config.get("hardware_checks"):
+                central_sites_config["hardware_checks"] = [dict(item) for item in DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS]
+        try:
+            discover_client = ArubaClient(cfg)
+            discovered_sites = await discover_client.list_sites() if discover_client.is_configured() else []
+        except Exception as exc:
+            logger.warning("Unable to auto-discover Aruba Central sites for tenant %s: %s", resolved_tenant_id, exc)
+            discovered_sites = []
+        existing_wsites = {str(name).strip().casefold() for name in central_sites_config.get("site_mappings", {})}
+        existing_central = {str(name).strip().casefold() for name in central_sites_config.get("site_mappings", {}).values()}
+        for site in discovered_sites:
+            site_name = str((site or {}).get("name") or "").strip()
+            if not site_name:
+                continue
+            normalized = site_name.casefold()
+            if normalized in existing_wsites or normalized in existing_central:
+                continue
+            central_sites_config.setdefault("site_mappings", {})[site_name] = site_name
+            existing_wsites.add(normalized)
+            existing_central.add(normalized)
+        store.set_tenant_central_sites_config(resolved_tenant_id, central_sites_config)
 
     return _aggregate_central_payload(resolved_tenant_id)
 
