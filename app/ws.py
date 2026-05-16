@@ -10,6 +10,8 @@ from .auth import decode_access_token
 
 browser_connections: Set[WebSocket] = set()
 spoke_connections: dict[tuple[str, str], WebSocket] = {}
+_spoke_send_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_shell_queues: dict[str, asyncio.Queue] = {}
 _main_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -95,13 +97,17 @@ async def ws_connect(websocket: WebSocket) -> None:
 
 async def register_spoke(websocket: WebSocket, tenant_id: str, spoke_id: str) -> None:
     await websocket.accept()
-    spoke_connections[(tenant_id, spoke_id)] = websocket
+    key = (tenant_id, spoke_id)
+    spoke_connections[key] = websocket
+    _spoke_send_locks.setdefault(key, asyncio.Lock())
 
 
 async def unregister_spoke(tenant_id: str, spoke_id: str, websocket: WebSocket | None = None) -> None:
-    current = spoke_connections.get((tenant_id, spoke_id))
+    key = (tenant_id, spoke_id)
+    current = spoke_connections.get(key)
     if websocket is None or current is websocket:
-        spoke_connections.pop((tenant_id, spoke_id), None)
+        spoke_connections.pop(key, None)
+        _spoke_send_locks.pop(key, None)
 
 
 async def ws_broadcast(data: dict) -> None:
@@ -115,16 +121,42 @@ async def ws_broadcast(data: dict) -> None:
     browser_connections.difference_update(dead)
 
 
-async def send_spoke_command(tenant_id: str, spoke_id: str, command: dict) -> bool:
-    websocket = spoke_connections.get((tenant_id, spoke_id))
+def register_shell_session(session_id: str) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue()
+    _shell_queues[session_id] = queue
+    return queue
+
+
+def unregister_shell_session(session_id: str) -> None:
+    _shell_queues.pop(session_id, None)
+
+
+def route_shell_message(message: dict) -> None:
+    session_id = str(message.get("session_id") or "").strip()
+    if not session_id:
+        return
+    queue = _shell_queues.get(session_id)
+    if queue is not None:
+        queue.put_nowait(message)
+
+
+async def send_to_spoke(tenant_id: str, spoke_id: str, message: dict) -> bool:
+    key = (tenant_id, spoke_id)
+    websocket = spoke_connections.get(key)
     if websocket is None:
         return False
+    lock = _spoke_send_locks.setdefault(key, asyncio.Lock())
     try:
-        await websocket.send_json({"type": "commands", "commands": [command]})
+        async with lock:
+            await websocket.send_json(message)
     except Exception:
         await unregister_spoke(tenant_id, spoke_id, websocket)
         return False
     return True
+
+
+async def send_spoke_command(tenant_id: str, spoke_id: str, command: dict) -> bool:
+    return await send_to_spoke(tenant_id, spoke_id, {"type": "commands", "commands": [command]})
 
 
 async def push_spoke_commands(tenant_id: str, spoke_id: str) -> bool:
@@ -145,10 +177,8 @@ async def push_spoke_commands(tenant_id: str, spoke_id: str) -> bool:
             for c in commands
         ],
     }
-    try:
-        await websocket.send_json(payload)
-    except Exception:
-        await unregister_spoke(tenant_id, spoke_id, websocket)
+    sent = await send_to_spoke(tenant_id, spoke_id, payload)
+    if not sent:
         return False
 
     store.mark_commands_delivered(tenant_id, spoke_id, [command.id for command in commands])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import ssl
@@ -14,7 +15,7 @@ import websockets
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from .. import auth, store
+from .. import auth, store, ws as relay_ws
 from ..crypto import decrypt_str
 from ..data_models import User
 
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _sessions: dict[str, dict[str, Any]] = {}
 SESSION_TTL = 60
+SHELL_START_TIMEOUT = 10
 _CONNECT_HEADER_ARG = (
     "additional_headers"
     if "additional_headers" in inspect.signature(websockets.connect).parameters
@@ -72,6 +74,52 @@ def _resolve_spoke_node(spoke) -> str:
         if value:
             return value
     return ""
+
+
+def _require_tenant_admin(tenant_id: str, user: User) -> None:
+    auth.require_tenant_access(tenant_id, user)
+    if not user.is_superadmin and user.get_role(tenant_id) != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+
+async def _close_shell_websocket(websocket: WebSocket, code: int, reason: str) -> None:
+    if websocket.application_state != WebSocketState.DISCONNECTED:
+        await websocket.close(code=code, reason=reason)
+
+
+async def _browser_to_spoke_shell(websocket: WebSocket, tenant_id: str, spoke_id: str, session_id: str) -> None:
+    while True:
+        message = await websocket.receive_json()
+        if not isinstance(message, dict):
+            raise ValueError("Shell websocket payload must be a JSON object")
+        msg_type = str(message.get("type") or "").strip().lower()
+        if msg_type == "shell_input":
+            if not await relay_ws.send_to_spoke(tenant_id, spoke_id, {
+                "type": "shell_input",
+                "session_id": session_id,
+                "data": str(message.get("data") or ""),
+            }):
+                raise RuntimeError("Spoke relay disconnected")
+        elif msg_type == "shell_resize":
+            cols = int(message.get("cols") or 80)
+            rows = int(message.get("rows") or 24)
+            if not await relay_ws.send_to_spoke(tenant_id, spoke_id, {
+                "type": "shell_resize",
+                "session_id": session_id,
+                "cols": cols,
+                "rows": rows,
+            }):
+                raise RuntimeError("Spoke relay disconnected")
+
+
+async def _spoke_to_browser_shell(websocket: WebSocket, queue: asyncio.Queue, session_id: str) -> None:
+    while True:
+        message = await queue.get()
+        if not isinstance(message, dict) or message.get("session_id") != session_id:
+            continue
+        await websocket.send_json(message)
+        if str(message.get("type") or "") == "shell_exit":
+            return
 
 
 async def _request_vnc_proxy(
@@ -250,5 +298,90 @@ async def console_websocket(websocket: WebSocket, session_id: str):
                 task.cancel()
         if relay_tasks:
             await asyncio.gather(*relay_tasks, return_exceptions=True)
+        if websocket.application_state != WebSocketState.DISCONNECTED:
+            await websocket.close()
+
+
+@router.websocket("/api/{tenant_id}/spokes/{spoke_id}/shell")
+async def spoke_shell_ws(websocket: WebSocket, tenant_id: str, spoke_id: str, token: str = Query(...)):
+    try:
+        current_user = auth.decode_access_token(str(token or "").strip())
+        _require_tenant_admin(tenant_id, current_user)
+    except HTTPException as exc:
+        await websocket.close(code=4401 if exc.status_code == 401 else 4403, reason=str(exc.detail))
+        return
+
+    spoke = store.get_spoke(tenant_id, spoke_id)
+    if not spoke:
+        await websocket.close(code=4404, reason="Spoke not found")
+        return
+    if spoke.status != "approved":
+        await websocket.close(code=4409, reason="Spoke is not approved")
+        return
+
+    session_id = str(uuid.uuid4())
+    queue = relay_ws.register_shell_session(session_id)
+    relay_tasks: list[asyncio.Task[Any]] = []
+    browser_disconnected = False
+
+    await websocket.accept()
+    try:
+        sent = await relay_ws.send_to_spoke(tenant_id, spoke_id, {"type": "shell_start", "session_id": session_id})
+        if not sent:
+            await websocket.send_json({"type": "shell_exit", "session_id": session_id, "exit_code": -1, "error": "Spoke relay is offline"})
+            await _close_shell_websocket(websocket, 1011, "Spoke relay is offline")
+            return
+
+        try:
+            started_message = await asyncio.wait_for(queue.get(), timeout=SHELL_START_TIMEOUT)
+        except asyncio.TimeoutError:
+            await websocket.send_json({"type": "shell_exit", "session_id": session_id, "exit_code": -1, "error": "Timed out waiting for shell startup"})
+            with contextlib.suppress(Exception):
+                await relay_ws.send_to_spoke(tenant_id, spoke_id, {"type": "shell_exit", "session_id": session_id})
+            await _close_shell_websocket(websocket, 1011, "Shell startup timeout")
+            return
+
+        if not isinstance(started_message, dict):
+            raise RuntimeError("Invalid shell startup response")
+
+        started_type = str(started_message.get("type") or "")
+        await websocket.send_json(started_message)
+        if started_type != "shell_started":
+            await _close_shell_websocket(websocket, 1011, str(started_message.get("error") or "Shell startup failed"))
+            return
+
+        relay_tasks = [
+            asyncio.create_task(_browser_to_spoke_shell(websocket, tenant_id, spoke_id, session_id)),
+            asyncio.create_task(_spoke_to_browser_shell(websocket, queue, session_id)),
+        ]
+        done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*relay_tasks, return_exceptions=True)
+        for task in done:
+            exc = task.exception()
+            if isinstance(exc, WebSocketDisconnect):
+                browser_disconnected = True
+                continue
+            if exc and not isinstance(exc, asyncio.CancelledError):
+                raise exc
+    except WebSocketDisconnect:
+        browser_disconnected = True
+    except Exception as exc:
+        logger.warning("Spoke shell relay failed for %s/%s session %s: %s", tenant_id, spoke_id, session_id, exc)
+        if websocket.application_state != WebSocketState.DISCONNECTED:
+            with contextlib.suppress(Exception):
+                await websocket.send_json({"type": "shell_exit", "session_id": session_id, "exit_code": -1, "error": str(exc)})
+            await _close_shell_websocket(websocket, 1011, "Shell relay failed")
+    finally:
+        relay_ws.unregister_shell_session(session_id)
+        for task in relay_tasks:
+            if not task.done():
+                task.cancel()
+        if relay_tasks:
+            await asyncio.gather(*relay_tasks, return_exceptions=True)
+        if browser_disconnected:
+            with contextlib.suppress(Exception):
+                await relay_ws.send_to_spoke(tenant_id, spoke_id, {"type": "shell_exit", "session_id": session_id})
         if websocket.application_state != WebSocketState.DISCONNECTED:
             await websocket.close()

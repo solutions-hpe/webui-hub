@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, Command, PendingSpoke, User
-from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, unregister_spoke, ws_broadcast
+from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, unregister_spoke, ws_broadcast
 
 # In-memory update job store: job_id -> job dict
 _update_jobs: dict[str, dict[str, Any]] = {}
@@ -1060,6 +1060,8 @@ async def spoke_websocket(
                     await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
                 elif msg_type in {"backup_progress", "reseed_progress"}:
                     await _relay_backup_progress(spoke_id, msg_type, data)
+                elif msg_type.startswith("shell_"):
+                    route_shell_message(data)
             except WebSocketDisconnect:
                 raise
             except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
