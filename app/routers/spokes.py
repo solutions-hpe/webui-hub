@@ -792,12 +792,23 @@ async def _poll_update_job(job_id: str, tenant_id: str) -> None:
             cur_agent = proxmox.get("agent_version")
             cur_spoke = health.get("installer_version") or health.get("version")
 
-            # Check agent version — as soon as it changes, enqueue spoke self_update
+            # Check agent version — as soon as it changes (or after 4 polls
+            # with no change, meaning agent is already current), enqueue spoke self_update
             if sd["agent_status"] == "pending":
                 if cur_agent and cur_agent != sd["agent_version_before"]:
                     sd["agent_status"] = "updated"
                     sd["agent_version_after"] = cur_agent
-                    # Agent confirmed updated — immediately trigger spoke self_update
+                    store.enqueue_command(Command(
+                        spoke_id=spoke.id,
+                        tenant_id=tenant_id,
+                        type="self_update",
+                        payload={},
+                        expires_at=_now() + timedelta(hours=24),
+                    ))
+                elif sd.get("agent_check_count", 0) >= 4:
+                    # Agent version unchanged after ~60s — already at latest; proceed to spoke update
+                    sd["agent_status"] = "current"
+                    sd["agent_version_after"] = cur_agent
                     store.enqueue_command(Command(
                         spoke_id=spoke.id,
                         tenant_id=tenant_id,
@@ -806,6 +817,7 @@ async def _poll_update_job(job_id: str, tenant_id: str) -> None:
                         expires_at=_now() + timedelta(hours=24),
                     ))
                 else:
+                    sd["agent_check_count"] = sd.get("agent_check_count", 0) + 1
                     all_done = False
 
             # Check spoke version

@@ -173,7 +173,7 @@ async def auto_recovery_check() -> None:
                 for spoke in store.list_spokes(tenant.id):
                     if spoke.status != "approved":
                         continue
-                    timeout_hours = spoke.config.get("vm_silent_timeout", 24)
+                    timeout_hours = float(spoke.config.get("vm_silent_timeout", 24))
                     if not spoke.last_seen:
                         continue
                     offline_secs = (_now() - spoke.last_seen).total_seconds()
