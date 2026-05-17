@@ -179,9 +179,9 @@ async def _proxmox_to_browser(upstream, websocket: WebSocket) -> None:
 
 
 @router.get("/console", response_class=HTMLResponse, include_in_schema=False)
-async def vnc_console_page(session_id: str = Query(...)):
+async def vnc_console_page(session_id: str = Query(...), token: str = Query(...)):
     """Serve the noVNC console page for a given console session."""
-    html = _VNC_PAGE_HTML.replace("__SESSION_ID__", session_id)
+    html = _VNC_PAGE_HTML.replace("__SESSION_ID__", session_id).replace("__AUTH_TOKEN__", token)
     return HTMLResponse(content=html)
 
 
@@ -225,8 +225,9 @@ _VNC_PAGE_HTML = """<!DOCTYPE html>
     import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
 
     const sessionId = '__SESSION_ID__';
+    const authToken = '__AUTH_TOKEN__';
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = proto + '//' + location.host + '/ws/console/' + sessionId;
+    const wsUrl = proto + '//' + location.host + '/ws/console/' + sessionId + '?token=' + encodeURIComponent(authToken);
 
     const statusEl = document.getElementById('status');
     let rfb;
@@ -318,6 +319,7 @@ async def create_console_session(
 
     session_id = str(uuid.uuid4())
     _sessions[session_id] = {
+        "tenant_id": tenant_id,
         "spoke_id": spoke_id,
         "vmid": vmid,
         "vmtype": normalized_vmtype,
@@ -332,13 +334,22 @@ async def create_console_session(
 
 
 @router.websocket("/ws/console/{session_id}")
-async def console_websocket(websocket: WebSocket, session_id: str):
+async def console_websocket(websocket: WebSocket, session_id: str, token: str = Query(...)):
     _cleanup_sessions()
-    session = _sessions.pop(session_id, None)
+    session = _sessions.get(session_id)
     if not session or session.get("expires", 0) < time.time():
         await websocket.close(code=4404, reason="Invalid or expired console session")
         return
 
+    try:
+        user = auth.decode_access_token(str(token or "").strip())
+        auth.require_tenant_member(session["tenant_id"], user)
+    except HTTPException as exc:
+        code = 4401 if exc.status_code == 401 else 4403
+        await websocket.close(code=code, reason=str(exc.detail))
+        return
+
+    _sessions.pop(session_id, None)
     await websocket.accept()
 
     params = urllib.parse.urlencode(
