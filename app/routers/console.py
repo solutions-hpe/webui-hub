@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import websockets
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketState
 
 from .. import auth, store, ws as relay_ws
@@ -177,6 +178,100 @@ async def _proxmox_to_browser(upstream, websocket: WebSocket) -> None:
             await websocket.send_text(message)
 
 
+@router.get("/console", response_class=HTMLResponse, include_in_schema=False)
+async def vnc_console_page(session_id: str = Query(...)):
+    """Serve the noVNC console page for a given console session."""
+    html = _VNC_PAGE_HTML.replace("__SESSION_ID__", session_id)
+    return HTMLResponse(content=html)
+
+
+_VNC_PAGE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VM Console</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #1a1a2e; overflow: hidden; }
+    #toolbar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 12px; background: #16213e; border-bottom: 1px solid #333;
+      color: #ccc; font-family: sans-serif; font-size: 13px;
+    }
+    #toolbar button {
+      padding: 4px 12px; border: 1px solid #555; border-radius: 4px;
+      background: #0f3460; color: #eee; cursor: pointer; font-size: 12px;
+    }
+    #toolbar button:hover { background: #1a5276; }
+    #status { margin-left: auto; font-size: 12px; }
+    #status.connected { color: #2ecc71; }
+    #status.disconnected { color: #e74c3c; }
+    #status.connecting { color: #f39c12; }
+    #screen { width: 100%; height: calc(100vh - 38px); }
+    #screen canvas { width: 100% !important; height: 100% !important; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <strong>VM Console</strong>
+    <button onclick="sendCtrlAltDel()">Ctrl+Alt+Del</button>
+    <button onclick="toggleClipboard()">Clipboard</button>
+    <button onclick="rfb && rfb.sendKey(0xFFE9, 'AltLeft', true); rfb && rfb.sendKey(0xFFE9, 'AltLeft', false);" style="display:none" id="btn-extra"></button>
+    <span id="status" class="connecting">Connecting…</span>
+  </div>
+  <div id="screen"></div>
+  <script type="module">
+    import RFB from 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
+
+    const sessionId = '__SESSION_ID__';
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = proto + '//' + location.host + '/ws/console/' + sessionId;
+
+    const statusEl = document.getElementById('status');
+    let rfb;
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className = cls;
+    }
+
+    try {
+      rfb = new RFB(document.getElementById('screen'), wsUrl, {
+        credentials: { password: '' },
+      });
+
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+
+      rfb.addEventListener('connect', () => setStatus('Connected', 'connected'));
+      rfb.addEventListener('disconnect', (e) => {
+        const reason = e.detail?.reason || 'Connection closed';
+        setStatus('Disconnected: ' + reason, 'disconnected');
+      });
+      rfb.addEventListener('credentialsrequired', () => {
+        const pass = prompt('VNC Password:') || '';
+        rfb.sendCredentials({ password: pass });
+      });
+      rfb.addEventListener('securityfailure', (e) => {
+        setStatus('Security failure: ' + (e.detail?.reason || 'unknown'), 'disconnected');
+      });
+    } catch (err) {
+      setStatus('Error: ' + err.message, 'disconnected');
+    }
+
+    window.rfb = rfb;
+    window.sendCtrlAltDel = () => rfb && rfb.sendCtrlAltDel();
+    window.toggleClipboard = () => {
+      if (!rfb) return;
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.getElementById('screen').requestFullscreen().catch(() => {});
+    };
+  </script>
+</body>
+</html>"""
+
+
 @router.post("/api/{tenant_id}/spokes/{spoke_id}/console/{vmid}")
 async def create_console_session(
     tenant_id: str,
@@ -187,6 +282,7 @@ async def create_console_session(
 ):
     auth.require_tenant_member(tenant_id, current_user)
     _cleanup_sessions()
+    spoke = store.get_spoke(tenant_id, spoke_id)
     if not spoke:
         raise HTTPException(status_code=404, detail="Spoke not found")
     if spoke.status != "approved":
