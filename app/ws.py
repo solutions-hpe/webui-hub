@@ -13,6 +13,7 @@ spoke_connections: dict[tuple[str, str], WebSocket] = {}
 _spoke_send_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _shell_queues: dict[str, asyncio.Queue] = {}
 _vnc_queues: dict[str, asyncio.Queue] = {}
+_log_fetch_queues: dict[str, asyncio.Queue] = {}
 _main_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -209,3 +210,22 @@ def notify_spoke_command(tenant_id: str, spoke_id: str) -> None:
     if _main_loop is None:
         return
     asyncio.run_coroutine_threadsafe(push_spoke_commands(tenant_id, spoke_id), _main_loop)
+
+
+def register_log_fetch(request_id: str) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue()
+    _log_fetch_queues[request_id] = queue
+    return queue
+
+
+def unregister_log_fetch(request_id: str) -> None:
+    _log_fetch_queues.pop(request_id, None)
+
+
+def route_log_fetch_message(message: dict) -> None:
+    request_id = str(message.get("request_id") or "").strip()
+    if not request_id:
+        return
+    queue = _log_fetch_queues.get(request_id)
+    if queue is not None:
+        queue.put_nowait(message)
