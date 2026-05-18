@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .. import auth, store
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, Command, PendingSpoke, User
-from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, unregister_spoke, ws_broadcast
+from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, route_vnc_message, unregister_spoke, ws_broadcast
 
 # In-memory update job store: job_id -> job dict
 _update_jobs: dict[str, dict[str, Any]] = {}
@@ -681,6 +681,12 @@ def set_spoke_proxmox_credentials(
         spoke.proxmox_token_enc = encrypt_str(token) if token else ""
     store.save_spoke(spoke)
 
+    # Push the API token to the spoke via config_update so it can use it locally
+    # for the VNC relay (spoke needs the token to call Proxmox vncproxy).
+    if payload.proxmox_token is not None:
+        token = str(payload.proxmox_token).strip()
+        _queue_spoke_config_push(resolved_tenant_id, spoke_id, {"proxmox_api_token": token})
+
     proxmox_host = spoke.proxmox_host or str(spoke.hostname or "").strip()
     return {
         "ok": True,
@@ -1074,6 +1080,8 @@ async def spoke_websocket(
                     await _relay_backup_progress(spoke_id, msg_type, data)
                 elif msg_type.startswith("shell_"):
                     route_shell_message(data)
+                elif msg_type.startswith("vnc_"):
+                    route_vnc_message(data)
             except WebSocketDisconnect:
                 raise
             except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:

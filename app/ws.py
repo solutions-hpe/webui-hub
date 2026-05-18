@@ -12,6 +12,7 @@ browser_connections: Set[WebSocket] = set()
 spoke_connections: dict[tuple[str, str], WebSocket] = {}
 _spoke_send_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _shell_queues: dict[str, asyncio.Queue] = {}
+_vnc_queues: dict[str, asyncio.Queue] = {}
 _main_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -136,6 +137,25 @@ def route_shell_message(message: dict) -> None:
     if not session_id:
         return
     queue = _shell_queues.get(session_id)
+    if queue is not None:
+        queue.put_nowait(message)
+
+
+def register_vnc_session(request_id: str) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue()
+    _vnc_queues[request_id] = queue
+    return queue
+
+
+def unregister_vnc_session(request_id: str) -> None:
+    _vnc_queues.pop(request_id, None)
+
+
+def route_vnc_message(message: dict) -> None:
+    request_id = str(message.get("request_id") or "").strip()
+    if not request_id:
+        return
+    queue = _vnc_queues.get(request_id)
     if queue is not None:
         queue.put_nowait(message)
 

@@ -1,23 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import inspect
+import base64
 import logging
-import ssl
 import time
-import urllib.parse
 import uuid
 from typing import Any
-
-import httpx
-import websockets
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketState
 
 from .. import auth, store, ws as relay_ws
-from ..crypto import decrypt_str
 from ..data_models import User
 
 router = APIRouter()
@@ -26,11 +19,6 @@ logger = logging.getLogger(__name__)
 _sessions: dict[str, dict[str, Any]] = {}
 SESSION_TTL = 60
 SHELL_START_TIMEOUT = 10
-_CONNECT_HEADER_ARG = (
-    "additional_headers"
-    if "additional_headers" in inspect.signature(websockets.connect).parameters
-    else "extra_headers"
-)
 
 
 def _cleanup_sessions() -> None:
@@ -38,43 +26,6 @@ def _cleanup_sessions() -> None:
     expired = [key for key, value in _sessions.items() if value.get("expires", 0) < now]
     for key in expired:
         _sessions.pop(key, None)
-
-
-def _proxmox_headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"PVEAPIToken={token}"}
-
-
-def _proxmox_error_message(response: httpx.Response) -> str:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict):
-        detail = payload.get("detail") or payload.get("message") or payload.get("error")
-        if isinstance(detail, str) and detail.strip():
-            return detail.strip()
-        errors = payload.get("errors")
-        if isinstance(errors, dict) and errors:
-            return "; ".join(f"{key}: {value}" for key, value in errors.items())
-    text = response.text.strip()
-    return text or f"HTTP {response.status_code}"
-
-
-def _resolve_spoke_node(spoke) -> str:
-    telemetry = spoke.telemetry if isinstance(spoke.telemetry, dict) else {}
-    proxmox = telemetry.get("proxmox") if isinstance(telemetry.get("proxmox"), dict) else {}
-    proxmox_node = proxmox.get("node") if isinstance(proxmox.get("node"), dict) else {}
-    node = telemetry.get("node") if isinstance(telemetry.get("node"), dict) else {}
-    candidates = [
-        node.get("hostname"),
-        proxmox_node.get("hostname"),
-        spoke.hostname,
-    ]
-    for candidate in candidates:
-        value = str(candidate or "").strip()
-        if value:
-            return value
-    return ""
 
 
 def _require_tenant_admin(tenant_id: str, user: User) -> None:
@@ -293,41 +244,31 @@ async def create_console_session(
     if normalized_vmtype not in {"qemu", "lxc"}:
         raise HTTPException(status_code=400, detail="vmtype must be qemu or lxc")
 
-    token_enc = str(getattr(spoke, "proxmox_token_enc", "") or "").strip()
-    if not token_enc:
-        raise HTTPException(status_code=400, detail="Configure Proxmox credentials first.")
+    request_id = str(uuid.uuid4())
+    queue = relay_ws.register_vnc_session(request_id)
     try:
-        proxmox_token = decrypt_str(token_enc)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail="Failed to decrypt Proxmox credentials") from exc
-
-    node = _resolve_spoke_node(spoke)
-    if not node:
-        raise HTTPException(status_code=400, detail="Spoke telemetry is missing the Proxmox node hostname")
-
-    proxmox_host = str(getattr(spoke, "proxmox_host", "") or "").strip() or str(spoke.hostname or "").strip()
-    if not proxmox_host:
-        raise HTTPException(status_code=400, detail="Spoke is missing a Proxmox host")
-
-    proxy = await _request_vnc_proxy(
-        proxmox_host=proxmox_host,
-        proxmox_token=proxmox_token,
-        node=node,
-        vmid=vmid,
-        vmtype=normalized_vmtype,
-    )
+        sent = await relay_ws.send_to_spoke(tenant_id, spoke_id, {
+            "type": "vnc_proxy_request",
+            "request_id": request_id,
+            "vmid": vmid,
+            "vmtype": normalized_vmtype,
+        })
+        if not sent:
+            raise HTTPException(status_code=502, detail="Spoke relay is offline")
+        try:
+            response = await asyncio.wait_for(queue.get(), timeout=15.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Spoke did not respond to VNC request in time")
+        if response.get("type") == "vnc_proxy_error":
+            raise HTTPException(status_code=502, detail=response.get("error", "VNC proxy failed on spoke"))
+    finally:
+        relay_ws.unregister_vnc_session(request_id)
 
     session_id = str(uuid.uuid4())
     _sessions[session_id] = {
         "tenant_id": tenant_id,
         "spoke_id": spoke_id,
-        "vmid": vmid,
-        "vmtype": normalized_vmtype,
-        "node": node,
-        "ticket": proxy["ticket"],
-        "port": proxy["port"],
-        "proxmox_host": proxmox_host,
-        "proxmox_token": proxmox_token,
+        "request_id": request_id,
         "expires": time.time() + SESSION_TTL,
     }
     return {"session_id": session_id, "expires_in": SESSION_TTL}
@@ -350,54 +291,60 @@ async def console_websocket(websocket: WebSocket, session_id: str, token: str = 
         return
 
     _sessions.pop(session_id, None)
+    request_id = session["request_id"]
+    tenant_id = session["tenant_id"]
+    spoke_id = session["spoke_id"]
+
     await websocket.accept()
 
-    params = urllib.parse.urlencode(
-        {
-            "port": session["port"],
-            "vncticket": session["ticket"],
-        }
-    )
-    path = (
-        f"/api2/json/nodes/{urllib.parse.quote(session['node'], safe='')}/"
-        f"{session['vmtype']}/{session['vmid']}/vncwebsocket?{params}"
-    )
-    upstream_url = f"wss://{session['proxmox_host']}:8006{path}"
-
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
-    connect_kwargs: dict[str, Any] = {
-        "ssl": ssl_context,
-        "open_timeout": 20,
-        "max_size": None,
-        _CONNECT_HEADER_ARG: _proxmox_headers(session["proxmox_token"]),
-    }
-
-    upstream = None
-    relay_tasks: list[asyncio.Task[Any]] = []
+    frame_queue = relay_ws.register_vnc_session(request_id)
+    relay_tasks: list[asyncio.Task] = []
     try:
-        async with websockets.connect(upstream_url, **connect_kwargs) as upstream:
-            relay_tasks = [
-                asyncio.create_task(_browser_to_proxmox(websocket, upstream)),
-                asyncio.create_task(_proxmox_to_browser(upstream, websocket)),
-            ]
-            done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*relay_tasks, return_exceptions=True)
-            for task in done:
-                exc = task.exception()
-                if exc and not isinstance(exc, (WebSocketDisconnect, websockets.ConnectionClosed)):
-                    raise exc
+        async def browser_to_spoke() -> None:
+            while True:
+                msg = await websocket.receive()
+                msg_type = msg.get("type")
+                if msg_type == "websocket.disconnect":
+                    raise WebSocketDisconnect(code=msg.get("code", 1000))
+                if msg_type != "websocket.receive":
+                    continue
+                raw = msg.get("bytes") or (msg.get("text") or "").encode()
+                await relay_ws.send_to_spoke(tenant_id, spoke_id, {
+                    "type": "vnc_frame_to_proxmox",
+                    "request_id": request_id,
+                    "data": base64.b64encode(raw).decode(),
+                })
+
+        async def spoke_to_browser() -> None:
+            while True:
+                frame_msg = await frame_queue.get()
+                if frame_msg.get("type") in ("vnc_disconnect", "vnc_proxy_error"):
+                    raise WebSocketDisconnect(code=1000)
+                raw = base64.b64decode(frame_msg.get("data", ""))
+                await websocket.send_bytes(raw)
+
+        relay_tasks = [
+            asyncio.create_task(browser_to_spoke()),
+            asyncio.create_task(spoke_to_browser()),
+        ]
+        done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*relay_tasks, return_exceptions=True)
+        for task in done:
+            exc = task.exception()
+            if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                raise exc
     except HTTPException:
         raise
     except Exception as exc:
         logger.warning("Console relay failed for session %s: %s", session_id, exc)
-        if websocket.application_state != WebSocketState.DISCONNECTED:
-            await websocket.close(code=1011, reason="Console relay failed")
     finally:
+        relay_ws.unregister_vnc_session(request_id)
+        await relay_ws.send_to_spoke(tenant_id, spoke_id, {
+            "type": "vnc_disconnect",
+            "request_id": request_id,
+        })
         for task in relay_tasks:
             if not task.done():
                 task.cancel()
