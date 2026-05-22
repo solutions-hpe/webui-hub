@@ -605,6 +605,13 @@ def get_aggregate_clients(
     for spoke in _approved_spokes(resolved_tenant_id):
         spoke_name = spoke.spoke_name or spoke.hostname
         usb_vmids, usb_hostnames, vmids_by_hostname = _spoke_usb_lookup(spoke)
+        # Pull T3 PCI device list from this spoke's proxmox telemetry so every
+        # client row on this spoke carries the node-level T3 device info.
+        proxmox_tel = _telemetry_dict(spoke, "proxmox")
+        t3_pci_devices: list[dict[str, Any]] = []
+        if isinstance(proxmox_tel.get("t3_pci_devices"), list):
+            t3_pci_devices = proxmox_tel["t3_pci_devices"]
+        t3_pci_count = int(proxmox_tel.get("t3_pci_count") or len(t3_pci_devices))
         for client in _telemetry_clients(spoke):
             row = dict(client)
             row.update({
@@ -614,6 +621,10 @@ def get_aggregate_clients(
                 "spoke_hostname": spoke.hostname,
                 "spoke_label": spoke.label,
                 "has_usb": _client_has_usb(row, usb_vmids, usb_hostnames, vmids_by_hostname),
+                # T3: node-level PCI device info — same value for all clients on this spoke.
+                "has_t3_pci": t3_pci_count > 0,
+                "t3_pci_count": t3_pci_count,
+                "t3_pci_devices": t3_pci_devices,
             })
             rows.append(row)
     rows.sort(key=lambda item: (str(item.get("spoke_name") or "").lower(), str(item.get("hostname") or "").lower()))
