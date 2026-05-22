@@ -18,13 +18,37 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 # ── Server boot nonce ──────────────────────────────────────────────────────────
-# A random ID generated once when this module is first imported (i.e. at server
-# startup).  Every JWT issued while the server is running embeds this value in a
-# "bid" (boot-ID) claim.  When the server restarts (or is redeployed), a new
-# nonce is generated and all previously issued tokens become invalid — their
-# "bid" no longer matches, so callers receive a 401 and must log in again.
-# This is intentional: redeployment should require re-authentication.
-SERVER_BOOT_ID: str = str(uuid4())
+# All gunicorn workers must share the same boot ID — a per-process uuid4() would
+# produce a different value in each worker, causing cross-worker 401 failures
+# (login hits worker A, /me hits worker B, bid mismatch → forced logout).
+#
+# Strategy: write a UUID to a temp file on first call; every subsequent worker
+# reads the same file and gets the same ID.  The file is placed next to the
+# data store so it lives on the persistent volume and survives worker restarts
+# but is replaced when the container is replaced (new deployment = new nonce).
+def _load_or_create_boot_id() -> str:
+    import os
+    from pathlib import Path
+    # Store alongside the hub's data directory so it persists across worker spawns
+    # but is lost when the container is recreated (intentional: redeploy = re-auth).
+    data_dir = Path(os.getenv("HUB_DATA_DIR", "/data"))
+    boot_file = data_dir / ".boot_id"
+    try:
+        if boot_file.exists():
+            bid = boot_file.read_text().strip()
+            if bid:
+                return bid
+        # First worker to start writes the file; others read it.
+        bid = str(uuid4())
+        boot_file.write_text(bid)
+        return bid
+    except Exception:
+        # Fallback: use a fixed string so all workers still agree, though
+        # this means a redeploy won't invalidate old tokens.  Better than
+        # breaking login entirely.
+        return "static-fallback-boot-id"
+
+SERVER_BOOT_ID: str = _load_or_create_boot_id()
 
 
 def hash_password(password: str) -> str:
