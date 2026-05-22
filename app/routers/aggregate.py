@@ -710,6 +710,13 @@ def get_aggregate_proxmox(
                 "vmid_start": int((spoke.config or {}).get("vmid_start", 0) or 0),
                 "usb_vidpids": (spoke.config or {}).get("usb_vidpids", "[]"),
                 "hostname": spoke.hostname or "",
+                # USB auto-provisioning settings — exposed so the hub VM-server
+                # USB tab can display and edit them per-spoke.
+                "usb_auto_provision": (spoke.config or {}).get("usb_auto_provision", "off"),
+                "usb_missing_timeout": str((spoke.config or {}).get("usb_missing_timeout", "60")),
+                "usb_sim_phy": (spoke.config or {}).get("usb_sim_phy", "wireless"),
+                "usb_ignored_vidpids": (spoke.config or {}).get("usb_ignored_vidpids", "[]"),
+                "reclone_concurrency": str((spoke.config or {}).get("reclone_concurrency", "1")),
             },
         })
     hosts.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
