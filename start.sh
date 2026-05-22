@@ -35,11 +35,21 @@ else
     echo "[$(date -u)] TLS certificate already exists — skipping generation."
 fi
 
-echo "[$(date -u)] Starting uvicorn on port $HUB_PORT..."
-exec "$PYTHON_BIN" -m uvicorn app.main:app \
-    --host 0.0.0.0 \
-    --port "$HUB_PORT" \
-    --ssl-keyfile "$KEY_PATH" \
-    --ssl-certfile "$CERT_PATH" \
-    --proxy-headers \
-    --forwarded-allow-ips "*"
+echo "[$(date -u)] Starting gunicorn (uvicorn workers) on port $HUB_PORT..."
+# Workers: 2 per CPU + 1. ACI default is 1 CPU → 3 workers.
+# Each worker is a full uvicorn async event loop — handles its own WebSocket
+# connections independently. Commands are persisted to JSON queue files on
+# disk so any worker can read them; delivery to a spoke happens on the next
+# telemetry heartbeat (~15s) if the enqueue-time push misses the right worker.
+WORKERS=${UVICORN_WORKERS:-$(python3 -c "import os; print(2 * os.cpu_count() + 1)")}
+echo "[$(date -u)] Worker count: $WORKERS"
+exec "$PYTHON_BIN" -m gunicorn app.main:app \
+    --workers "$WORKERS" \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --bind "0.0.0.0:$HUB_PORT" \
+    --keyfile "$KEY_PATH" \
+    --certfile "$CERT_PATH" \
+    --forwarded-allow-ips "*" \
+    --timeout 120 \
+    --graceful-timeout 30 \
+    --keep-alive 5
