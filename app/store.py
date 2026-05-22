@@ -12,7 +12,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import shutil
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -72,9 +74,12 @@ def _read_json(path: Path) -> Any:
 
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    # Use a unique per-process temp file so concurrent gunicorn workers don't
+    # race on the same .tmp path. os.replace() is atomic on the same filesystem.
+    fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=path.stem + ".")
+    tmp = Path(tmp_str)
     try:
-        with open(tmp, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2, default=str)
         tmp.replace(path)
     except OSError as exc:
