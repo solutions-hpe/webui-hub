@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     webui_secret_key: str = ""  # Fernet master key for secrets at rest (required outside dev)
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 480
+    access_token_expire_minutes: int = 120  # 2 hours; was 8 hours — tokens are silently refreshed by the frontend
 
     # Admin bootstrap
     first_admin_username: str = "admin"

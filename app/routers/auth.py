@@ -91,6 +91,24 @@ async def login(payload: LoginRequest):
     return TokenResponse(access_token=token)
 
 
+@router.post("/refresh", response_model=TokenResponse)
+def refresh_token(current_user=Depends(auth.get_current_user)):
+    """Silently renew the caller's access token.
+
+    The existing token must be fully valid — including boot-ID check — so this
+    endpoint will return 401 if the server has been redeployed since the token
+    was issued.  The frontend uses that 401 to clear sessionStorage and show the
+    login screen, giving the user a clean re-authentication prompt.
+    """
+    settings = get_settings()
+    token = auth.create_access_token(
+        {"sub": current_user.username},
+        expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+    )
+    return TokenResponse(access_token=token)
+
+
+
 @router.get("/me", response_model=UserResponse)
 def me(current_user=Depends(auth.get_current_user)):
     return UserResponse(

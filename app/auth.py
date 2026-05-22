@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Annotated, Optional
+from uuid import uuid4
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -15,6 +16,15 @@ from .data_models import User
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+
+# ── Server boot nonce ──────────────────────────────────────────────────────────
+# A random ID generated once when this module is first imported (i.e. at server
+# startup).  Every JWT issued while the server is running embeds this value in a
+# "bid" (boot-ID) claim.  When the server restarts (or is redeployed), a new
+# nonce is generated and all previously issued tokens become invalid — their
+# "bid" no longer matches, so callers receive a 401 and must log in again.
+# This is intentional: redeployment should require re-authentication.
+SERVER_BOOT_ID: str = str(uuid4())
 
 
 def hash_password(password: str) -> str:
@@ -33,6 +43,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.access_token_expire_minutes))
     to_encode["exp"] = expire
+    # Embed the server boot nonce so this token is only valid for the current
+    # server instance.  Tokens from before a redeploy will fail validation.
+    to_encode["bid"] = SERVER_BOOT_ID
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
@@ -55,6 +68,15 @@ def _decode_token(token: str) -> User:
         username = payload.get("sub")
         if not username:
             raise exc
+        # Validate boot nonce — reject tokens issued by a previous server instance
+        # (e.g. before a redeploy).  Missing "bid" is also treated as invalid so
+        # that old tokens issued before this feature was deployed are rejected cleanly.
+        if payload.get("bid") != SERVER_BOOT_ID:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session expired after server restart — please log in again",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     except JWTError:
         raise exc
     user = store.get_user(username)
