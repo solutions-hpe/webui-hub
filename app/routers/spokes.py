@@ -138,7 +138,9 @@ def _is_spoke_online(spoke) -> bool:
     last_seen = spoke.last_seen
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=timezone.utc)
-    return (_now() - last_seen).total_seconds() < 600
+    # Use 300s to match the frontend isOnline() threshold — eliminates the
+    # red/green flicker caused by the old 600s backend vs 300s frontend mismatch.
+    return (_now() - last_seen).total_seconds() < 300
 
 
 def _normalize_usb_vidpids(items: Any) -> list[dict[str, str]]:
