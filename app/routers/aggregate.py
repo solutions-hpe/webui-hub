@@ -861,7 +861,29 @@ async def fleet_reclone(
     return {"tenant_id": resolved_tenant_id, "queued": queued, "concurrency": concurrency}
 
 
-@router.get("/{tenant_id}/aggregate/fleet-reclone-status")
+@router.post("/{tenant_id}/aggregate/fleet-reclone-clear")
+async def fleet_reclone_clear(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a clear_reclone_state command on every approved spoke to dismiss stale error state."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+
+    queued = 0
+    for spoke in _approved_spokes(resolved_tenant_id):
+        store.enqueue_command(
+            Command(
+                spoke_id=spoke.id,
+                tenant_id=resolved_tenant_id,
+                type="clear_reclone_state",
+                payload={},
+            )
+        )
+        queued += 1
+    return {"tenant_id": resolved_tenant_id, "queued": queued}
+
+
+
 def get_fleet_reclone_status(
     tenant_id: str,
     current_user: User = Depends(auth.get_current_user),
