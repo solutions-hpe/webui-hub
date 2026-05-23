@@ -18,37 +18,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 # ── Server boot nonce ──────────────────────────────────────────────────────────
-# All gunicorn workers must share the same boot ID — a per-process uuid4() would
-# produce a different value in each worker, causing cross-worker 401 failures
-# (login hits worker A, /me hits worker B, bid mismatch → forced logout).
+# All gunicorn workers must agree on the same boot ID.  Using a per-process
+# uuid4() causes cross-worker 401 failures: login hits worker A, /me hits
+# worker B, the IDs differ, the token is rejected, and the user is immediately
+# logged out again.
 #
-# Strategy: write a UUID to a temp file on first call; every subsequent worker
-# reads the same file and gets the same ID.  The file is placed next to the
-# data store so it lives on the persistent volume and survives worker restarts
-# but is replaced when the container is replaced (new deployment = new nonce).
-def _load_or_create_boot_id() -> str:
-    import os
-    from pathlib import Path
-    # Store alongside the hub's data directory so it persists across worker spawns
-    # but is lost when the container is recreated (intentional: redeploy = re-auth).
-    data_dir = Path(os.getenv("HUB_DATA_DIR", "/data"))
-    boot_file = data_dir / ".boot_id"
-    try:
-        if boot_file.exists():
-            bid = boot_file.read_text().strip()
-            if bid:
-                return bid
-        # First worker to start writes the file; others read it.
-        bid = str(uuid4())
-        boot_file.write_text(bid)
-        return bid
-    except Exception:
-        # Fallback: use a fixed string so all workers still agree, though
-        # this means a redeploy won't invalidate old tokens.  Better than
-        # breaking login entirely.
-        return "static-fallback-boot-id"
-
-SERVER_BOOT_ID: str = _load_or_create_boot_id()
+# Solution: derive the ID from APP_VERSION (the git SHA injected at build time
+# via the Docker ARG / ENV pipeline).  All workers in the same container share
+# the same env, so they all compute the same value.  When the container is
+# rebuilt and redeployed the SHA changes → all previously issued tokens become
+# invalid and users are prompted to re-authenticate.  If APP_VERSION is not set
+# (local dev), fall back to a uuid4 so behaviour is still correct for that
+# single-process case.
+import os as _os
+SERVER_BOOT_ID: str = _os.getenv("APP_VERSION") or str(uuid4())
 
 
 def hash_password(password: str) -> str:
