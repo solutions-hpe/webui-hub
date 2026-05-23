@@ -887,6 +887,33 @@ async def fleet_reclone_clear(
     return {"tenant_id": resolved_tenant_id, "queued": queued}
 
 
+@router.post("/{tenant_id}/aggregate/unlock-template")
+async def unlock_template(
+    tenant_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    requested_spoke_id = str(body.get("spoke_id") or "").strip()
+    approved_spokes = list(_approved_spokes(resolved_tenant_id))
+    if requested_spoke_id:
+        approved_spokes = [spoke for spoke in approved_spokes if spoke.id == requested_spoke_id]
+        if not approved_spokes:
+            raise HTTPException(status_code=404, detail="Approved spoke not found")
+
+    queued = 0
+    for spoke in approved_spokes:
+        store.enqueue_command(
+            Command(
+                spoke_id=spoke.id,
+                tenant_id=resolved_tenant_id,
+                type="unlock_template",
+                payload={},
+            )
+        )
+        queued += 1
+    return {"tenant_id": resolved_tenant_id, "queued": queued, "spoke_id": requested_spoke_id or None}
+
 
 @router.get("/{tenant_id}/aggregate/fleet-reclone-status")
 def get_fleet_reclone_status(
