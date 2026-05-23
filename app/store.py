@@ -100,7 +100,13 @@ def _users_path() -> Path:
 
 def _load_users() -> list[User]:
     raw = _read_json(_users_path()) or []
-    return [User(**u) for u in raw]
+    users = []
+    for u in raw:
+        try:
+            users.append(User(**u))
+        except Exception as exc:
+            logger.error("Skipping unreadable user record: %s — %s", u.get("username", "?"), exc)
+    return users
 
 
 def _save_users(users: list[User]) -> None:
@@ -171,30 +177,77 @@ def delete_user(user_id: str) -> None:
 def ensure_admin(username: str, hashed_password: str, force_password: bool = False) -> None:
     """Create or update the bootstrap superadmin.
 
-    If the store has no users, create the superadmin unconditionally.
+    If the store has no users, create the superadmin unconditionally ONLY on a
+    genuine first-run where the data directory has no prior data at all.
     If ``force_password`` is True (i.e. ADMIN_PASSWORD was explicitly set in
     the environment), always update the superadmin's password so operators can
     reset credentials by changing the env var and restarting the container.
+
+    Multiple safeguards prevent accidental user wipes:
+      1. If users.json exists (even empty/corrupt), skip bootstrap.
+      2. If any other data files exist (tenants.json etc.), skip bootstrap —
+         prior data means this is NOT a fresh install.
+      3. Path.exists() can silently return False on IO/mount errors, so we
+         also catch OSError and treat it as "file exists" to err safely.
+      4. _load_users() skips individual bad records rather than throwing, so
+         partial data is never mistaken for an empty store.
     """
     with _lock:
         users_path = _users_path()
+
+        # ── Guard 1: check for file existence, treating IO errors as "exists" ──
+        file_exists: bool = False
+        try:
+            file_exists = users_path.exists()
+        except OSError:
+            # Can't stat the file — assume it exists to avoid any bootstrap
+            logger.warning(
+                "ensure_admin: could not stat %s (mount error?) — "
+                "skipping bootstrap to prevent data loss.",
+                users_path,
+            )
+            return
+
+        # ── Guard 2: check for ANY other data files as evidence of prior use ──
+        data_dir = _data_dir()
+        prior_data_exists = False
+        try:
+            # tenants.json, global_config.json, oui_pool.json, or tenant dirs
+            sentinel_paths = [
+                data_dir / "tenants.json",
+                data_dir / "global_config.json",
+                data_dir / "oui_pool.json",
+            ]
+            prior_data_exists = any(p.exists() for p in sentinel_paths) or any(
+                p.is_dir() for p in data_dir.iterdir()
+                if p.name not in {"tls", "pending", "tmp"}
+            )
+        except OSError:
+            prior_data_exists = True  # if we can't check, assume prior data
+
         users = _load_users()
+
         if not users:
-            # Only bootstrap the admin on a genuine first-run (file absent).
-            # If users.json already exists but returned 0 users, the data
-            # volume may not be mounted yet or the file may be unreadable.
-            # Skip the write to avoid wiping existing accounts.
-            if users_path.exists():
+            if file_exists:
                 logger.warning(
                     "ensure_admin: %s exists but loaded 0 users — "
-                    "possible mount/read error; skipping admin bootstrap to "
-                    "prevent data loss.",
+                    "possible mount/read error; skipping bootstrap to prevent data loss.",
                     users_path,
                 )
                 return
+            if prior_data_exists:
+                logger.warning(
+                    "ensure_admin: users.json absent but other data files exist — "
+                    "this does not look like a fresh install; skipping bootstrap "
+                    "to prevent data loss. Restore users.json from backup if needed.",
+                )
+                return
+            # Genuine first run: no users, no prior data
             admin = User(username=username, hashed_password=hashed_password, is_superadmin=True)
             _save_users([admin])
+            logger.info("ensure_admin: bootstrapped superadmin '%s' (first run).", username)
             return
+
         if force_password:
             for user in users:
                 if user.username == username and user.is_superadmin:
@@ -1207,10 +1260,25 @@ def purge_old_audit() -> int:
 
 
 def init_store() -> None:
-    """Create the base JSON store layout so startup can safely persist data files."""
+    """Create the base JSON store layout so startup can safely persist data files.
+
+    Also creates a rolling backup of users.json (→ users.json.bak) each time the
+    hub starts so that even if the file is accidentally overwritten, the previous
+    snapshot can be recovered by renaming users.json.bak → users.json.
+    """
     base = _data_dir()
     for d in [base, base / "pending"]:
         d.mkdir(parents=True, exist_ok=True)
+
+    # Rolling startup backup: copy users.json → users.json.bak (if readable)
+    users_path = base / "users.json"
+    backup_path = base / "users.json.bak"
+    try:
+        if users_path.exists() and users_path.stat().st_size > 2:
+            shutil.copy2(str(users_path), str(backup_path))
+            logger.info("init_store: backed up %s → %s", users_path, backup_path)
+    except OSError as exc:
+        logger.warning("init_store: could not back up users.json: %s", exc)
 
 
 # ── T3 MAC Profile store ──────────────────────────────────────────────────────
