@@ -31,7 +31,28 @@ oauth2_optional = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=Fa
 # (local dev), fall back to a uuid4 so behaviour is still correct for that
 # single-process case.
 import os as _os
-SERVER_BOOT_ID: str = _os.getenv("APP_VERSION") or str(uuid4())
+from pathlib import Path as _Path
+
+def _get_boot_id() -> str:
+    # All gunicorn workers must use the same boot ID or cross-worker 401s occur.
+    # The VERSION file is baked into the image by redeploy-prod.sh (contains the
+    # git SHA at deploy time) — identical for every worker process in the same
+    # container.  A redeploy writes a new SHA → old tokens are invalidated.
+    # Falls back to APP_VERSION env var, then uuid4 for local single-process dev.
+    version_file = _Path(__file__).resolve().parent.parent / "VERSION"
+    try:
+        content = version_file.read_text().strip()
+        if content and content not in ("dev", ""):
+            return content
+    except Exception:
+        pass
+    env_ver = _os.getenv("APP_VERSION", "").strip()
+    if env_ver:
+        return env_ver
+    # Local dev only — single process so no cross-worker issue.
+    return str(uuid4())
+
+SERVER_BOOT_ID: str = _get_boot_id()
 
 
 def hash_password(password: str) -> str:
