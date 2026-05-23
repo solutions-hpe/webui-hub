@@ -187,11 +187,15 @@ def _spoke_usb_capacity(spoke: Spoke) -> tuple[int, int, int, bool]:
         total_slots = min(dongle_count, usb_max_slots)
     else:
         total_slots = dongle_count
-    auto_provision = _setting_toggle(
-        spoke_config.get("usb_auto_provision")
-        or api_server.get("usb_auto_provision")
-        or proxmox.get("usb_auto_provision")
-    )
+    # Use explicit priority: spoke.config > api_server telemetry > proxmox telemetry.
+    # Cannot use `or` because False (disabled) is falsy and would be skipped.
+    _ap_sources = [
+        spoke_config.get("usb_auto_provision"),
+        api_server.get("usb_auto_provision"),
+        proxmox.get("usb_auto_provision"),
+    ]
+    _ap_val = next((v for v in _ap_sources if v is not None), None)
+    auto_provision = _setting_toggle(_ap_val)
     return used_slots, total_slots, dongle_count, auto_provision
 
 
