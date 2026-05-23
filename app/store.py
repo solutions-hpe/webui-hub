@@ -590,6 +590,58 @@ def get_effective_usb_vidpids(tenant_id: str) -> list[dict[str, Any]]:
 
 
 
+def get_discovered_usb_vidpids() -> list[dict[str, Any]]:
+    """Aggregate all unique VID:PIDs seen in spoke telemetry across all tenants.
+
+    Returns devices that have been physically seen on at least one spoke,
+    annotated with which spoke(s)/tenant(s) reported them and whether they are
+    already in the global certified list.  Sorted by vidpid ascending.
+    """
+    with _lock:
+        global_set = {d.get("vidpid") for d in _load_global_config().get("usb_vidpids", []) if d.get("vidpid")}
+        # vidpid → {"vidpid", "name", "seen_on": [{"tenant_name", "spoke_name"}], "is_global"}
+        discovered: dict[str, dict[str, Any]] = {}
+        for tenant in _load_tenants():
+            for spoke in _load_spokes(tenant.id):
+                telemetry = spoke.telemetry or {}
+                proxmox = telemetry.get("proxmox") or {}
+                # Collect from usb_devices telemetry key and proxmox usb_state
+                raw_devices: list[dict[str, Any]] = []
+                usb_devices = telemetry.get("usb_devices")
+                if isinstance(usb_devices, list):
+                    raw_devices.extend(usb_devices)
+                usb_state = proxmox.get("usb_state") if isinstance(proxmox, dict) else None
+                if isinstance(usb_state, list):
+                    raw_devices.extend(usb_state)
+                present_usb = proxmox.get("present_usb") if isinstance(proxmox, dict) else None
+                if isinstance(present_usb, list):
+                    raw_devices.extend(present_usb)
+
+                spoke_label = spoke.spoke_name or spoke.hostname or spoke.id
+                tenant_label = tenant.name or tenant.id
+                for dev in raw_devices:
+                    if not isinstance(dev, dict):
+                        continue
+                    vidpid = str(dev.get("vidpid") or "").strip().lower()
+                    if not vidpid:
+                        continue
+                    if vidpid not in discovered:
+                        discovered[vidpid] = {
+                            "vidpid": vidpid,
+                            "name": dev.get("name") or "",
+                            "seen_on": [],
+                            "is_global": vidpid in {v.lower() for v in global_set},
+                        }
+                    elif not discovered[vidpid]["name"] and dev.get("name"):
+                        discovered[vidpid]["name"] = dev["name"]
+                    # Record spoke/tenant if not already listed
+                    entry = {"tenant_name": tenant_label, "spoke_name": spoke_label}
+                    if entry not in discovered[vidpid]["seen_on"]:
+                        discovered[vidpid]["seen_on"].append(entry)
+
+        return sorted(discovered.values(), key=lambda d: d["vidpid"])
+
+
 def set_tenant_usb_vidpids(tenant_id: str, usb_vidpids: list[dict[str, Any]]) -> Optional[Tenant]:
     with _lock:
         tenants = _load_tenants()

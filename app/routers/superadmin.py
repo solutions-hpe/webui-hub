@@ -483,6 +483,18 @@ def update_global_usb_vidpids(
     return {"status": "saved", "pushed_to_spokes": pushed_count}
 
 
+@router.get("/superadmin/discovered-usb-vidpids")
+def get_discovered_usb_vidpids(_: User = Depends(auth.require_superadmin)):
+    """Return all unique VID:PIDs seen in spoke telemetry across all tenants.
+
+    Each entry includes which spoke(s) reported it, the device name (if known),
+    and whether it is already in the global certified list.  Use this to build
+    an approval queue — the superadmin can then PUT to global-usb-vidpids to
+    certify selected devices platform-wide.
+    """
+    return {"devices": store.get_discovered_usb_vidpids()}
+
+
 @router.get("/superadmin/gkill-state")
 def get_gkill_state(_: User = Depends(auth.require_superadmin)):
     from .. import tasks
