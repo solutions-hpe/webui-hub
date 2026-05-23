@@ -10,6 +10,7 @@ requests and background tasks do not corrupt on-disk state.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -845,6 +846,65 @@ def ensure_config_update_command(tenant_id: str, spoke_id: str) -> None:
             )
         )
         _save_queue(tenant_id, spoke_id, commands)
+        # Record the hash of what we just queued so drift detection can detect
+        # future changes without relying solely on config_version accounting.
+        spoke.last_pushed_config_hash = _authoritative_config_hash(tenant, merged_payload)
+        save_spoke(spoke)
+
+
+def _authoritative_config_hash(tenant: "Tenant | None", payload: dict | None = None) -> str:
+    """Return a short hash of the hub-authoritative slice of a config payload.
+
+    When hub_config_enabled=True, all non-None keys are authoritative.
+    When hub_config_enabled=False, only USB cert keys are authoritative (the hub
+    always owns USB certs regardless of the broader config management flag).
+    """
+    if payload is None:
+        payload = _build_spoke_config_payload(tenant) if tenant else {}
+    usb_always = {"usb_vidpids"}
+    if tenant and tenant.hub_config_enabled:
+        auth = {k: v for k, v in payload.items() if v is not None}
+    else:
+        auth = {k: payload.get(k) for k in usb_always}
+    blob = json.dumps(auth, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def check_and_fix_config_drift(tenant_id: str, spoke_id: str) -> bool:
+    """Detect and self-heal config drift between the hub's desired state and the
+    last config pushed to a spoke.
+
+    Called on every telemetry heartbeat.  Only acts when the spoke appears
+    current (config_version == applied_config_version) — if there is already a
+    pending push we leave it alone and return False.
+
+    When the authoritative-config hash has changed since the last push, the
+    spoke's config_version is bumped so that the next inbox fetch triggers
+    ensure_config_update_command to queue a corrective push.
+
+    Returns True if drift was detected and the version was bumped.
+    """
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke or spoke.status != "approved":
+            return False
+        # Skip if there's already an unacked push in flight — it will self-correct.
+        if spoke.config_version > spoke.applied_config_version:
+            return False
+        tenant = get_tenant(tenant_id)
+        if not tenant:
+            return False
+        current_hash = _authoritative_config_hash(tenant)
+        if spoke.last_pushed_config_hash == current_hash:
+            return False  # In sync — nothing to do.
+        # Drift detected: bump version so ensure_config_update_command queues a push.
+        spoke.config_version = spoke.applied_config_version + 1
+        save_spoke(spoke)
+        logger.info(
+            "Config drift detected for spoke %s (tenant %s) — hash %s → %s; queuing corrective push",
+            spoke_id, tenant_id, spoke.last_pushed_config_hash, current_hash,
+        )
+        return True
 
 
 

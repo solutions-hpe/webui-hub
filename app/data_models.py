@@ -96,6 +96,7 @@ class Spoke(BaseModel):
     config_version: int = 0
     applied_config_version: int = 0
     last_config_applied_at: Optional[datetime] = None
+    last_pushed_config_hash: Optional[str] = None
     last_seen: Optional[datetime] = None
     telemetry: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_now)

@@ -334,6 +334,11 @@ async def _apply_spoke_telemetry(tenant_id: str, spoke_id: str, spoke, payload: 
         store.save_spoke(spoke)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, store.update_spoke_telemetry, tenant_id, spoke_id, payload)
+    # Drift detection: if the hub's authoritative config has changed since the
+    # last push, bump config_version so the next inbox fetch queues a correction.
+    drifted = await loop.run_in_executor(None, store.check_and_fix_config_drift, tenant_id, spoke_id)
+    if drifted:
+        await loop.run_in_executor(None, store.ensure_config_update_command, tenant_id, spoke_id)
     await ws_broadcast({"type": "telemetry", "tenant_id": tenant_id, "spoke_id": spoke_id})
 
 
