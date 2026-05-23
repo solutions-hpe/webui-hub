@@ -625,10 +625,11 @@ def add_tenant_usb_vidpid(
     updated.append({"vidpid": entry.vidpid, "type": entry.type, "label": entry.label})
     store.set_tenant_usb_vidpids(tenant_id, updated)
 
-    # Push updated config to all approved spokes
+    # Push updated USB config to all approved spokes.
+    # USB cert changes always propagate regardless of hub_config_enabled.
     pushed_count = 0
     tenant = store.get_tenant(tenant_id)
-    if tenant and tenant.hub_config_enabled:
+    if tenant:
         for spoke in store.list_spokes(tenant_id):
             if spoke.status != "approved":
                 continue
@@ -667,10 +668,11 @@ def delete_tenant_usb_vidpid(
         raise HTTPException(status_code=404, detail="Device not found in tenant certified list")
     store.set_tenant_usb_vidpids(tenant_id, updated)
 
-    # Push updated config to all approved spokes
+    # Push updated USB config to all approved spokes.
+    # USB cert changes always propagate regardless of hub_config_enabled.
     pushed_count = 0
     tenant = store.get_tenant(tenant_id)
-    if tenant and tenant.hub_config_enabled:
+    if tenant:
         for spoke in store.list_spokes(tenant_id):
             if spoke.status != "approved":
                 continue

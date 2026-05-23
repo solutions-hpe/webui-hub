@@ -467,11 +467,11 @@ def update_global_usb_vidpids(
     for every tenant that has hub-config enabled so spokes pick up the new devices."""
     store.set_global_usb_vidpids(payload.usb_vidpids)
 
-    # Trigger a config push to all approved spokes across all tenants
+    # Trigger a config push to all approved spokes across all tenants.
+    # USB cert changes always propagate regardless of hub_config_enabled —
+    # the spoke's _apply_hub_config sets hub_managed=True before processing USB.
     pushed_count = 0
     for tenant in store.list_tenants():
-        if not tenant.hub_config_enabled:
-            continue
         for spoke in store.list_spokes(tenant.id):
             if spoke.status != "approved":
                 continue
