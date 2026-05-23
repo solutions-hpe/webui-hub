@@ -884,6 +884,7 @@ async def fleet_reclone_clear(
 
 
 
+@router.get("/{tenant_id}/aggregate/fleet-reclone-status")
 def get_fleet_reclone_status(
     tenant_id: str,
     current_user: User = Depends(auth.get_current_user),
