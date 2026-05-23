@@ -95,6 +95,7 @@ def proxmox_summary(proxmox_state: dict[str, Any]) -> dict[str, Any]:
         "usb_count": len(proxmox_state.get("usb_state", [])),
         "agent_version": proxmox_state.get("agent_version"),
         "pve_version": proxmox_state.get("pve_version"),
+        "template_lock": proxmox_state.get("template_lock"),
     }
 
 
