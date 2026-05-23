@@ -591,21 +591,48 @@ def get_effective_usb_vidpids(tenant_id: str) -> list[dict[str, Any]]:
 
 
 def get_discovered_usb_vidpids() -> list[dict[str, Any]]:
-    """Aggregate all unique VID:PIDs seen in spoke telemetry across all tenants.
+    """Aggregate all unique VID:PIDs seen in spoke telemetry OR tenant-certified lists.
 
-    Returns devices that have been physically seen on at least one spoke,
-    annotated with which spoke(s)/tenant(s) reported them and whether they are
-    already in the global certified list.  Sorted by vidpid ascending.
+    Returns devices that have been physically seen on at least one spoke OR are
+    tenant-certified but not yet globally certified.  Annotated with which
+    spoke(s)/tenant(s) reported them and whether they are already in the global
+    certified list.  Sorted by vidpid ascending.
     """
     with _lock:
         global_set = {d.get("vidpid") for d in _load_global_config().get("usb_vidpids", []) if d.get("vidpid")}
+        # Normalise to lowercase for consistent comparison
+        global_set_lower = {v.lower() for v in global_set if v}
         # vidpid → {"vidpid", "name", "seen_on": [{"tenant_name", "spoke_name"}], "is_global"}
         discovered: dict[str, dict[str, Any]] = {}
+
+        def _ensure(vidpid: str, name: str = "") -> None:
+            if vidpid not in discovered:
+                discovered[vidpid] = {
+                    "vidpid": vidpid,
+                    "name": name,
+                    "seen_on": [],
+                    "is_global": vidpid in global_set_lower,
+                }
+            elif not discovered[vidpid]["name"] and name:
+                discovered[vidpid]["name"] = name
+
         for tenant in _load_tenants():
+            tenant_label = tenant.name or tenant.id
+
+            # ── Include tenant-certified devices that aren't globally certified ──
+            for dev in _tenant_usb_vidpids(tenant):
+                vidpid = str(dev.get("vidpid") or "").strip().lower()
+                if not vidpid or vidpid in global_set_lower:
+                    continue
+                _ensure(vidpid, dev.get("label") or dev.get("name") or "")
+                entry = {"tenant_name": tenant_label, "spoke_name": "(tenant certified)"}
+                if entry not in discovered[vidpid]["seen_on"]:
+                    discovered[vidpid]["seen_on"].append(entry)
+
+            # ── Include devices seen in spoke telemetry ────────────────────────
             for spoke in _load_spokes(tenant.id):
                 telemetry = spoke.telemetry or {}
                 proxmox = telemetry.get("proxmox") or {}
-                # Collect from usb_devices telemetry key and proxmox usb_state
                 raw_devices: list[dict[str, Any]] = []
                 usb_devices = telemetry.get("usb_devices")
                 if isinstance(usb_devices, list):
@@ -618,23 +645,13 @@ def get_discovered_usb_vidpids() -> list[dict[str, Any]]:
                     raw_devices.extend(present_usb)
 
                 spoke_label = spoke.spoke_name or spoke.hostname or spoke.id
-                tenant_label = tenant.name or tenant.id
                 for dev in raw_devices:
                     if not isinstance(dev, dict):
                         continue
                     vidpid = str(dev.get("vidpid") or "").strip().lower()
                     if not vidpid:
                         continue
-                    if vidpid not in discovered:
-                        discovered[vidpid] = {
-                            "vidpid": vidpid,
-                            "name": dev.get("name") or "",
-                            "seen_on": [],
-                            "is_global": vidpid in {v.lower() for v in global_set},
-                        }
-                    elif not discovered[vidpid]["name"] and dev.get("name"):
-                        discovered[vidpid]["name"] = dev["name"]
-                    # Record spoke/tenant if not already listed
+                    _ensure(vidpid, dev.get("name") or "")
                     entry = {"tenant_name": tenant_label, "spoke_name": spoke_label}
                     if entry not in discovered[vidpid]["seen_on"]:
                         discovered[vidpid]["seen_on"].append(entry)
