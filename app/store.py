@@ -176,8 +176,21 @@ def ensure_admin(username: str, hashed_password: str, force_password: bool = Fal
     reset credentials by changing the env var and restarting the container.
     """
     with _lock:
+        users_path = _users_path()
         users = _load_users()
         if not users:
+            # Only bootstrap the admin on a genuine first-run (file absent).
+            # If users.json already exists but returned 0 users, the data
+            # volume may not be mounted yet or the file may be unreadable.
+            # Skip the write to avoid wiping existing accounts.
+            if users_path.exists():
+                logger.warning(
+                    "ensure_admin: %s exists but loaded 0 users — "
+                    "possible mount/read error; skipping admin bootstrap to "
+                    "prevent data loss.",
+                    users_path,
+                )
+                return
             admin = User(username=username, hashed_password=hashed_password, is_superadmin=True)
             _save_users([admin])
             return
