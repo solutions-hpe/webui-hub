@@ -577,6 +577,111 @@ async def save_simulation_conf(
     return {"ok": True, "commit_sha": commit_sha, "synced_spokes": synced_spokes}
 
 
+class UsbVidpidEntry(BaseModel):
+    vidpid: str
+    type: str = ""
+    label: str = ""
+
+
+@router.get("/{tenant_id}/usb-vidpids")
+def get_tenant_usb_vidpids(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return the effective USB device list for a tenant (global + tenant-specific).
+
+    Any user with access to the tenant can read this list.  Devices inherited from
+    the global (superadmin) list are annotated with source='global'; devices
+    added by the tenant admin have source='tenant'.
+    """
+    auth.require_tenant_access(tenant_id, current_user)
+    return {"usb_vidpids": store.get_effective_usb_vidpids(tenant_id)}
+
+
+@router.post("/{tenant_id}/usb-vidpids")
+def add_tenant_usb_vidpid(
+    tenant_id: str,
+    entry: UsbVidpidEntry,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Add or update a device in the tenant-level certified USB list.
+
+    Requires tenant admin role.  Global (superadmin) devices are already included
+    in the effective list; adding the same vidpid here is a no-op.
+    """
+    _require_tenant_admin(tenant_id, current_user)
+
+    # If the vidpid is already globally certified it is already effective for all spokes.
+    global_vidpids = {d.get("vidpid") for d in store.get_global_usb_vidpids()}
+    if entry.vidpid in global_vidpids:
+        return {
+            "status": "already_global",
+            "message": "Device is already globally certified; no tenant entry needed.",
+        }
+
+    current = store.get_tenant_usb_vidpids(tenant_id)
+    # Replace existing entry for the same vidpid or append
+    updated = [d for d in current if d.get("vidpid") != entry.vidpid]
+    updated.append({"vidpid": entry.vidpid, "type": entry.type, "label": entry.label})
+    store.set_tenant_usb_vidpids(tenant_id, updated)
+
+    # Push updated config to all approved spokes
+    pushed_count = 0
+    tenant = store.get_tenant(tenant_id)
+    if tenant and tenant.hub_config_enabled:
+        for spoke in store.list_spokes(tenant_id):
+            if spoke.status != "approved":
+                continue
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant_id, spoke.id)
+            pushed_count += 1
+
+    return {"status": "saved", "pushed_to_spokes": pushed_count}
+
+
+@router.delete("/{tenant_id}/usb-vidpids/{vidpid:path}")
+def delete_tenant_usb_vidpid(
+    tenant_id: str,
+    vidpid: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Remove a device from the tenant-level certified USB list.
+
+    Requires tenant admin role.  Globally certified devices cannot be removed
+    here; use PUT /api/superadmin/global-usb-vidpids to manage those.
+    """
+    _require_tenant_admin(tenant_id, current_user)
+
+    global_vidpids = {d.get("vidpid") for d in store.get_global_usb_vidpids()}
+    if vidpid in global_vidpids:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot remove a globally certified device via the tenant endpoint. "
+                   "Use the superadmin global USB endpoint instead.",
+        )
+
+    current = store.get_tenant_usb_vidpids(tenant_id)
+    updated = [d for d in current if d.get("vidpid") != vidpid]
+    if len(updated) == len(current):
+        raise HTTPException(status_code=404, detail="Device not found in tenant certified list")
+    store.set_tenant_usb_vidpids(tenant_id, updated)
+
+    # Push updated config to all approved spokes
+    pushed_count = 0
+    tenant = store.get_tenant(tenant_id)
+    if tenant and tenant.hub_config_enabled:
+        for spoke in store.list_spokes(tenant_id):
+            if spoke.status != "approved":
+                continue
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant_id, spoke.id)
+            pushed_count += 1
+
+    return {"status": "deleted", "pushed_to_spokes": pushed_count}
+
+
 @router.get("/aggregate/dashboard")
 def get_aggregate_dashboard(
     tenant_id: Optional[str] = Query(default=None),

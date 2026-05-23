@@ -448,6 +448,41 @@ async def update_tenant_hub_config(
     return {"status": "saved", "hub_config_enabled": tenant.hub_config_enabled, "pushed_to_spokes": pushed_count}
 
 
+class GlobalUsbRequest(BaseModel):
+    usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/superadmin/global-usb-vidpids")
+def get_global_usb_vidpids(_: User = Depends(auth.require_superadmin)):
+    """Return the platform-wide (superadmin-certified) USB device list."""
+    return {"usb_vidpids": store.get_global_usb_vidpids()}
+
+
+@router.put("/superadmin/global-usb-vidpids")
+def update_global_usb_vidpids(
+    payload: GlobalUsbRequest,
+    _: User = Depends(auth.require_superadmin),
+):
+    """Replace the platform-wide USB device list and trigger a spoke config push
+    for every tenant that has hub-config enabled so spokes pick up the new devices."""
+    store.set_global_usb_vidpids(payload.usb_vidpids)
+
+    # Trigger a config push to all approved spokes across all tenants
+    pushed_count = 0
+    for tenant in store.list_tenants():
+        if not tenant.hub_config_enabled:
+            continue
+        for spoke in store.list_spokes(tenant.id):
+            if spoke.status != "approved":
+                continue
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant.id, spoke.id)
+            pushed_count += 1
+
+    return {"status": "saved", "pushed_to_spokes": pushed_count}
+
+
 @router.get("/superadmin/gkill-state")
 def get_gkill_state(_: User = Depends(auth.require_superadmin)):
     from .. import tasks

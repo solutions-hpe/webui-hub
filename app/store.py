@@ -499,6 +499,31 @@ def _tenant_processing_modes(tenant: Tenant | None) -> dict[str, str]:
 
 
 
+def _global_config_path() -> Path:
+    return _data_dir() / "global_config.json"
+
+
+def _load_global_config() -> dict[str, Any]:
+    """Read global config without acquiring the lock (safe to call under _lock)."""
+    raw = _read_json(_global_config_path())
+    return raw if isinstance(raw, dict) else {}
+
+
+def get_global_usb_vidpids() -> list[dict[str, Any]]:
+    """Return the platform-wide (superadmin-certified) USB device list."""
+    with _lock:
+        devices = _load_global_config().get("usb_vidpids", [])
+        return [dict(d) for d in devices if isinstance(d, dict)]
+
+
+def set_global_usb_vidpids(devices: list[dict[str, Any]]) -> None:
+    """Persist the platform-wide USB device list."""
+    with _lock:
+        config = _load_global_config()
+        config["usb_vidpids"] = [dict(d) for d in (devices or []) if isinstance(d, dict)]
+        _write_json(_global_config_path(), config)
+
+
 def _tenant_usb_vidpids(tenant: Tenant | None) -> list[dict[str, Any]]:
     if not tenant:
         return []
@@ -511,11 +536,44 @@ def _tenant_usb_vidpids(tenant: Tenant | None) -> list[dict[str, Any]]:
     return []
 
 
+def _effective_usb_vidpids_from(
+    global_devices: list[dict[str, Any]],
+    tenant: Tenant | None,
+) -> list[dict[str, Any]]:
+    """Merge global + tenant USB devices.
+
+    Global devices (superadmin-certified) are listed first with source='global'.
+    Tenant-specific devices are appended with source='tenant'.
+    If the same vidpid appears in both, the global entry wins (it already covers it).
+    """
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for d in global_devices:
+        vp = d.get("vidpid", "")
+        if vp and vp not in seen:
+            seen.add(vp)
+            result.append({**d, "source": "global"})
+    for d in _tenant_usb_vidpids(tenant):
+        vp = d.get("vidpid", "")
+        if vp and vp not in seen:
+            seen.add(vp)
+            result.append({**d, "source": "tenant"})
+    return result
+
 
 def get_tenant_usb_vidpids(tenant_id: str) -> list[dict[str, Any]]:
+    """Return only the tenant-specific USB devices (no global merge)."""
     with _lock:
         tenant = get_tenant(tenant_id)
         return _tenant_usb_vidpids(tenant)
+
+
+def get_effective_usb_vidpids(tenant_id: str) -> list[dict[str, Any]]:
+    """Return the merged effective USB device list (global + tenant) for a tenant."""
+    with _lock:
+        global_devices = _load_global_config().get("usb_vidpids", [])
+        tenant = get_tenant(tenant_id)
+        return _effective_usb_vidpids_from(global_devices, tenant)
 
 
 
@@ -543,8 +601,13 @@ def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
         for key, value in hub_config.items()
         if key not in _RELAY_CONFIG_KEYS and key not in _HUB_LOCAL_CONFIG_KEYS and key != "usb_vidpids"
     }
-    if tenant.usb_vidpids or "usb_vidpids" in hub_config:
-        payload["usb_vidpids"] = _tenant_usb_vidpids(tenant)
+    # Push the effective (global + tenant) USB list to spokes so devices certified
+    # at either level are recognised by every spoke in the tenant.
+    global_devices = _load_global_config().get("usb_vidpids", [])
+    effective = _effective_usb_vidpids_from(global_devices, tenant)
+    if effective or "usb_vidpids" in hub_config:
+        # Strip the source annotation before sending to spokes
+        payload["usb_vidpids"] = [{k: v for k, v in d.items() if k != "source"} for d in effective]
     return payload
 
 
