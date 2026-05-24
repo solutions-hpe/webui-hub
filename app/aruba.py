@@ -238,14 +238,18 @@ class ArubaClient:
                 try:
                     data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
                     for item in data.get("items") or []:
-                        site = (item.get("siteName") or item.get("site_name") or "unknown").strip() or "unknown"
+                        site = (item.get("name") or item.get("siteName") or item.get("site_name") or "unknown").strip() or "unknown"
                         if site_filter and site.lower() != site_filter.lower():
                             continue
+                        good_pct = next(
+                            (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
+                            item.get("healthScore", item.get("health_score", 100)),
+                        )
                         findings.append(
                             ArubaFinding(
                                 site_name=site,
                                 check_name="SITE_HEALTH",
-                                status="green" if int(item.get("healthScore", item.get("health_score", 100))) >= 80 else "yellow",
+                                status="green" if int(good_pct or 0) >= 80 else "yellow",
                                 source="alert",
                                 raw=item,
                             )
@@ -341,12 +345,16 @@ class ArubaClient:
                 try:
                     data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
                     for item in data.get("items") or []:
-                        site_name = (item.get("siteName") or item.get("site_name") or "").strip()
+                        site_name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
                         if site_name.lower() != site.lower():
                             continue
-                        site_id = item.get("siteId") or item.get("site_id")
-                        site_health = int(item.get("healthScore", item.get("health_score", 0)))
-                        wireless_clients = int(item.get("clientCount") or item.get("client_count") or 0)
+                        site_id = item.get("id") or item.get("siteId") or item.get("site_id")
+                        good_pct = next(
+                            (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
+                            item.get("healthScore", item.get("health_score", 0)),
+                        )
+                        site_health = int(good_pct or 0)
+                        wireless_clients = int((item.get("clients") or {}).get("count") or item.get("clientCount") or item.get("client_count") or 0)
                         break
                 except Exception as exc:
                     logger.warning("Aruba sites-health fetch failed [%s:%s]: %s", self._config_hash, site, exc)
@@ -361,7 +369,7 @@ class ArubaClient:
                         )
                     data = await self._get(client, "/network-monitoring/v1alpha1/devices", params=params)
                     for device in data.get("items") or []:
-                        if site_id and str(device.get("siteId") or device.get("site_id") or "") != str(site_id):
+                        if site_id and str(device.get("siteId") or device.get("site_id") or device.get("id") or "") != str(site_id):
                             continue
                         device_type = str(device.get("deviceType") or "").upper()
                         status = str(device.get("status") or "").upper()
@@ -494,15 +502,18 @@ class ArubaClient:
             if self.api_version == "new_central":
                 data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
                 for item in data.get("items") or []:
-                    site_name = (item.get("siteName") or item.get("site_name") or "").strip()
+                    site_name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
                     if not site_name:
                         continue
                     key = site_name.casefold()
                     sites[key] = {
                         "name": site_name,
-                        "site_id": item.get("siteId") or item.get("site_id") or "",
-                        "health_score": item.get("healthScore", item.get("health_score")),
-                        "wireless_clients": item.get("clientCount", item.get("client_count")),
+                        "site_id": item.get("id") or item.get("siteId") or item.get("site_id") or "",
+                        "health_score": next(
+                            (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
+                            item.get("healthScore", item.get("health_score")),
+                        ),
+                        "wireless_clients": (item.get("clients") or {}).get("count") or item.get("clientCount") or item.get("client_count"),
                     }
                 return sorted(sites.values(), key=lambda item: item["name"].casefold())
 
