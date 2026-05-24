@@ -388,6 +388,7 @@ class RegisterPayload(BaseModel):
     spoke_name: str = ""
     tenant_id_hint: str = ""  # Optional: tenant ID pre-entered on spoke
     onboarding_psk: str = ""  # Optional: PSK for auto-approval without human review
+    api_key: str = ""         # Present on re-registration to prove identity
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -447,6 +448,14 @@ def register_spoke(payload: RegisterPayload, request: Request):
                 api_key = decrypt_str(spoke.api_key_enc)
             except Exception:
                 api_key = ""
+        # If the spoke already has a key on file, require it to prove identity.
+        # A spoke that has never received its key (api_key_enc empty) is allowed through
+        # so the first post-approval registration succeeds without a credential.
+        if api_key and payload.api_key and payload.api_key != api_key:
+            _reg_log_append("re_register_key_mismatch", hostname=payload.hostname,
+                            spoke_name=spoke_name, spoke_id=spoke.id, tenant_id=tenant_id,
+                            ip=client_ip)
+            raise HTTPException(status_code=401, detail="Invalid API key for this spoke")
         if not api_key:
             api_key = generate_api_key()
             spoke.api_key_enc = encrypt_str(api_key)
