@@ -29,6 +29,7 @@ class ArubaSettingsRequest(BaseModel):
     access_token: str = ""
     refresh_token: str = ""
     customer_id: str = ""
+    workspace_id: str = ""
     api_version: str = "classic"
 
 
@@ -187,6 +188,7 @@ def _serialize_aruba_config(tenant: Tenant) -> dict[str, Any]:
         "cluster_url": cfg.get("cluster_url", ""),
         "client_id": cfg.get("client_id", ""),
         "customer_id": cfg.get("customer_id", ""),
+        "workspace_id": cfg.get("workspace_id", ""),
         "api_version": cfg.get("api_version", "classic"),
         "client_secret_configured": bool(cfg.get("client_secret")),
         "access_token_configured": bool(cfg.get("access_token")),

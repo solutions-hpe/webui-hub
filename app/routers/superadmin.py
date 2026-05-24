@@ -33,6 +33,7 @@ class ArubaTenantDiscoveryRequest(BaseModel):
     cluster_url: str
     client_id: str = ""
     client_secret: str = ""
+    workspace_id: str = ""
     api_version: str = "new_central"
     auto_import: bool = False
 
@@ -268,6 +269,7 @@ async def discover_aruba_tenants(
             "cluster_url": payload.cluster_url,
             "client_id": payload.client_id,
             "client_secret": payload.client_secret,
+            "workspace_id": payload.workspace_id,
             "api_version": payload.api_version,
         }
     )

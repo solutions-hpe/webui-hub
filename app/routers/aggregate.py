@@ -43,6 +43,7 @@ class CentralConfigPayload(BaseModel):
     client_id: str = ""
     client_secret: str = ""
     customer_id: str = ""
+    workspace_id: str = ""
 
 
 class CentralUpdateRequest(BaseModel):
@@ -322,6 +323,7 @@ def _serialize_hub_central_config(tenant: Tenant) -> dict[str, Any]:
         "cluster_url": cfg.get("cluster_url", ""),
         "client_id": cfg.get("client_id", ""),
         "customer_id": cfg.get("customer_id", ""),
+        "workspace_id": cfg.get("workspace_id", ""),
         "api_version": cfg.get("api_version", "classic"),
         "client_secret_configured": bool(cfg.get("client_secret")),
         "access_token_configured": bool(cfg.get("access_token")),
@@ -1291,34 +1293,23 @@ async def hub_central_devices(
     cluster_url = (cfg.get("cluster_url") or "").rstrip("/")
     client_id = cfg.get("client_id", "")
     client_secret = cfg.get("client_secret", "")
-    customer_id = cfg.get("customer_id", "")
 
-    if not all([cluster_url, client_id, client_secret, customer_id]):
+    if not all([cluster_url, client_id, client_secret]):
         return {"devices": [], "count": 0, "warning": "Central API credentials incomplete."}
 
-    cluster_url = _validated_cluster_url_or_400(cluster_url)
+    cfg["cluster_url"] = _validated_cluster_url_or_400(cluster_url)
+    aruba_client = ArubaClient(cfg)
 
     try:
         async with httpx.AsyncClient() as client:
-            token_resp = await client.post(
-                f"{cluster_url}/oauth2/token",
-                data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
-                headers={"X-API-KEY": customer_id},
-                timeout=15,
-            )
-            if token_resp.status_code != 200:
-                return {"devices": [], "count": 0, "warning": f"Token fetch failed: {token_resp.status_code}"}
-            access_token = token_resp.json().get("access_token", "")
-            if not access_token:
-                return {"devices": [], "count": 0, "warning": "No access token in response."}
-
-            headers = {"Authorization": f"Bearer {access_token}", "X-API-KEY": customer_id}
+            access_token = await aruba_client._ensure_token(client)
+            headers = aruba_client._headers(access_token)
 
             site_id = None
             site_lookup_error = ""
             try:
                 sh_resp = await client.get(
-                    f"{cluster_url}/network-monitoring/v1alpha1/sites-health",
+                    f"{aruba_client.cluster_url}/network-monitoring/v1alpha1/sites-health",
                     headers=headers,
                     timeout=20,
                 )
@@ -1349,7 +1340,7 @@ async def hub_central_devices(
                 params["filter"] = f"siteId eq '{site_id}'"
 
             dev_resp = await client.get(
-                f"{cluster_url}/network-monitoring/v1alpha1/devices",
+                f"{aruba_client.cluster_url}/network-monitoring/v1alpha1/devices",
                 headers=headers,
                 params=params,
                 timeout=20,
@@ -1370,8 +1361,8 @@ async def hub_central_devices(
                     "mac": d.get("macAddress") or d.get("mac", "—"),
                     "status": d.get("status", "—"),
                     "site": d.get("siteId", "—"),
-                    "serial": d.get("serial", "—"),
-                    "sw_ver": d.get("firmwareVersion") or d.get("swVersion", "—"),
+                    "serial": d.get("serialNumber") or d.get("serial", "—"),
+                    "sw_ver": d.get("softwareVersion") or d.get("firmwareVersion") or d.get("swVersion", "—"),
                 }
                 for d in raw_devices
             ]
@@ -1407,29 +1398,17 @@ async def hub_central_site_alerts(
     cluster_url = (cfg.get("cluster_url") or "").rstrip("/")
     client_id = cfg.get("client_id", "")
     client_secret = cfg.get("client_secret", "")
-    customer_id = cfg.get("customer_id", "")
 
     if not all([cluster_url, client_id, client_secret]):
         return {"alerts": [], "count": 0, "warning": "Central API credentials incomplete."}
 
-    cluster_url = _validated_cluster_url_or_400(cluster_url)
+    cfg["cluster_url"] = _validated_cluster_url_or_400(cluster_url)
+    aruba_client = ArubaClient(cfg)
 
     try:
         async with httpx.AsyncClient() as client:
-            token_resp = await client.post(
-                f"{cluster_url}/oauth2/token",
-                data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
-                headers={"X-API-KEY": customer_id} if customer_id else {},
-                timeout=15,
-            )
-            if token_resp.status_code != 200:
-                return {"alerts": [], "count": 0, "warning": f"Token fetch failed: {token_resp.status_code}"}
-            access_token = token_resp.json().get("access_token", "")
-            if not access_token:
-                return {"alerts": [], "count": 0, "warning": "No access token in response."}
-            headers = {"Authorization": f"Bearer {access_token}"}
-            if customer_id:
-                headers["X-API-KEY"] = customer_id
+            access_token = await aruba_client._ensure_token(client)
+            headers = aruba_client._headers(access_token)
 
             alerts: list[dict[str, Any]] = []
             ts_now = int(time.time())
@@ -1441,7 +1420,7 @@ async def hub_central_site_alerts(
                 site_lookup_error = ""
                 try:
                     sh_resp = await client.get(
-                        f"{cluster_url}/network-monitoring/v1alpha1/sites-health",
+                        f"{aruba_client.cluster_url}/network-monitoring/v1alpha1/sites-health",
                         headers=headers,
                         timeout=20,
                     )
@@ -1487,7 +1466,7 @@ async def hub_central_site_alerts(
                     try:
                         params: dict[str, Any] = {"limit": 500, "filter": f"siteId eq '{site_id}'"}
                         dev_resp = await client.get(
-                            f"{cluster_url}/network-monitoring/v1alpha1/devices",
+                            f"{aruba_client.cluster_url}/network-monitoring/v1alpha1/devices",
                             headers=headers,
                             params=params,
                             timeout=20,
@@ -1534,7 +1513,7 @@ async def hub_central_site_alerts(
                 for path in ["/monitoring/v1/alerts", "/monitoring/v2/alerts"]:
                     try:
                         resp = await client.get(
-                            f"{cluster_url}{path}",
+                            f"{aruba_client.cluster_url}{path}",
                             headers=headers,
                             params={"site": site, "limit": 500, "from_timestamp": thirty_days_ago},
                             timeout=20,
@@ -1608,6 +1587,7 @@ async def update_aggregate_central(
         "cluster_url": str(incoming.get("cluster_url") or "").strip(),
         "client_id": str(incoming.get("client_id") or "").strip(),
         "customer_id": str(incoming.get("customer_id") or "").strip(),
+        "workspace_id": str(incoming.get("workspace_id") or "").strip(),
     }
     client_secret = str(incoming.get("client_secret") or "")
     if client_secret:

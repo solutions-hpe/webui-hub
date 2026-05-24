@@ -22,6 +22,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_NEW_CENTRAL_TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
+_GLP_TOKEN_URL_TEMPLATE = "https://global.api.greenlake.hpe.com/authorization/v2/oauth2/{workspace_id}/token"
+_KNOWN_CENTRAL_GATEWAY_SUFFIXES = (".api.central.arubanetworks.com", ".api.central.arubanetworks.com.cn")
+
 DEFAULT_NEW_CENTRAL_MONITORED_CHECKS: tuple[dict[str, str], ...] = (
     {"type": "alert", "id": "SITE_HEALTH", "name": "Site Health Score (0–100)"},
     {"type": "alert", "id": "AP_DOWN", "name": "APs Down / Offline"},
@@ -85,6 +89,13 @@ def validate_cluster_url(cluster_url: str) -> str:
                 f"cluster_url resolves to disallowed address {ip}"
             )
 
+    hostname = parsed.hostname.casefold()
+    if not hostname.endswith(_KNOWN_CENTRAL_GATEWAY_SUFFIXES):
+        logger.warning(
+            "Aruba cluster_url host %s does not match known Central API gateway patterns",
+            parsed.hostname,
+        )
+
     return normalized
 
 
@@ -116,6 +127,12 @@ class ArubaClient:
     def _token_state(self) -> dict[str, Any]:
         return self._token_cache.setdefault(self._config_hash, {})
 
+    def _new_central_token_url(self) -> str:
+        workspace_id = str(self.config.get("workspace_id") or "").strip()
+        if workspace_id:
+            return _GLP_TOKEN_URL_TEMPLATE.format(workspace_id=workspace_id)
+        return _NEW_CENTRAL_TOKEN_URL
+
     async def _ensure_token(self, client: httpx.AsyncClient) -> str:
         now = time.time()
         token_state = self._token_state()
@@ -123,8 +140,9 @@ class ArubaClient:
             return token_state["access_token"]
 
         if self.api_version == "new_central":
+            workspace_id = str(self.config.get("workspace_id") or "").strip()
             resp = await client.post(
-                f"{self.cluster_url}/oauth2/token",
+                self._new_central_token_url(),
                 data={
                     "grant_type": "client_credentials",
                     "client_id": self.config.get("client_id", ""),
@@ -138,7 +156,7 @@ class ArubaClient:
             token_state.update(
                 {
                     "access_token": payload["access_token"],
-                    "expires_at": now + int(payload.get("expires_in", 3600)),
+                    "expires_at": now + int(payload.get("expires_in", 900 if workspace_id else 7200)),
                 }
             )
             return token_state["access_token"]
@@ -330,6 +348,10 @@ class ArubaClient:
                     params: dict[str, Any] = {"limit": 500}
                     if site_id:
                         params["filter"] = f"siteId eq '{site_id}'"
+                        logger.debug(
+                            "Aruba New Central devices query uses filter=%s; verify syntax against the API reference if results look incomplete",
+                            params["filter"],
+                        )
                     data = await self._get(client, "/network-monitoring/v1alpha1/devices", params=params)
                     for device in data.get("items") or []:
                         if site_id and str(device.get("siteId") or device.get("site_id") or "") != str(site_id):
@@ -352,6 +374,7 @@ class ArubaClient:
                                 device.get("deviceName")
                                 or device.get("name")
                                 or device.get("id")
+                                or device.get("serialNumber")
                                 or device.get("serial")
                                 or ""
                             ).strip()
@@ -362,6 +385,11 @@ class ArubaClient:
 
                 try:
                     params = {"site-id": site_id} if site_id else None
+                    if params:
+                        logger.debug(
+                            "Aruba New Central clients query uses params=%s; verify syntax against the API reference if results look incomplete",
+                            params,
+                        )
                     data = await self._get(client, "/network-monitoring/v1alpha1/clients", params=params)
                     wireless_clients = int(data.get("count") or wireless_clients or 0)
                 except Exception as exc:

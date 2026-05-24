@@ -786,6 +786,7 @@ def _hub_central_config(tenant: Tenant | None) -> tuple[dict[str, Any] | None, d
                 "url": cfg.get("cluster_url", ""),
                 "client_id": cfg.get("client_id", ""),
                 "customer_id": cfg.get("customer_id", ""),
+                "workspace_id": cfg.get("workspace_id", ""),
                 "client_secret": cfg.get("client_secret", ""),
             },
         }
@@ -797,7 +798,7 @@ def _hub_central_config(tenant: Tenant | None) -> tuple[dict[str, Any] | None, d
                 "username": cfg.get("username", ""),
                 "password": cfg.get("password", ""),
             },
-            "central": {"url": "", "client_id": "", "customer_id": "", "client_secret": ""},
+            "central": {"url": "", "client_id": "", "customer_id": "", "workspace_id": "", "client_secret": ""},
         }
 
     central_config = {
@@ -806,6 +807,7 @@ def _hub_central_config(tenant: Tenant | None) -> tuple[dict[str, Any] | None, d
         "client_id": cfg.get("client_id", ""),
         "client_secret": cfg.get("client_secret", ""),
         "customer_id": cfg.get("customer_id", ""),
+        "workspace_id": cfg.get("workspace_id", ""),
         "access_token": cfg.get("access_token", ""),
         "refresh_token": cfg.get("refresh_token", ""),
     }
@@ -848,7 +850,7 @@ def _build_spoke_config_payload(tenant: Tenant | None) -> dict[str, Any]:
         payload["central_api"] = central_api or {
             "mode": "classic",
             "classic": {"url": "", "username": ""},
-            "central": {"url": "", "client_id": "", "customer_id": "", "client_secret": ""},
+            "central": {"url": "", "client_id": "", "customer_id": "", "workspace_id": "", "client_secret": ""},
         }
         payload["central_config"] = central_config or {
             "api_version": "classic",
@@ -856,6 +858,7 @@ def _build_spoke_config_payload(tenant: Tenant | None) -> dict[str, Any]:
             "client_id": "",
             "client_secret": "",
             "customer_id": "",
+            "workspace_id": "",
             "access_token": "",
             "refresh_token": "",
         }
