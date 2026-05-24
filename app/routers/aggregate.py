@@ -965,13 +965,11 @@ def get_usb_provisioning_status(
     resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
     total_slots = 0
     used_slots = 0
-    auto_provision_on = False
     spokes_out: list[dict[str, Any]] = []
     for spoke in _approved_spokes(resolved_tenant_id):
         used, total, dongles, auto_provision = _spoke_usb_capacity(spoke)
         total_slots += total
         used_slots += used
-        auto_provision_on = auto_provision_on or auto_provision
         spokes_out.append({
             "spoke_id": spoke.id,
             "spoke_name": spoke.spoke_name or spoke.hostname,
@@ -982,6 +980,10 @@ def get_usb_provisioning_status(
         })
     spokes_out.sort(key=lambda item: str(item.get("spoke_name") or "").lower())
     total_dongles = sum(s.get("dongle_count", 0) for s in spokes_out)
+    # auto_provision_on: true only if ALL spokes with dongles have it enabled
+    # (reflects toggle-all state accurately; any-spoke-on was misleading after disabling)
+    enabled_spokes = [s for s in spokes_out if s["auto_provision"]]
+    auto_provision_on = len(enabled_spokes) > 0 and len(enabled_spokes) == len(spokes_out)
     return {
         "tenant_id": resolved_tenant_id,
         "total_slots": total_slots,
