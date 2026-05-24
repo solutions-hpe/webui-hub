@@ -511,6 +511,44 @@ class ArubaClient:
             sites.setdefault(site_name.casefold(), {"name": site_name})
         return sorted(sites.values(), key=lambda item: item["name"].casefold())
 
+    async def register_webhook(self, name: str, endpoint_url: str, api_key: str) -> dict[str, Any]:
+        """Register a webhook with Central. Returns the created webhook object."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            token = await self._ensure_token(client)
+            resp = await client.post(
+                f"{self.cluster_url}/network-services/v1/webhooks",
+                headers=self._headers(token),
+                json={
+                    "name": name,
+                    "endpointURL": endpoint_url,
+                    "authMechanism": {"type": "API_KEY", "apiKey": api_key},
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def list_webhooks(self) -> list[dict[str, Any]]:
+        """List all registered webhooks."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            data = await self._get(client, "/network-services/v1/webhooks")
+            if isinstance(data, dict):
+                items = data.get("items")
+                return items if isinstance(items, list) else []
+            return data if isinstance(data, list) else []
+
+    async def delete_webhook(self, webhook_id: str) -> None:
+        """Delete a webhook by ID."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            token = await self._ensure_token(client)
+            resp = await client.delete(
+                f"{self.cluster_url}/network-services/v1/webhooks/{webhook_id}",
+                headers=self._headers(token),
+                timeout=15,
+            )
+            if resp.status_code != 404:
+                resp.raise_for_status()
+
     async def available_checks(self) -> dict[str, Any]:
         """Return Aruba Central alert, insight, and hardware catalogs for the UI."""
         if not self.is_configured():

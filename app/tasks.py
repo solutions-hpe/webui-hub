@@ -24,6 +24,7 @@ import httpx
 from . import store
 from .aruba import (
     ArubaClient,
+    ArubaFinding,
     DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS,
     DEFAULT_NEW_CENTRAL_MONITORED_CHECKS,
     validate_cluster_url,
@@ -295,7 +296,52 @@ def _normalize_site_token(value: Any) -> str:
     return " ".join(str(value or "").strip().casefold().split())
 
 
-async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient) -> dict[str, Any]:
+def _spoke_aruba_config(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(config, dict):
+        return None
+    return {
+        key: value
+        for key, value in config.items()
+        if key not in {"webhook_id", "webhook_api_key"}
+    }
+
+
+def _finding_payload(finding: ArubaFinding) -> dict[str, Any]:
+    return {
+        "site": finding.site_name,
+        "check": finding.check_name,
+        "status": finding.status,
+        "source": finding.source,
+    }
+
+
+def _merge_webhook_findings(
+    findings: list[dict[str, Any]],
+    webhook_findings: dict[str, dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    merged = list(findings)
+    existing = {
+        (str(item.get("site") or "").strip(), str(item.get("check") or "").strip(), str(item.get("source") or "").strip())
+        for item in findings
+        if isinstance(item, dict)
+    }
+    for item in (webhook_findings or {}).values():
+        if not isinstance(item, dict):
+            continue
+        payload = dict(item)
+        key = (
+            str(payload.get("site") or "").strip(),
+            str(payload.get("check") or "").strip(),
+            str(payload.get("source") or "").strip(),
+        )
+        if key in existing:
+            continue
+        merged.append(payload)
+        existing.add(key)
+    return merged
+
+
+async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient) -> tuple[dict[str, Any], dict[str, str]]:
     config = dict(store.get_tenant_central_sites_config(tenant_id) or {})
     site_mappings = dict(config.get("site_mappings") or {}) if isinstance(config.get("site_mappings"), dict) else {}
     monitored_checks = list(config.get("monitored_checks") or []) if isinstance(config.get("monitored_checks"), list) else []
@@ -303,6 +349,11 @@ async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient)
     changed = False
 
     discovered_sites = await client.list_sites()
+    site_id_map = {
+        str((site or {}).get("site_id") or "").strip(): str((site or {}).get("name") or "").strip()
+        for site in discovered_sites
+        if str((site or {}).get("site_id") or "").strip() and str((site or {}).get("name") or "").strip()
+    }
     existing_wsites = {_normalize_site_token(name) for name in site_mappings}
     existing_central = {_normalize_site_token(name) for name in site_mappings.values()}
     for site in discovered_sites:
@@ -329,7 +380,7 @@ async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient)
     }
     if changed:
         store.set_tenant_central_sites_config(tenant_id, normalized_config)
-    return normalized_config
+    return normalized_config, site_id_map
 
 
 def _load_hub_client_baseline(tenant_id: str) -> None:
@@ -472,7 +523,7 @@ async def aruba_poller() -> None:
                 if any(spoke.processing_mode.resolve("aruba_polling") == "distributed" for spoke in spokes):
                     if tenant.aruba_config_enc:
                         try:
-                            tenant_config = decrypt_dict(tenant.aruba_config_enc)
+                            tenant_config = _spoke_aruba_config(decrypt_dict(tenant.aruba_config_enc))
                         except Exception as exc:
                             logger.warning("Failed to load Aruba config for tenant %s: %s", tenant.id, exc)
 
@@ -495,6 +546,9 @@ async def aruba_poller() -> None:
                             "spokes": {},
                             "token_valid": False,
                             "token_state": "not_configured",
+                            "status": {},
+                            "wireless_clients": {},
+                            "hardware_alerts": [],
                             "client_count_status": {},
                             "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },
@@ -510,6 +564,9 @@ async def aruba_poller() -> None:
                             "spokes": {},
                             "token_valid": False,
                             "token_state": {"state": "error", "detail": str(exc)},
+                            "status": {},
+                            "wireless_clients": {},
+                            "hardware_alerts": [],
                             "client_count_status": {},
                             "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },
@@ -531,10 +588,7 @@ async def aruba_poller() -> None:
                         store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "centralized", "failure", str(exc)))
                     continue
 
-                finding_payload = [
-                    {"site": finding.site_name, "check": finding.check_name, "status": finding.status, "source": finding.source}
-                    for finding in findings
-                ]
+                finding_payload = [_finding_payload(finding) for finding in findings]
                 for spoke in centralized_spokes:
                     store.append_audit(
                         _audit(spoke.id, tenant.id, "aruba_poll", "centralized", "success", f"{len(findings)} findings")
@@ -543,7 +597,7 @@ async def aruba_poller() -> None:
                 try:
                     site_raw: dict[str, dict[str, Any]] = {}
                     spokes_status: dict[str, dict[str, Any]] = {}
-                    hub_sites_cfg = await _auto_discover_hub_central_config(tenant.id, client)
+                    hub_sites_cfg, site_id_map = await _auto_discover_hub_central_config(tenant.id, client)
                     hub_site_mappings = hub_sites_cfg.get("site_mappings", {}) if isinstance(hub_sites_cfg.get("site_mappings"), dict) else {}
                     hub_monitored_checks = hub_sites_cfg.get("monitored_checks", []) if isinstance(hub_sites_cfg.get("monitored_checks"), list) else []
                     hub_hardware_checks = hub_sites_cfg.get("hardware_checks", []) if isinstance(hub_sites_cfg.get("hardware_checks"), list) else []
@@ -657,21 +711,32 @@ async def aruba_poller() -> None:
                             "hardware_checks": list(hub_hardware_checks),
                         }
 
+                    existing_webhook_findings = {}
+                    existing_status = _hub_central_status.get(tenant.id, {})
+                    if isinstance(existing_status.get("webhook_findings"), dict):
+                        existing_webhook_findings = dict(existing_status.get("webhook_findings") or {})
+                    merged_findings = _merge_webhook_findings(finding_payload, existing_webhook_findings)
                     _set_hub_central_status(
                         tenant.id,
                         {
                             "spokes": spokes_status,
                             "token_valid": True,
                             "token_state": "connected",
+                            "status": aggregated_status,
+                            "wireless_clients": aggregated_wireless_clients,
+                            "hardware_alerts": aggregated_hardware_alerts,
                             "client_count_status": client_count_status,
                             "central_sites_config": hub_sites_cfg,
+                            "site_id_map": site_id_map,
+                            "webhook_findings": existing_webhook_findings,
+                            "findings": merged_findings,
                         },
                     )
                     await ws_broadcast(
                         {
                             "type": "aruba_update",
                             "tenant_id": tenant.id,
-                            "findings": finding_payload,
+                            "findings": merged_findings,
                             "status": aggregated_status,
                             "wireless_clients": aggregated_wireless_clients,
                             "hardware_alerts": aggregated_hardware_alerts,
@@ -687,6 +752,9 @@ async def aruba_poller() -> None:
                             "spokes": {},
                             "token_valid": False,
                             "token_state": {"state": "error", "detail": str(exc)},
+                            "status": {},
+                            "wireless_clients": {},
+                            "hardware_alerts": [],
                             "client_count_status": {},
                             "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },

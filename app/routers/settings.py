@@ -193,6 +193,7 @@ def _serialize_aruba_config(tenant: Tenant) -> dict[str, Any]:
         "client_secret_configured": bool(cfg.get("client_secret")),
         "access_token_configured": bool(cfg.get("access_token")),
         "refresh_token_configured": bool(cfg.get("refresh_token")),
+        "webhook_registered": bool(cfg.get("webhook_id")),
     }
 
 
@@ -337,7 +338,16 @@ def update_aruba_settings(
 ):
     _require_tenant_admin(tenant_id, current_user)
     tenant = _get_tenant(tenant_id)
+    existing_cfg: dict[str, Any] = {}
+    if tenant.aruba_config_enc:
+        try:
+            existing_cfg = decrypt_dict(tenant.aruba_config_enc)
+        except Exception:
+            existing_cfg = {}
     cfg = payload.model_dump()
+    for key in ("webhook_id", "webhook_api_key"):
+        if existing_cfg.get(key):
+            cfg[key] = existing_cfg[key]
     tenant.aruba_config_enc = encrypt_dict(cfg)
     tenant.aruba_cid = payload.customer_id or tenant.aruba_cid
     store.save_tenant(tenant)

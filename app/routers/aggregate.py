@@ -5,6 +5,7 @@ import base64
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
+import secrets
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -30,6 +31,32 @@ FAIL_STATUSES = {"error", "fail", "failed", "degraded", "critical"}
 PASS_STATUSES = {"ok", "pass", "passed", "healthy", "connected"}
 WARNING_STATUSES = {"warn", "warning", "unknown", "no_data", "stale"}
 MODE_VALUES = {"centralized", "distributed"}
+CENTRAL_WEBHOOK_HOST = "cs-hub.westus3.azurecontainer.io:8443"
+
+
+def _central_webhook_endpoint_url(tenant_id: str) -> str:
+    return f"https://{CENTRAL_WEBHOOK_HOST}/api/{tenant_id}/webhook/central"
+
+
+def _load_aruba_config(tenant: Tenant) -> dict[str, Any]:
+    if not tenant.aruba_config_enc:
+        raise HTTPException(status_code=400, detail="Aruba Central credentials are not configured for this tenant.")
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to decrypt Aruba Central credentials: {exc}") from exc
+    cfg["cluster_url"] = _validated_cluster_url_or_400(cfg.get("cluster_url", ""))
+    return cfg
+
+
+def _persist_aruba_config(tenant: Tenant, cfg: dict[str, Any]) -> None:
+    tenant.aruba_cid = cfg.get("customer_id") or tenant.aruba_cid
+    tenant.aruba_config_enc = (
+        encrypt_dict(cfg)
+        if any(str(value).strip() for key, value in cfg.items() if key != "api_version") or cfg.get("client_secret")
+        else None
+    )
+    store.save_tenant(tenant)
 
 
 class ConfigPushRequest(BaseModel):
@@ -328,6 +355,7 @@ def _serialize_hub_central_config(tenant: Tenant) -> dict[str, Any]:
         "client_secret_configured": bool(cfg.get("client_secret")),
         "access_token_configured": bool(cfg.get("access_token")),
         "refresh_token_configured": bool(cfg.get("refresh_token")),
+        "webhook_registered": bool(cfg.get("webhook_id")),
     }
 
 
@@ -1078,6 +1106,84 @@ async def test_central_connection(
         return {"ok": False, "token_obtained": False, "error": str(exc)}
 
 
+@router.post("/{tenant_id}/aggregate/register-central-webhook")
+async def register_central_webhook(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Register the hub as a Central webhook receiver."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    cfg = _load_aruba_config(tenant)
+    client = ArubaClient(cfg)
+    if not client.is_configured():
+        raise HTTPException(status_code=400, detail="Aruba Central cluster URL is not configured.")
+
+    endpoint_url = _central_webhook_endpoint_url(resolved_tenant_id)
+    api_key = secrets.token_urlsafe(32)
+    webhook_name = f"ClientSim Hub - {tenant.name}" if tenant.name else "ClientSim Hub"
+    existing_webhook_id = str(cfg.get("webhook_id") or "").strip()
+    if existing_webhook_id:
+        await client.delete_webhook(existing_webhook_id)
+    created = await client.register_webhook(webhook_name, endpoint_url, api_key)
+    webhook_id = str(created.get("id") or created.get("webhookId") or created.get("webhook_id") or "").strip()
+    if not webhook_id:
+        raise HTTPException(status_code=502, detail="Central did not return a webhook ID.")
+    cfg["webhook_id"] = webhook_id
+    cfg["webhook_api_key"] = api_key
+    _persist_aruba_config(tenant, cfg)
+    return {"ok": True, "webhook_id": webhook_id, "endpoint_url": endpoint_url}
+
+
+@router.delete("/{tenant_id}/aggregate/register-central-webhook")
+async def deregister_central_webhook(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Remove the hub webhook from Central."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    endpoint_url = _central_webhook_endpoint_url(resolved_tenant_id)
+    if not tenant.aruba_config_enc:
+        return {"ok": True, "registered": False, "endpoint_url": endpoint_url}
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to decrypt Aruba Central credentials: {exc}") from exc
+    webhook_id = str(cfg.get("webhook_id") or "").strip()
+    if webhook_id and str(cfg.get("cluster_url") or "").strip():
+        cfg["cluster_url"] = _validated_cluster_url_or_400(cfg.get("cluster_url", ""))
+        client = ArubaClient(cfg)
+        if client.is_configured():
+            await client.delete_webhook(webhook_id)
+    cfg.pop("webhook_id", None)
+    cfg.pop("webhook_api_key", None)
+    _persist_aruba_config(tenant, cfg)
+    return {"ok": True, "registered": False, "endpoint_url": endpoint_url}
+
+
+@router.get("/{tenant_id}/aggregate/register-central-webhook")
+async def get_central_webhook_status(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Get current webhook registration status."""
+    resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    webhook_id = ""
+    if tenant.aruba_config_enc:
+        try:
+            cfg = decrypt_dict(tenant.aruba_config_enc)
+            webhook_id = str(cfg.get("webhook_id") or "").strip()
+        except Exception:
+            webhook_id = ""
+    return {
+        "registered": bool(webhook_id),
+        "webhook_id": webhook_id,
+        "endpoint_url": _central_webhook_endpoint_url(resolved_tenant_id),
+    }
+
+
 @router.get("/aggregate/api-server")
 def get_aggregate_api_server(
     tenant_id: Optional[str] = Query(default=None),
@@ -1594,7 +1700,7 @@ async def update_aggregate_central(
         cfg["client_secret"] = client_secret
     elif existing_cfg.get("client_secret"):
         cfg["client_secret"] = existing_cfg["client_secret"]
-    for key in ("access_token", "refresh_token"):
+    for key in ("access_token", "refresh_token", "webhook_id", "webhook_api_key"):
         if existing_cfg.get(key):
             cfg[key] = existing_cfg[key]
 
