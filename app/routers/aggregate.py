@@ -940,6 +940,7 @@ async def fleet_reclone_clear_spoke(
             tenant_id=resolved_tenant_id,
             type="clear_reclone_state",
             payload={},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
         )
     )
     return {"tenant_id": resolved_tenant_id, "spoke_id": spoke_id, "queued": 1}
