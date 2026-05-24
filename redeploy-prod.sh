@@ -135,6 +135,7 @@ az container create \
         AZURE_STORAGE_ACCOUNT="$STORAGE_ACCOUNT" \
         AZURE_STORAGE_KEY="$STORAGE_KEY" \
         AZURE_CONTAINER="$FILE_SHARE" \
+        DATA_DIR=/data \
     --azure-file-volume-account-name "$STORAGE_ACCOUNT" \
     --azure-file-volume-account-key "$STORAGE_KEY" \
     --azure-file-volume-share-name "$FILE_SHARE" \
