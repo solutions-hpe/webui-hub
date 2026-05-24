@@ -84,9 +84,8 @@ fi
 echo "▶ Fetching ACR credentials..."
 ACR_PWD=$(az acr credential show --name "$ACR_NAME" --query 'passwords[0].value' -o tsv)
 
-# ── Stamp VERSION with git SHA so browsers cache-bust on each deploy ──
+# ── Stamp GIT_SHA for build arg (cache-busting) — do NOT overwrite VERSION ──
 GIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "dev")
-echo "$GIT_SHA" > "$SCRIPT_DIR/VERSION"
 
 # ── Copy client-sim INSTALLER_VERSION into build ──────────────────
 CLIENT_SIM_VER_SRC="$SCRIPT_DIR/../client-sim/webui-spoke/INSTALLER_VERSION"
