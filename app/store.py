@@ -6,10 +6,15 @@ this module. Callers should treat this file as the single read/write boundary
 for users, tenants, spokes, command queues, and audit history. A process-local
 re-entrant lock protects multi-step file operations so concurrent FastAPI
 requests and background tasks do not corrupt on-disk state.
+
+For the command queue specifically, gunicorn runs multiple worker processes that
+each have their own threading lock. Cross-process safety for queue writes is
+provided by ``fcntl.flock`` (exclusive file lock) on a per-spoke lock file.
 """
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -1077,6 +1082,10 @@ def update_spoke_telemetry(tenant_id: str, spoke_id: str, telemetry: dict) -> No
         _save_spokes(tenant_id, spokes)
 
 
+def _queue_lock_path(tenant_id: str, spoke_id: str) -> Path:
+    return _data_dir() / tenant_id / "queue" / f"{spoke_id}.lock"
+
+
 def _queue_path(tenant_id: str, spoke_id: str) -> Path:
     return _data_dir() / tenant_id / "queue" / f"{spoke_id}.json"
 
@@ -1091,12 +1100,22 @@ def _save_queue(tenant_id: str, spoke_id: str, commands: list[Command]) -> None:
 
 
 def enqueue_command(command: Command) -> None:
+    # Use both a threading lock (intra-process) and an exclusive flock (cross-process
+    # across gunicorn workers) to prevent concurrent read-modify-write races on the
+    # queue JSON file.
+    lock_path = _queue_lock_path(command.tenant_id, command.spoke_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        cmds = _load_queue(command.tenant_id, command.spoke_id)
-        now = _now()
-        cmds = [c for c in cmds if c.expires_at > now]
-        cmds.append(command)
-        _save_queue(command.tenant_id, command.spoke_id, cmds)
+        with open(lock_path, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                cmds = _load_queue(command.tenant_id, command.spoke_id)
+                now = _now()
+                cmds = [c for c in cmds if c.expires_at > now]
+                cmds.append(command)
+                _save_queue(command.tenant_id, command.spoke_id, cmds)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
     with contextlib.suppress(Exception):
         from .ws import notify_spoke_command
