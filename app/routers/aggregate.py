@@ -1022,7 +1022,27 @@ def toggle_auto_provision(
     return {"ok": True, "auto_provision": new_val, "updated_spokes": updated}
 
 
-@router.get("/aggregate/api-server")
+@router.post("/{tenant_id}/aggregate/refresh-webui")
+def aggregate_refresh_webui(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a refresh_webui command on all approved spokes so they download the latest cs-webui frontend."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    queued = 0
+    for spoke in _approved_spokes(resolved_tenant_id):
+        store.enqueue_command(Command(
+            spoke_id=spoke.id,
+            tenant_id=resolved_tenant_id,
+            type="refresh_webui",
+            payload={},
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ))
+        queued += 1
+    return {"ok": True, "queued": queued}
+
+
+
 def get_aggregate_api_server(
     tenant_id: Optional[str] = Query(default=None),
     current_user: User = Depends(auth.get_current_user),
