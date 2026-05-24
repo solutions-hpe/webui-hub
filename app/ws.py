@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Set
+from typing import Optional
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 
 from .auth import decode_access_token
+from .data_models import User
 
-browser_connections: Set[WebSocket] = set()
+# Maps each browser WebSocket to the set of tenant IDs it may see.
+# None means the connection belongs to a superadmin who sees all tenants.
+browser_connections: dict[WebSocket, Optional[frozenset[str]]] = {}
 spoke_connections: dict[tuple[str, str], WebSocket] = {}
 _spoke_send_locks: dict[tuple[str, str], asyncio.Lock] = {}
 _shell_queues: dict[str, asyncio.Queue] = {}
@@ -49,52 +52,56 @@ async def _close_unauthorized(websocket: WebSocket, reason: str) -> None:
     await websocket.close(code=4401, reason=reason)
 
 
-async def _authenticate_browser_websocket(websocket: WebSocket) -> bool:
+async def _authenticate_browser_websocket(websocket: WebSocket) -> Optional[User]:
+    """Authenticate a browser WebSocket. Returns the User on success, None on failure."""
     token = str(websocket.query_params.get("token") or "").strip()
     if token:
         try:
-            decode_access_token(token)
+            user = decode_access_token(token)
         except HTTPException:
             await _close_unauthorized(websocket, "Invalid credentials")
-            return False
+            return None
         await websocket.accept()
-        return True
+        return user
 
     await websocket.accept()
     try:
         token = _extract_ws_token(await asyncio.wait_for(websocket.receive_text(), timeout=10))
     except asyncio.TimeoutError:
         await _close_unauthorized(websocket, "Authentication timeout")
-        return False
+        return None
     except WebSocketDisconnect:
-        return False
+        return None
     except Exception:
         await _close_unauthorized(websocket, "Authentication required")
-        return False
+        return None
 
     if not token:
         await _close_unauthorized(websocket, "Authentication required")
-        return False
+        return None
 
     try:
-        decode_access_token(token)
+        user = decode_access_token(token)
     except HTTPException:
         await _close_unauthorized(websocket, "Invalid credentials")
-        return False
-    return True
+        return None
+    return user
 
 
 async def ws_connect(websocket: WebSocket) -> None:
-    if not await _authenticate_browser_websocket(websocket):
+    user = await _authenticate_browser_websocket(websocket)
+    if user is None:
         return
-    browser_connections.add(websocket)
+    # Superadmins get None (see all tenants); others get a frozenset of their tenant IDs.
+    tenant_scope: Optional[frozenset[str]] = None if user.is_superadmin else frozenset(user.tenant_ids())
+    browser_connections[websocket] = tenant_scope
     try:
         while True:
             await websocket.receive_text()
     except Exception:
         pass
     finally:
-        browser_connections.discard(websocket)
+        browser_connections.pop(websocket, None)
 
 
 async def register_spoke(websocket: WebSocket, tenant_id: str, spoke_id: str) -> None:
@@ -113,14 +120,21 @@ async def unregister_spoke(tenant_id: str, spoke_id: str, websocket: WebSocket |
 
 
 async def ws_broadcast(data: dict) -> None:
+    # Extract the tenant_id this event belongs to (may be top-level or nested in "job").
+    tenant_id: Optional[str] = data.get("tenant_id") or (data.get("job") or {}).get("tenant_id")
     dead = set()
     message = json.dumps(data)
-    for ws in tuple(browser_connections):
+    for ws, tenant_scope in tuple(browser_connections.items()):
+        # tenant_scope is None → superadmin, sees everything.
+        # Otherwise only send if tenant_id matches the connection's allowed set.
+        if tenant_id and tenant_scope is not None and tenant_id not in tenant_scope:
+            continue
         try:
             await ws.send_text(message)
         except Exception:
             dead.add(ws)
-    browser_connections.difference_update(dead)
+    for ws in dead:
+        browser_connections.pop(ws, None)
 
 
 def register_shell_session(session_id: str) -> asyncio.Queue:
