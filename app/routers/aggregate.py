@@ -1719,6 +1719,8 @@ async def update_aggregate_central(
     elif existing_cfg.get("access_token"):
         cfg["access_token"] = existing_cfg["access_token"]
     for key in ("refresh_token", "webhook_id", "webhook_api_key"):
+        if key == "refresh_token" and access_token:
+            continue
         if existing_cfg.get(key):
             cfg[key] = existing_cfg[key]
 
@@ -1762,6 +1764,26 @@ async def update_aggregate_central(
         store.set_tenant_central_sites_config(resolved_tenant_id, central_sites_config)
 
     return _aggregate_central_payload(resolved_tenant_id)
+
+
+@router.post("/{tenant_id}/aggregate/central-clear-secrets")
+async def clear_aggregate_central_secrets(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    if not tenant.aruba_config_enc:
+        return _serialize_hub_central_config(tenant)
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to decrypt Aruba Central credentials: {exc}") from exc
+    cfg.pop("client_secret", None)
+    cfg.pop("access_token", None)
+    cfg.pop("refresh_token", None)
+    _persist_aruba_config(tenant, cfg)
+    return _serialize_hub_central_config(tenant)
 
 
 @router.post("/aggregate/config-push")
