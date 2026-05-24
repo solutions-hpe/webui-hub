@@ -1042,7 +1042,41 @@ def aggregate_refresh_webui(
     return {"ok": True, "queued": queued}
 
 
+@router.post("/{tenant_id}/aggregate/test-central")
+async def test_central_connection(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Test Aruba Central credentials and return token status + discovered sites."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    if not tenant.aruba_config_enc:
+        return {"ok": False, "error": "No Aruba Central credentials configured for this tenant."}
+    try:
+        cfg = decrypt_dict(tenant.aruba_config_enc)
+    except Exception as exc:
+        return {"ok": False, "error": f"Failed to decrypt credentials: {exc}"}
+    client = ArubaClient(cfg)
+    if not client.is_configured():
+        return {"ok": False, "error": "Cluster URL is not set."}
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=True) as hc:
+            token = await client._ensure_token(hc)
+            sites = await client.list_sites()
+        return {
+            "ok": True,
+            "token_obtained": True,
+            "api_version": client.api_version,
+            "cluster_url": client.cluster_url,
+            "sites_discovered": len(sites),
+            "sites": [s.get("name") for s in sites if isinstance(s, dict)],
+        }
+    except Exception as exc:
+        return {"ok": False, "token_obtained": False, "error": str(exc)}
 
+
+@router.get("/aggregate/api-server")
 def get_aggregate_api_server(
     tenant_id: Optional[str] = Query(default=None),
     current_user: User = Depends(auth.get_current_user),
