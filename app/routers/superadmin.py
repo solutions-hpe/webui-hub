@@ -716,7 +716,7 @@ async def tenant_approve_pending_spoke(
     tenant_id: str,
     spoke_id: str,
     request: Request,
-    current_user: User = Depends(auth.require_tenant_access),
+    current_user: User = Depends(auth.require_tenant_admin),
     label: Optional[str] = None,
 ):
     """Tenant admin approves a spoke pre-registered for their tenant."""
@@ -787,7 +787,7 @@ async def tenant_approve_pending_spoke(
 def tenant_reject_pending_spoke(
     tenant_id: str,
     spoke_id: str,
-    current_user: User = Depends(auth.require_tenant_access),
+    current_user: User = Depends(auth.require_tenant_admin),
 ):
     """Tenant admin rejects/removes a spoke pre-registered for their tenant."""
     pending = store.get_pending_spoke(spoke_id)

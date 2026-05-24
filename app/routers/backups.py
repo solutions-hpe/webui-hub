@@ -409,7 +409,7 @@ async def trigger_reseed(
     current_user: User = Depends(auth.get_current_user),
 ):
     tenant_id = req.tenant_id
-    auth.require_tenant_access(tenant_id, current_user)
+    auth.require_tenant_admin(tenant_id, current_user)
     backup_config = store.load_backup_config()
 
     if req.spoke_ids == ["all"]:

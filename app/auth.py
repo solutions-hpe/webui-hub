@@ -146,6 +146,16 @@ def require_tenant_access(tenant_id: str, user: User = Depends(get_current_user)
     return user
 
 
+def require_tenant_admin(tenant_id: str, user: User = Depends(get_current_user)) -> User:
+    """Require tenant admin (or superadmin) role — viewers are rejected."""
+    if user.is_superadmin:
+        return user
+    role = user.get_role(tenant_id)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Tenant admin role required")
+    return user
+
+
 def require_tenant_member(tenant_id: str, user: User) -> User:
     """Like require_tenant_access but explicitly blocks superadmin.
 

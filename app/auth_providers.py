@@ -22,8 +22,8 @@ def _normalize_provider(value: str) -> str:
 
 
 def _normalize_default_role(value: str) -> str:
-    role = str(value or "superadmin").strip().lower()
-    return role if role in {"superadmin", "tenant_admin"} else "superadmin"
+    role = str(value or "tenant_admin").strip().lower()
+    return role if role in {"superadmin", "tenant_admin"} else "tenant_admin"
 
 
 def _tenant_roles(tenant_id: str | None) -> list[dict[str, str]]:
