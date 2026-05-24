@@ -509,8 +509,7 @@ async def aruba_poller() -> None:
                         {
                             "spokes": {},
                             "token_valid": False,
-                            "token_state": "error",
-                            "error": str(exc),
+                            "token_state": {"state": "error", "detail": str(exc)},
                             "client_count_status": {},
                             "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },
@@ -687,8 +686,7 @@ async def aruba_poller() -> None:
                         {
                             "spokes": {},
                             "token_valid": False,
-                            "token_state": "error",
-                            "error": str(exc),
+                            "token_state": {"state": "error", "detail": str(exc)},
                             "client_count_status": {},
                             "central_sites_config": store.get_tenant_central_sites_config(tenant.id),
                         },

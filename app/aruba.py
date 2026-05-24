@@ -457,21 +457,18 @@ class ArubaClient:
         sites: dict[str, dict[str, Any]] = {}
         async with httpx.AsyncClient(timeout=30) as client:
             if self.api_version == "new_central":
-                try:
-                    data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
-                    for item in data.get("items") or []:
-                        site_name = (item.get("siteName") or item.get("site_name") or "").strip()
-                        if not site_name:
-                            continue
-                        key = site_name.casefold()
-                        sites[key] = {
-                            "name": site_name,
-                            "site_id": item.get("siteId") or item.get("site_id") or "",
-                            "health_score": item.get("healthScore", item.get("health_score")),
-                            "wireless_clients": item.get("clientCount", item.get("client_count")),
-                        }
-                except Exception as exc:
-                    logger.warning("Aruba site discovery failed [%s]: %s", self._config_hash, exc)
+                data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
+                for item in data.get("items") or []:
+                    site_name = (item.get("siteName") or item.get("site_name") or "").strip()
+                    if not site_name:
+                        continue
+                    key = site_name.casefold()
+                    sites[key] = {
+                        "name": site_name,
+                        "site_id": item.get("siteId") or item.get("site_id") or "",
+                        "health_score": item.get("healthScore", item.get("health_score")),
+                        "wireless_clients": item.get("clientCount", item.get("client_count")),
+                    }
                 return sorted(sites.values(), key=lambda item: item["name"].casefold())
 
         try:
