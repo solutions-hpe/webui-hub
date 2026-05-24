@@ -159,6 +159,8 @@ class ArubaClient:
             )
             resp.raise_for_status()
             payload = resp.json()
+            if "access_token" not in payload:
+                raise ValueError(f"Token endpoint returned no access_token. Response: {json.dumps(payload)[:300]}")
             token_state.clear()
             token_state.update(
                 {

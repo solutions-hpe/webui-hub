@@ -1142,8 +1142,27 @@ async def test_central_connection(
         if raw_response is not None:
             result["raw_sites_response"] = raw_response
         return result
+    except httpx.HTTPStatusError as exc:
+        body = ""
+        try:
+            body = exc.response.text[:500]
+        except Exception:
+            pass
+        detail = f"HTTP {exc.response.status_code} from {exc.request.url}: {body or exc.response.reason_phrase}"
+        logger.warning("test-central HTTP error: %s", detail)
+        return {"ok": False, "token_obtained": False, "error": detail}
+    except httpx.ConnectError as exc:
+        detail = f"Connection error: {exc}" if str(exc) else f"Could not connect to {client.cluster_url} — check the cluster URL and network access"
+        logger.warning("test-central connect error: %s", detail)
+        return {"ok": False, "token_obtained": False, "error": detail}
+    except httpx.TimeoutException as exc:
+        detail = f"Timeout connecting to {client.cluster_url}"
+        logger.warning("test-central timeout: %s", exc)
+        return {"ok": False, "token_obtained": False, "error": detail}
     except Exception as exc:
-        return {"ok": False, "token_obtained": False, "error": str(exc)}
+        detail = str(exc) or repr(exc)
+        logger.exception("test-central unexpected error")
+        return {"ok": False, "token_obtained": False, "error": detail}
 
 
 @router.post("/{tenant_id}/aggregate/register-central-webhook")
