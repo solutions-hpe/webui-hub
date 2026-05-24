@@ -918,6 +918,33 @@ async def fleet_reclone_clear(
     return {"tenant_id": resolved_tenant_id, "queued": queued}
 
 
+@router.post("/{tenant_id}/aggregate/fleet-reclone-clear-spoke")
+async def fleet_reclone_clear_spoke(
+    tenant_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a clear_reclone_state command on a single spoke."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke_id = str(body.get("spoke_id") or "").strip()
+    if not spoke_id:
+        raise HTTPException(status_code=400, detail="spoke_id is required")
+
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke or spoke.status != "approved":
+        raise HTTPException(status_code=404, detail="Approved spoke not found")
+
+    store.enqueue_command(
+        Command(
+            spoke_id=spoke_id,
+            tenant_id=resolved_tenant_id,
+            type="clear_reclone_state",
+            payload={},
+        )
+    )
+    return {"tenant_id": resolved_tenant_id, "spoke_id": spoke_id, "queued": 1}
+
+
 @router.post("/{tenant_id}/aggregate/unlock-template")
 async def unlock_template(
     tenant_id: str,
