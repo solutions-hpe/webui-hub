@@ -140,6 +140,13 @@ class ArubaClient:
             return token_state["access_token"]
 
         if self.api_version == "new_central":
+            # If a static access token is provided, use it directly (no OAuth exchange).
+            static_token = str(self.config.get("access_token") or "").strip()
+            if static_token:
+                token_state.clear()
+                token_state.update({"access_token": static_token, "expires_at": now + 7200})
+                return static_token
+
             workspace_id = str(self.config.get("workspace_id") or "").strip()
             resp = await client.post(
                 self._new_central_token_url(),

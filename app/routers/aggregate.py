@@ -69,6 +69,7 @@ class CentralConfigPayload(BaseModel):
     cluster_url: str = ""
     client_id: str = ""
     client_secret: str = ""
+    access_token: str = ""
     customer_id: str = ""
     workspace_id: str = ""
 
@@ -1700,7 +1701,13 @@ async def update_aggregate_central(
         cfg["client_secret"] = client_secret
     elif existing_cfg.get("client_secret"):
         cfg["client_secret"] = existing_cfg["client_secret"]
-    for key in ("access_token", "refresh_token", "webhook_id", "webhook_api_key"):
+    # access_token: prefer newly submitted value; fall back to existing encrypted value
+    access_token = str(incoming.get("access_token") or "").strip()
+    if access_token:
+        cfg["access_token"] = access_token
+    elif existing_cfg.get("access_token"):
+        cfg["access_token"] = existing_cfg["access_token"]
+    for key in ("refresh_token", "webhook_id", "webhook_api_key"):
         if existing_cfg.get(key):
             cfg[key] = existing_cfg[key]
 
