@@ -1094,8 +1094,16 @@ async def test_central_connection(
     try:
         async with httpx.AsyncClient(timeout=15, verify=True) as hc:
             token = await client._ensure_token(hc)
+            # For new_central, also return the raw API response to aid debugging
+            raw_response = None
+            if client.api_version == "new_central":
+                try:
+                    async with httpx.AsyncClient(timeout=30) as dbg:
+                        raw_response = await client._get(dbg, "/network-monitoring/v1alpha1/sites-health")
+                except Exception as raw_exc:
+                    raw_response = {"error": str(raw_exc)}
             sites = await client.list_sites()
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "token_obtained": True,
             "api_version": client.api_version,
@@ -1103,6 +1111,9 @@ async def test_central_connection(
             "sites_discovered": len(sites),
             "sites": [s.get("name") for s in sites if isinstance(s, dict)],
         }
+        if raw_response is not None:
+            result["raw_sites_response"] = raw_response
+        return result
     except Exception as exc:
         return {"ok": False, "token_obtained": False, "error": str(exc)}
 
