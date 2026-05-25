@@ -2,7 +2,7 @@ name: Build & Push Hub Image
 
 on:
   push:
-    branches: [main, lrb]
+    branches: [main]
   workflow_dispatch:   # allow manual trigger from GitHub UI
 
 env:
@@ -66,11 +66,34 @@ jobs:
             BUILD_SHA=${{ github.sha }}
             BUILD_REF=${{ github.ref_name }}
 
+      - name: Also push to Azure Container Registry
+        run: |
+          # Import the just-built ghcr.io image into ACR so local redeploy
+          # script can pull from ACR without needing to build locally.
+          az login --service-principal \
+            -u "${{ secrets.AZURE_CLIENT_ID }}" \
+            -p "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}" \
+            --output none 2>/dev/null || true
+          # If Azure credentials are available, import to ACR
+          if az account show &>/dev/null; then
+            az acr import \
+              --name cshubregistry \
+              --source "ghcr.io/${{ github.repository }}:${{ github.ref_name }}" \
+              --image "hub:main" \
+              --username "${{ github.actor }}" \
+              --password "${{ secrets.GITHUB_TOKEN }}" \
+              --force \
+              --output none && echo "  ✓ Imported to ACR" || echo "  ⚠ ACR import skipped (no Azure credentials)"
+          else
+            echo "  ⚠ Azure credentials not configured — ACR import skipped"
+          fi
+
       - name: Print image URL
         run: |
           VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
           echo "✅ Pushed version ${VERSION}:"
-          echo "   ghcr.io/${{ github.repository }}:latest"
+          echo "   ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
 
   cleanup-old-runs:
     name: Delete old workflow runs

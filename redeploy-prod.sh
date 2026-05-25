@@ -84,40 +84,65 @@ fi
 echo "▶ Fetching ACR credentials..."
 ACR_PWD=$(az acr credential show --name "$ACR_NAME" --query 'passwords[0].value' -o tsv)
 
-# ── Stamp GIT_SHA for build arg (cache-busting) — do NOT overwrite VERSION ──
-GIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "dev")
-
-# ── Copy client-sim INSTALLER_VERSION into build ──────────────────
-CLIENT_SIM_VER_SRC="$SCRIPT_DIR/../client-sim/webui-spoke/INSTALLER_VERSION"
-if [ -f "$CLIENT_SIM_VER_SRC" ]; then
-    cp "$CLIENT_SIM_VER_SRC" "$SCRIPT_DIR/CLIENT_SIM_VERSION"
-    echo "  client-sim version: $(cat "$SCRIPT_DIR/CLIENT_SIM_VERSION")"
-else
-    echo "1.00" > "$SCRIPT_DIR/CLIENT_SIM_VERSION"
+# ── Import GitHub-built image from ghcr.io into ACR ──────────────
+# GitHub Actions builds the image (correctly handling the cs-webui submodule)
+# and pushes to ghcr.io on every push to main. We import that image into ACR
+# rather than building locally — GitHub is the single source of truth for builds.
+GHCR_IMAGE="ghcr.io/solutions-hpe/webui-hub:main"
+GHCR_USER="solutions-hpe"
+# Read GHCR_TOKEN from secrets file (must be a PAT with read:packages scope)
+if [ -z "${GHCR_TOKEN:-}" ]; then
+    echo "❌ GHCR_TOKEN not set in $SECRETS_FILE"
+    exit 1
 fi
 
-# ── Sync cs-webui submodule files into build context ──────────────
-# az acr build uses git to pack context, so submodule files are excluded.
-# Explicitly rsync them into a temp copy so they're included in the build.
-FRONTEND_SRC="$SCRIPT_DIR/frontend"
-if [ -d "$FRONTEND_SRC" ]; then
-    echo "▶ Syncing cs-webui frontend files into build context..."
-    # frontend/ is already the right directory; ensure git submodule is up to date
-    git -C "$SCRIPT_DIR" submodule update --init --remote frontend 2>/dev/null || true
-    echo "  ✓ Frontend synced ($(cat "$FRONTEND_SRC/VERSION" 2>/dev/null || echo unknown))"
-fi
+echo "▶ Waiting for GitHub Actions build to complete..."
+# Poll GHA workflow runs until the latest push to main has a completed run
+REPO="solutions-hpe/webui-hub"
+COMMIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD)
+for i in $(seq 1 30); do
+    STATUS=$(curl -s \
+        -H "Authorization: token $GHCR_TOKEN" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$REPO/actions/runs?branch=main&per_page=5" \
+        | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+runs = data.get('workflow_runs', [])
+commit = '$COMMIT_SHA'
+for r in runs:
+    if r.get('head_sha', '').startswith(commit[:8]):
+        print(r.get('conclusion') or r.get('status'))
+        break
+else:
+    # No matching run found yet; check most recent
+    if runs:
+        r = runs[0]
+        print(r.get('conclusion') or r.get('status'))
+    else:
+        print('pending')
+" 2>/dev/null || echo "pending")
+    if [ "$STATUS" = "success" ]; then
+        echo "  ✓ GitHub Actions build completed"
+        break
+    elif [ "$STATUS" = "failure" ] || [ "$STATUS" = "cancelled" ]; then
+        echo "  ⚠ GitHub Actions build status: $STATUS — importing last successful image anyway"
+        break
+    fi
+    echo "  ⏳ Build status: $STATUS (attempt $i/30)..."
+    sleep 10
+done
 
-# ── Build and push image ──────────────────────────────────────────
-echo "▶ Building and pushing image to ACR..."
-# az acr build uses git to pack context, which excludes submodule files.
-# Copy to a temp non-git directory so all files are included.
-BUILD_TMP=$(mktemp -d)
-trap 'rm -rf "$BUILD_TMP"' EXIT
-rsync -a --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
-    --exclude='.deploy-secrets*' --exclude='data/' \
-    "$SCRIPT_DIR/" "$BUILD_TMP/"
-az acr build --registry "$ACR_NAME" --image "$IMAGE" "$BUILD_TMP" --output none
-echo "  ✓ Image pushed: $ACR_SERVER/$IMAGE"
+echo "▶ Importing image from ghcr.io into ACR..."
+az acr import \
+    --name "$ACR_NAME" \
+    --source "$GHCR_IMAGE" \
+    --image "$IMAGE" \
+    --username "$GHCR_USER" \
+    --password "$GHCR_TOKEN" \
+    --force \
+    --output none
+echo "  ✓ Image imported: $ACR_SERVER/$IMAGE"
 
 # ── Remove existing container (clean slate) ───────────────────────
 EXISTING=$(az container show --name "$CONTAINER_NAME" --resource-group "$RG" \
