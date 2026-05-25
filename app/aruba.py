@@ -692,6 +692,8 @@ class ArubaClient:
                     or (payload or {}).get("items")
                     or (payload if isinstance(payload, list) else [])
                 )
+                if raw_list:
+                    logger.info("new_central alerts first item keys [%s]: %s", self._config_hash, list(raw_list[0].keys()))
                 for item in raw_list:
                     name = (
                         item.get("alert_type") or item.get("alertType")
