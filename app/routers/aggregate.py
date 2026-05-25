@@ -1230,15 +1230,19 @@ async def get_central_webhook_status(
     resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
     tenant = _get_tenant(resolved_tenant_id)
     webhook_id = ""
+    webhook_api_key = ""
     if tenant.aruba_config_enc:
         try:
             cfg = decrypt_dict(tenant.aruba_config_enc)
             webhook_id = str(cfg.get("webhook_id") or "").strip()
+            webhook_api_key = str(cfg.get("webhook_api_key") or "").strip()
         except Exception:
             webhook_id = ""
+            webhook_api_key = ""
     return {
         "registered": bool(webhook_id),
         "webhook_id": webhook_id,
+        "webhook_api_key": webhook_api_key,
         "endpoint_url": _central_webhook_endpoint_url(resolved_tenant_id),
     }
 
