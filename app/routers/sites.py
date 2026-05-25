@@ -21,6 +21,10 @@ class LabelUpdateRequest(BaseModel):
     label: str
 
 
+class AssignedSiteUpdateRequest(BaseModel):
+    assigned_site: str = ""
+
+
 def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any]:
     data = {
         "id": spoke.id,
@@ -28,6 +32,7 @@ def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any
         "hostname": spoke.hostname,
         "label": spoke.label,
         "spoke_name": spoke.spoke_name,
+        "assigned_site": spoke.assigned_site,
         "status": spoke.status,
         "seed_config": spoke.seed_config,
         "processing_mode": spoke.processing_mode,
@@ -137,5 +142,19 @@ def update_spoke_label(
     _require_tenant_admin(tenant_id, current_user)
     spoke = _get_spoke(tenant_id, spoke_id)
     spoke.label = payload.label
+    store.save_spoke(spoke)
+    return _serialize_spoke(spoke)
+
+
+@router.patch("/tenant/{tenant_id}/spokes/{spoke_id}/assigned-site")
+def update_spoke_assigned_site(
+    tenant_id: str,
+    spoke_id: str,
+    payload: AssignedSiteUpdateRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    _require_tenant_admin(tenant_id, current_user)
+    spoke = _get_spoke(tenant_id, spoke_id)
+    spoke.assigned_site = (payload.assigned_site or "").strip()
     store.save_spoke(spoke)
     return _serialize_spoke(spoke)

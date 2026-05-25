@@ -1318,19 +1318,26 @@ async def get_aggregate_central_status(
         tenant_data = {} if is_stale else _hub_central_status.get(resolved_tenant_id, {})
         token_valid = False if is_stale else bool(tenant_data.get("token_valid", False))
         token_state = "stale" if is_stale else tenant_data.get("token_state", "not_configured")
-        client_count_status = {} if is_stale else tenant_data.get("client_count_status", {})
+        aggregate_status = {} if is_stale or not isinstance(tenant_data.get("status"), dict) else tenant_data.get("status", {})
+        wireless_clients = {} if is_stale or not isinstance(tenant_data.get("wireless_clients"), dict) else tenant_data.get("wireless_clients", {})
+        hardware_alerts = [] if is_stale or not isinstance(tenant_data.get("hardware_alerts"), list) else tenant_data.get("hardware_alerts", [])
+        client_count_status = {} if is_stale or not isinstance(tenant_data.get("client_count_status"), dict) else tenant_data.get("client_count_status", {})
         central_sites_config = _normalize_central_sites_config(store.get_tenant_central_sites_config(resolved_tenant_id))
-        spokes_out = []
+        tenant_spokes_data = tenant_data.get("spokes", {}) if isinstance(tenant_data.get("spokes"), dict) else {}
         spoke_map = {spoke.id: spoke for spoke in spokes}
-        for spoke_id, spoke_data in tenant_data.get("spokes", {}).items():
+        ordered_spoke_ids = [spoke.id for spoke in spokes]
+        ordered_spoke_ids.extend(spoke_id for spoke_id in tenant_spokes_data if spoke_id not in spoke_map)
+        spokes_out = []
+        for spoke_id in ordered_spoke_ids:
             spoke = spoke_map.get(spoke_id)
-            site_mappings = spoke_data.get("site_mappings", {})
-            status = spoke_data.get("status", {})
-            wireless = spoke_data.get("wireless_clients", {})
-            hw_alerts = spoke_data.get("hardware_alerts", [])
+            spoke_data = tenant_spokes_data.get(spoke_id, {}) if isinstance(tenant_spokes_data.get(spoke_id), dict) else {}
+            site_mappings = spoke_data.get("site_mappings", {}) if isinstance(spoke_data.get("site_mappings"), dict) else {}
+            status = spoke_data.get("status", {}) if isinstance(spoke_data.get("status"), dict) else {}
+            wireless = spoke_data.get("wireless_clients", {}) if isinstance(spoke_data.get("wireless_clients"), dict) else {}
+            hw_alerts = spoke_data.get("hardware_alerts", []) if isinstance(spoke_data.get("hardware_alerts"), list) else []
             sites = []
             for wsite, central_site in site_mappings.items():
-                site_status = status.get(wsite, {})
+                site_status = status.get(wsite, {}) if isinstance(status.get(wsite), dict) else {}
                 ok = sum(1 for value in site_status.values() if isinstance(value, dict) and value.get("status") == "OK")
                 fail = sum(1 for value in site_status.values() if isinstance(value, dict) and value.get("status") == "ERROR")
                 unk = max(len(site_status) - ok - fail, 0)
@@ -1346,7 +1353,10 @@ async def get_aggregate_central_status(
             spokes_out.append({
                 "spoke_id": spoke_id,
                 "spoke_name": (spoke.spoke_name or spoke.hostname) if spoke else spoke_id,
+                "hostname": spoke.hostname if spoke else "",
+                "assigned_site": spoke.assigned_site if spoke else str(spoke_data.get("assigned_site") or "").strip(),
                 "spoke_online": _is_online(spoke) if spoke else False,
+                "last_seen": spoke.last_seen if spoke else None,
                 "sites": sites,
                 "hardware_alerts": hw_alerts,
                 "client_count_status": spoke_data.get("client_count_status", client_count_status),
@@ -1356,6 +1366,9 @@ async def get_aggregate_central_status(
             "mode": "centralized",
             "token_valid": token_valid,
             "token_state": token_state,
+            "status": aggregate_status,
+            "wireless_clients": wireless_clients,
+            "hardware_alerts": hardware_alerts,
             "central_sites_config": central_sites_config,
             "client_count_status": client_count_status,
             "spokes": spokes_out,
@@ -1393,7 +1406,10 @@ async def get_aggregate_central_status(
         spokes_out.append({
             "spoke_id": spoke.id,
             "spoke_name": spoke.spoke_name or spoke.hostname,
+            "hostname": spoke.hostname,
+            "assigned_site": spoke.assigned_site,
             "spoke_online": _is_online(spoke),
+            "last_seen": spoke.last_seen,
             "token_valid": token_valid_spoke,
             "token_state": token_state_spoke,
             "sites": sites,

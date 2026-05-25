@@ -86,6 +86,7 @@ class Spoke(BaseModel):
     hostname: str
     label: str = ""
     spoke_name: str = ""
+    assigned_site: str = ""  # Optional wsite key from the tenant's site_mappings
     status: str = "pending"
     api_key_enc: Optional[str] = None
     proxmox_host: str = ""
