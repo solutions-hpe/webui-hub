@@ -23,6 +23,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _NEW_CENTRAL_TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
+
+# Module-level cache for new_central insights (avoids rate-limit burn on repeated calls).
+# Key: config_hash, Value: (timestamp_float, list[dict])
+_insights_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_INSIGHTS_CACHE_TTL = 900  # 15 minutes
 _GLP_TOKEN_URL_TEMPLATE = "https://global.api.greenlake.hpe.com/authorization/v2/oauth2/{workspace_id}/token"
 _KNOWN_CENTRAL_GATEWAY_SUFFIXES = (".api.central.arubanetworks.com", ".api.central.arubanetworks.com.cn")
 
@@ -258,8 +263,10 @@ class ArubaClient:
                         )
                 except Exception as exc:
                     logger.warning("Aruba sites-health fetch failed [%s]: %s", self._config_hash, exc)
-                # Fall through to also try classic alert/insight paths for new_central environments
-                # that support them; 404s are silently skipped.
+                # For new_central: insights are fetched on-demand via _new_central_insights()
+                # (which has a 15-min cache). Skip the aiops endpoints here to avoid 429s
+                # from background polling burning the rate-limit quota.
+                return findings
 
             params: dict[str, Any] = {"limit": 1000}
             if site_filter:
@@ -620,8 +627,16 @@ class ArubaClient:
         """Fetch AIOps insights for new_central environments.
 
         new_central insights are global (not per-site); each insight contains an embedded
-        list of affected sites.  We try multiple endpoint paths and response shapes.
+        list of affected sites.  Results are cached for 15 minutes to avoid 429 rate-limit
+        errors from the background poller and repeated browse refreshes.
         """
+        # Return cached result if still fresh
+        cached = _insights_cache.get(self._config_hash)
+        if cached:
+            ts, data = cached
+            if time.time() - ts < _INSIGHTS_CACHE_TTL:
+                return data
+
         insights: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
@@ -690,6 +705,9 @@ class ArubaClient:
                         })
         except Exception as exc:
             logger.warning("new_central insights fetch failed [%s]: %s", self._config_hash, exc)
+        # Cache populated results for 15 min; empty results only 2 min (e.g. after a 429)
+        ttl = _INSIGHTS_CACHE_TTL if insights else 120
+        _insights_cache[self._config_hash] = (time.time() - (_INSIGHTS_CACHE_TTL - ttl), insights)
         return insights
 
     async def browse_all(self) -> dict[str, Any]:
