@@ -109,17 +109,14 @@ fi
 
 # ── Build and push image ──────────────────────────────────────────
 echo "▶ Building and pushing image to ACR..."
-# Use --no-wait is not set; pass context as tar so submodule files are included
-tar -czf /tmp/hub-build-context.tar.gz -C "$SCRIPT_DIR" \
-    --exclude='.git' \
-    --exclude='__pycache__' \
-    --exclude='*.pyc' \
-    --exclude='.env' \
-    --exclude='.deploy-secrets*' \
-    --exclude='data' \
-    . 2>/dev/null
-az acr build --registry "$ACR_NAME" --image "$IMAGE" --file "$SCRIPT_DIR/Dockerfile" /tmp/hub-build-context.tar.gz --output none
-rm -f /tmp/hub-build-context.tar.gz
+# az acr build uses git to pack context, which excludes submodule files.
+# Copy to a temp non-git directory so all files are included.
+BUILD_TMP=$(mktemp -d)
+trap 'rm -rf "$BUILD_TMP"' EXIT
+rsync -a --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' \
+    --exclude='.deploy-secrets*' --exclude='data/' \
+    "$SCRIPT_DIR/" "$BUILD_TMP/"
+az acr build --registry "$ACR_NAME" --image "$IMAGE" "$BUILD_TMP" --output none
 echo "  ✓ Image pushed: $ACR_SERVER/$IMAGE"
 
 # ── Remove existing container (clean slate) ───────────────────────
