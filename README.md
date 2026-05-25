@@ -4,9 +4,9 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-JSON%20Hub-009688)
 ![Docker](https://img.shields.io/badge/deployment-Docker%20%7C%20ACI%20%7C%20BYOD-2496ED)
 ![TLS](https://img.shields.io/badge/TLS-self--signed%20by%20default-success)
-![Release](https://img.shields.io/badge/release-v1.0.0-success)
+![Release](https://img.shields.io/badge/release-v2.30-success)
 
-Hub is the central management plane for the HPE Client-Sim hub-and-spoke platform. Version **v1.0.0** on `main` is the initial stable production release. It replaces the legacy `webui` application and its PostgreSQL/SQLAlchemy stack with a FastAPI-based, multi-tenant backend that stores operational state in JSON under `/data/`. The browser UI is now sourced from the shared `cs-webui` repository instead of being maintained directly in `webui-hub`; Hub serves that frontend and injects `WEBUI_MODE=hub` at runtime.
+Hub is the central management plane for the HPE Client-Sim hub-and-spoke platform. It provides a FastAPI-based, multi-tenant backend that stores operational state in JSON under `/data/`. The browser UI is sourced from the shared `cs-webui` repository; Hub serves that frontend and injects `WEBUI_MODE=hub` at runtime.
 
 ## Overview
 
@@ -580,7 +580,9 @@ Tenant IDs are first-class routing keys throughout the platform.
 |---|---|---|
 | `superadmin` | All tenants | Full platform administration, tenant creation, pending spoke approval, user/role assignment |
 | `admin` | One tenant | Configure tenant settings, manage spokes, view audit, change processing mode |
-| `operator` | One tenant | Issue commands and view tenant-scoped operational data |
+| `viewer` | One tenant | Read-only access to tenant-scoped operational data |
+
+> **Note:** `operator` is accepted as an alias when assigning roles and is normalized to `viewer` on write. Internally the stored value is always `admin` or `viewer`.
 
 ## TLS
 
@@ -619,6 +621,59 @@ These provider settings stay on the hub. They are never pushed to spokes as part
 - **OIDC / OAuth2 SSO**
 
 The provider registry and config flags already exist. OIDC is still exposed as future work, while spoke auth remains local to each spoke.
+
+## Aruba Central Integration
+
+Hub integrates with both the Classic Central API and the HPE GreenLake (New Central / CNX) API. The integration mode is set per-tenant in the Aruba config.
+
+### Classic Central API
+
+Uses a standard Aruba Central API gateway with an OAuth access/refresh token pair. Endpoints follow the `/monitoring/v2/...` path convention.
+
+### New Central (GreenLake) API
+
+Uses the HPE GreenLake authorization service with `client_credentials` grant. Tokens are short-lived (~15 minutes) and refreshed automatically.
+
+**Authentication:**
+```
+POST https://global.api.greenlake.hpe.com/authorization/v2/oauth2/{workspace_id}/token
+grant_type=client_credentials
+```
+
+**Browse endpoints used:**
+
+| Endpoint | Data |
+|---|---|
+| `GET /network-notifications/v1/alerts` | Active alerts: severity, category, site, device type, summary |
+| `GET /network-notifications/v1/insights` | AI insights: description, impacted devices + clients per site |
+| `GET /network-monitoring/v1/devices` | Device inventory: APs, switches, gateways — status, model, IP, firmware |
+| `GET /network-monitoring/v1/clients` | Connected clients: total, wired, wireless counts per site |
+| `GET /network-monitoring/v1alpha1/sites-health` | Site health scores used by the monitored check evaluation loop |
+
+### Central API browse tab
+
+The **Setup → Central API** browse tab in the Hub UI provides five subtabs fed by the live endpoints above:
+
+- **Sites** — health score, wireless client count, Monitor button per site
+- **Alerts** — filterable by category (All / Clients / LAN / WLAN / WAN / System / Security), severity badge, device type
+- **Insights** — AI-generated insight with description, impacted device + client count
+- **Clients** — per-site totals with wired/wireless breakdown
+- **Devices** — full device list with name, serial, type, model, status, IP, firmware
+
+**Monitor button state:** Each row shows a **Monitor** button to add the item to the Monitored Items list. If the item is already being monitored, the button is replaced with a **✓ Monitored** badge — visible without re-adding the same item.
+
+### Centralized vs distributed mode
+
+| Mode | How it works |
+|---|---|
+| **Centralized** | Hub calls the browse endpoints directly using its own Aruba credentials. Covers all sites in the workspace. |
+| **Distributed** | Each spoke fetches browse data filtered to its assigned site(s) only, then includes the results in its telemetry payload. Hub aggregates data from all spokes into a single multi-site view. |
+
+In distributed mode the spoke uses OData filters: `$filter=siteName eq 'DFW'`. The DFW spoke fetches only DFW data, the MIA spoke fetches only MIA data, and so on. This avoids rate-limiting from hub-side fan-out and keeps each spoke self-contained.
+
+### Monitored Items
+
+The Monitored Items list (`/api/{tenant_id}/aggregate/monitored-items`) is a tenant-level registry of alert types, insights, sites, or devices the platform actively watches. Each item drives check evaluation in the spoke poll loop and surfaces in the Hub dashboard alert tiles.
 
 ## Data Layout
 

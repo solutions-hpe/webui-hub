@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.30] — 2026-05-25
+
+### Added
+- **Distributed Central API browse** — in distributed mode, `browse_all()` now collects `central_alerts`, `central_insights`, `central_devices_by_site`, and `central_clients_by_site` from each spoke's telemetry payload and merges them into a complete multi-site view. Spokes that have not yet upgraded fall back to check-error-based alert derivation.
+- **Devices subtab** — new Devices tab in the Central API browse view shows all devices per site with name, serial, type, model, status, IP, and firmware version.
+- **Monitor button state** — Monitor buttons in all browse subtabs check the current Monitored Items list on load; already-monitored items display a `✓ Monitored` badge instead of the button.
+- **Alert category filter** — Alerts subtab now includes filter pills (All / Clients / LAN / WLAN / WAN / System / Security).
+- **Alert severity mapping** — new severity badge colors for Critical (red), Major (orange), Minor (yellow), and Info (blue) from the real alerts API.
+- **Insights subtab** — updated for new `network-notifications/v1/insights` data shape: shows description, impacted device count, impacted client count; removed stale read/unread status badge.
+- **Clients subtab** — rewritten for `clients_by_site` format (Site / Total / Wireless / Wired columns).
+
+## [2.29] — 2026-05-24
+
+### Added
+- **Real Central alerts API** — `_new_central_alerts()` rewritten to use `GET /network-notifications/v1/alerts` with `status eq 'Active'` filter, full pagination via `next` cursor, and grouping by `(name, site)` with occurrence count. Replaces the old `reasons`-array derivation from `sites-health`.
+- **Real Central insights API** — `_new_central_insights()` rewritten to use `GET /network-notifications/v1/insights`, parsing `impactedSites[]` per insight with device and client counts. Epoch-ms timestamps converted to ISO strings.
+- **Upgraded device + client endpoints** — `_nc_devices()` and `_nc_clients()` upgraded from `v1alpha1` to `v1` with full pagination.
+- **`_nc_alert_severity()`** — static method mapping Critical / Major / Minor / Info → badge color classes.
+- **`browse_all()` returns `devices_by_site` and `clients_by_site`** — new keys in the browse result provide structured per-site device and client data.
+
 ## [1.0.1] — 2026-05-14
 
 ### Added
