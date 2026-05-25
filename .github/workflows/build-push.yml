@@ -38,6 +38,19 @@ jobs:
           cp -r /tmp/cs-webui/static/. frontend/static/
           cp /tmp/cs-webui/templates/index.html frontend/templates/index.html
 
+      - name: Fetch client-sim installer version
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          REPO="https://github.com/solutions-hpe/client-sim.git"
+          if git ls-remote --exit-code --heads "$REPO" "$BRANCH" >/dev/null 2>&1; then
+            git clone --depth=1 -b "$BRANCH" "$REPO" /tmp/client-sim
+          else
+            git clone --depth=1 -b main "$REPO" /tmp/client-sim
+          fi
+          VER=$(cat /tmp/client-sim/webui-spoke/INSTALLER_VERSION 2>/dev/null || echo "1.00")
+          echo "$VER" > CLIENT_SIM_VERSION
+          echo "client-sim installer version: $VER"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
