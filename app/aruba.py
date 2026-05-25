@@ -258,7 +258,8 @@ class ArubaClient:
                         )
                 except Exception as exc:
                     logger.warning("Aruba sites-health fetch failed [%s]: %s", self._config_hash, exc)
-                return findings
+                # Fall through to also try classic alert/insight paths for new_central environments
+                # that support them; 404s are silently skipped.
 
             params: dict[str, Any] = {"limit": 1000}
             if site_filter:
@@ -583,9 +584,71 @@ class ArubaClient:
                     return []
             return []
 
+    async def _new_central_device_alerts(self) -> list[dict[str, Any]]:
+        """Fetch device-level alerts (down APs/switches/gateways) for new_central browse view."""
+        DEVICE_TYPE_ALERT = {"ACCESS_POINT": "AP Down", "SWITCH": "Switch Down", "GATEWAY": "Gateway Down"}
+        alerts: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                data = await self._get(http, "/network-monitoring/v1alpha1/devices", params={"limit": 1000})
+            for device in data.get("items") or []:
+                status = str(device.get("status") or "").upper()
+                if status in {"UP", "ONLINE", ""}:
+                    continue
+                device_type = str(device.get("deviceType") or device.get("type") or "").upper()
+                alert_name = DEVICE_TYPE_ALERT.get(device_type) or f"{device_type} Down"
+                site = (
+                    device.get("siteName") or device.get("site_name") or device.get("site") or "—"
+                ).strip() or "—"
+                device_name = (
+                    device.get("deviceName") or device.get("name") or device.get("serialNumber") or device.get("id") or "—"
+                ).strip()
+                alerts.append({
+                    "name": alert_name,
+                    "site": site,
+                    "severity": "error",
+                    "detail": device_name,
+                    "device_name": device_name,
+                    "status": status,
+                    "ts": None,
+                })
+        except Exception as exc:
+            logger.warning("new_central device alerts fetch failed [%s]: %s", self._config_hash, exc)
+        return alerts
+
     async def browse_all(self) -> dict[str, Any]:
         """Fetch all Central sites, alerts, insights, and clients for the browse view."""
         import asyncio
+
+        if self.api_version == "new_central":
+            sites, findings, clients, device_alerts = await asyncio.gather(
+                self.list_sites(),
+                self.poll_alerts_and_insights(),
+                self.list_clients(),
+                self._new_central_device_alerts(),
+                return_exceptions=True,
+            )
+            if isinstance(sites, Exception):
+                sites = []
+            if isinstance(findings, Exception):
+                findings = []
+            if isinstance(clients, Exception):
+                clients = []
+            if isinstance(device_alerts, Exception):
+                device_alerts = []
+            # Exclude synthetic SITE_HEALTH from alerts browse — use real device alerts + classic alerts if any
+            classic_alerts = [
+                {"name": f.check_name, "site": f.site_name, "severity": f.status, "detail": "", "ts": None}
+                for f in findings
+                if isinstance(f, ArubaFinding) and f.source == "alert" and f.check_name != "SITE_HEALTH"
+            ]
+            alerts = (list(device_alerts) + classic_alerts) or []
+            insights = [
+                {"name": f.check_name, "site": f.site_name, "severity": f.status, "category": "", "ts": None}
+                for f in findings
+                if isinstance(f, ArubaFinding) and f.source == "insight"
+            ]
+            return {"sites": sites, "alerts": alerts, "insights": insights, "clients": clients}
 
         sites, findings, clients = await asyncio.gather(
             self.list_sites(),
