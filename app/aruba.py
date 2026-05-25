@@ -616,16 +616,93 @@ class ArubaClient:
             logger.warning("new_central device alerts fetch failed [%s]: %s", self._config_hash, exc)
         return alerts
 
+    async def _new_central_insights(self) -> list[dict[str, Any]]:
+        """Fetch AIOps insights for new_central environments.
+
+        new_central insights are global (not per-site); each insight contains an embedded
+        list of affected sites.  We try multiple endpoint paths and response shapes.
+        """
+        insights: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                payload = None
+                for path in ("/aiops/v1/insights", "/aiops/v2/insights"):
+                    try:
+                        payload = await self._get(http, path, params={"limit": 500})
+                        if payload is not None:
+                            break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code in (404, 405):
+                            continue
+                        raise
+                if not payload:
+                    return insights
+
+                # Normalise: response may be {"insights": [...]} or {"items": [...]} or a plain list
+                raw_list = (
+                    payload.get("insights")
+                    or payload.get("items")
+                    or (payload if isinstance(payload, list) else [])
+                )
+                for item in raw_list:
+                    name = (
+                        item.get("name")
+                        or item.get("insight_name")
+                        or item.get("rule")
+                        or item.get("category")
+                        or "Insight"
+                    )
+                    category = str(item.get("category") or item.get("type") or "").strip()
+                    read = item.get("read", item.get("status", "unread"))
+                    status_str = "read" if (read is True or str(read).lower() == "read") else "unread"
+
+                    # Collect affected sites — new_central embeds them per insight
+                    raw_sites = item.get("sites") or item.get("affected_sites") or []
+                    if raw_sites:
+                        for s in raw_sites:
+                            site_name = (
+                                (s.get("name") or s.get("site_name") or s.get("siteName") or "").strip()
+                                or "unknown"
+                            )
+                            device_count = s.get("devices") or s.get("device_count") or s.get("count") or 0
+                            insights.append({
+                                "name": str(name),
+                                "site": site_name,
+                                "category": category,
+                                "status": status_str,
+                                "severity": "info",
+                                "device_count": device_count,
+                                "description": item.get("description") or item.get("message") or "",
+                                "ts": item.get("created_at") or item.get("timestamp") or None,
+                            })
+                    else:
+                        # No site breakdown — emit one row with no site
+                        site_name = (item.get("site_name") or item.get("site") or item.get("group") or "").strip() or "unknown"
+                        insights.append({
+                            "name": str(name),
+                            "site": site_name,
+                            "category": category,
+                            "status": status_str,
+                            "severity": "info",
+                            "device_count": 0,
+                            "description": item.get("description") or item.get("message") or "",
+                            "ts": item.get("created_at") or item.get("timestamp") or None,
+                        })
+        except Exception as exc:
+            logger.warning("new_central insights fetch failed [%s]: %s", self._config_hash, exc)
+        return insights
+
     async def browse_all(self) -> dict[str, Any]:
         """Fetch all Central sites, alerts, insights, and clients for the browse view."""
         import asyncio
 
         if self.api_version == "new_central":
-            sites, findings, clients, device_alerts = await asyncio.gather(
+            sites, findings, clients, device_alerts, nc_insights = await asyncio.gather(
                 self.list_sites(),
                 self.poll_alerts_and_insights(),
                 self.list_clients(),
                 self._new_central_device_alerts(),
+                self._new_central_insights(),
                 return_exceptions=True,
             )
             if isinstance(sites, Exception):
@@ -636,6 +713,8 @@ class ArubaClient:
                 clients = []
             if isinstance(device_alerts, Exception):
                 device_alerts = []
+            if isinstance(nc_insights, Exception):
+                nc_insights = []
             # Exclude synthetic SITE_HEALTH from alerts browse — use real device alerts + classic alerts if any
             classic_alerts = [
                 {"name": f.check_name, "site": f.site_name, "severity": f.status, "detail": "", "ts": None}
@@ -643,11 +722,13 @@ class ArubaClient:
                 if isinstance(f, ArubaFinding) and f.source == "alert" and f.check_name != "SITE_HEALTH"
             ]
             alerts = (list(device_alerts) + classic_alerts) or []
-            insights = [
-                {"name": f.check_name, "site": f.site_name, "severity": f.status, "category": "", "ts": None}
+            # Use dedicated new_central insights; fall back to any insight findings from poll
+            classic_insights = [
+                {"name": f.check_name, "site": f.site_name, "severity": f.status, "category": "", "status": "unread", "ts": None}
                 for f in findings
                 if isinstance(f, ArubaFinding) and f.source == "insight"
             ]
+            insights = list(nc_insights) + classic_insights
             return {"sites": sites, "alerts": alerts, "insights": insights, "clients": clients}
 
         sites, findings, clients = await asyncio.gather(
