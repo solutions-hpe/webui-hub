@@ -707,6 +707,8 @@ class ArubaClient:
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
         return alerts
+
+    async def _new_central_insights(self) -> list[dict[str, Any]]:
         """Fetch AIOps insights for new_central environments.
 
         new_central insights are global (not per-site); each insight contains an embedded
