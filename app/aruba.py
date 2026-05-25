@@ -694,23 +694,37 @@ class ArubaClient:
                 )
                 for item in raw_list:
                     name = (
-                        item.get("alert_type") or item.get("name")
-                        or item.get("alert_name") or item.get("type") or "Alert"
+                        item.get("alert_type") or item.get("alertType")
+                        or item.get("name") or item.get("alert_name")
+                        or item.get("alertName") or item.get("type") or "Alert"
                     )
                     site = (
-                        item.get("site_name") or item.get("site")
-                        or item.get("group") or "—"
+                        item.get("site_name") or item.get("siteName")
+                        or item.get("site") or item.get("group") or "—"
                     ).strip() or "—"
-                    severity = str(item.get("severity") or item.get("severity_id") or "").lower()
-                    device = item.get("device_name") or item.get("device") or item.get("hostname") or ""
-                    category = item.get("category") or item.get("alert_category") or ""
+                    severity = str(
+                        item.get("severity") or item.get("severity_id")
+                        or item.get("severityId") or ""
+                    ).lower()
+                    device = (
+                        item.get("device_name") or item.get("deviceName")
+                        or item.get("device") or item.get("hostname") or ""
+                    )
+                    category = (
+                        item.get("category") or item.get("alert_category")
+                        or item.get("alertCategory") or ""
+                    )
                     alerts.append({
                         "name": str(name),
                         "site": site,
                         "severity": self._finding_status(severity),
                         "detail": str(device),
                         "category": str(category),
-                        "ts": item.get("timestamp") or item.get("raised_at") or item.get("first_occurrence") or None,
+                        "ts": (
+                            item.get("timestamp") or item.get("raised_at")
+                            or item.get("raisedAt") or item.get("createdAt")
+                            or item.get("first_occurrence") or None
+                        ),
                     })
         except Exception as exc:
             logger.warning("new_central monitoring alerts fetch [%s]: %s", self._config_hash, exc)
