@@ -706,9 +706,14 @@ def list_tenant_pending_spokes(
     tenant_id: str,
     current_user: User = Depends(auth.require_tenant_access),
 ):
-    """Return pending spokes that pre-registered for this tenant, plus unclaimed spokes with no tenant hint."""
+    """Return pending spokes that pre-registered for this tenant, plus unclaimed spokes with no tenant hint or a stale hint pointing to a deleted tenant."""
     all_pending = store.list_pending_spokes()
-    return [p for p in all_pending if p.tenant_hint == tenant_id or not p.tenant_hint]
+    return [
+        p for p in all_pending
+        if p.tenant_hint == tenant_id
+        or not p.tenant_hint
+        or not store.get_tenant(p.tenant_hint)
+    ]
 
 
 @router.post("/tenant/{tenant_id}/pending-spokes/{spoke_id}/approve", status_code=201)
@@ -723,9 +728,9 @@ async def tenant_approve_pending_spoke(
     pending = store.get_pending_spoke(spoke_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending spoke not found")
-    # Allow approving spokes that were pre-registered for this tenant OR unclaimed spokes
-    # (tenant_hint is empty when the spoke registered with an unknown/deleted tenant ID).
-    if pending.tenant_hint and pending.tenant_hint != tenant_id:
+    # Allow approving spokes that were pre-registered for this tenant, unclaimed (no hint),
+    # or have a stale hint pointing to a deleted tenant.
+    if pending.tenant_hint and pending.tenant_hint != tenant_id and store.get_tenant(pending.tenant_hint):
         raise HTTPException(status_code=403, detail="This spoke was pre-registered for a different tenant")
 
     tenant = store.get_tenant(tenant_id)
@@ -795,7 +800,7 @@ def tenant_reject_pending_spoke(
     pending = store.get_pending_spoke(spoke_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending spoke not found")
-    if pending.tenant_hint and pending.tenant_hint != tenant_id:
+    if pending.tenant_hint and pending.tenant_hint != tenant_id and store.get_tenant(pending.tenant_hint):
         raise HTTPException(status_code=403, detail="This spoke was pre-registered for a different tenant")
     store.delete_pending_spoke(spoke_id)
     return {"status": "rejected"}
