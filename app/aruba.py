@@ -647,7 +647,7 @@ class ArubaClient:
         result: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
-                data = await self._get(http, "/network-monitoring/v1alpha1/clients", params={"limit": 5000})
+                data = await self._get(http, "/network-monitoring/v1alpha1/clients", params={"limit": 1000})
                 result = data.get("items") or []
         except Exception as exc:
             logger.warning("new_central clients cache fetch [%s]: %s", self._config_hash, exc)
@@ -703,6 +703,7 @@ class ArubaClient:
                     })
         except Exception as exc:
             logger.warning("new_central monitoring alerts fetch [%s]: %s", self._config_hash, exc)
+        logger.info("new_central alerts fetched [%s]: %d alerts", self._config_hash, len(alerts))
         # Short TTL on empty to retry sooner after a 429
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
@@ -790,6 +791,7 @@ class ArubaClient:
                         })
         except Exception as exc:
             logger.warning("new_central insights fetch failed [%s]: %s", self._config_hash, exc)
+        logger.info("new_central insights fetched [%s]: %d insights", self._config_hash, len(insights))
         # Cache populated results for 15 min; empty results only 2 min (e.g. after a 429)
         ttl = _INSIGHTS_CACHE_TTL if insights else 120
         _insights_cache[self._config_hash] = (time.time() - (_INSIGHTS_CACHE_TTL - ttl), insights)
