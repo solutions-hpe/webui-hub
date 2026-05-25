@@ -24,10 +24,19 @@ logger = logging.getLogger(__name__)
 
 _NEW_CENTRAL_TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
 
-# Module-level cache for new_central insights (avoids rate-limit burn on repeated calls).
-# Key: config_hash, Value: (timestamp_float, list[dict])
+# Module-level caches for new_central global endpoints.
+# Caching means 9 sites share 1 API call instead of 27 calls per poll cycle.
+# Key: config_hash, Value: (timestamp_float, payload_dict_or_list)
 _insights_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _INSIGHTS_CACHE_TTL = 900  # 15 minutes
+
+_alerts_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_ALERTS_CACHE_TTL = 300   # 5 minutes
+
+_sites_health_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_devices_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_nc_clients_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_NC_GLOBAL_CACHE_TTL = 270  # 4.5 min — just under the 5-min poll interval
 _GLP_TOKEN_URL_TEMPLATE = "https://global.api.greenlake.hpe.com/authorization/v2/oauth2/{workspace_id}/token"
 _KNOWN_CENTRAL_GATEWAY_SUFFIXES = (".api.central.arubanetworks.com", ".api.central.arubanetworks.com.cn")
 
@@ -349,85 +358,60 @@ class ArubaClient:
         insight_cat_counts: dict[str, int] = {}
         hw_devices: dict[str, dict[str, int]] = {}
 
+        if self.api_version == "new_central":
+            # Use cached global fetchers — 9 sites share 1 API call per endpoint
+            site_id: str | None = None
+            for item in await self._nc_sites_health():
+                site_name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
+                if site_name.lower() != site.lower():
+                    continue
+                site_id = str(item.get("id") or item.get("siteId") or item.get("site_id") or "").strip() or None
+                good_pct = next(
+                    (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
+                    item.get("healthScore", item.get("health_score", 0)),
+                )
+                site_health = int(good_pct or 0)
+                wireless_clients = int((item.get("clients") or {}).get("count") or item.get("clientCount") or item.get("client_count") or 0)
+                break
+
+            DEVICE_ALERT = {"ACCESS_POINT": "AP_DOWN", "SWITCH": "SWITCH_DOWN", "GATEWAY": "GATEWAY_DOWN"}
+            for device in await self._nc_devices():
+                dev_site_id = str(device.get("siteId") or device.get("site_id") or "").strip()
+                if site_id and dev_site_id and dev_site_id != site_id:
+                    continue
+                device_type = str(device.get("deviceType") or "").upper()
+                status = str(device.get("status") or "").upper()
+                if status in {"UP", "ONLINE"}:
+                    continue
+                alert_id = DEVICE_ALERT.get(device_type)
+                if not alert_id:
+                    continue
+                alert_type_counts[alert_id] = alert_type_counts.get(alert_id, 0) + 1
+                if not hw_check_ids or alert_id in hw_check_ids:
+                    device_name = (
+                        device.get("deviceName") or device.get("name")
+                        or device.get("serialNumber") or device.get("serial") or ""
+                    ).strip()
+                    if device_name:
+                        hw_devices.setdefault(alert_id, {})[device_name] = hw_devices.setdefault(alert_id, {}).get(device_name, 0) + 1
+
+            for cl in await self._nc_clients():
+                cl_site_id = str(cl.get("siteId") or cl.get("site_id") or "").strip()
+                if site_id and cl_site_id and cl_site_id == site_id:
+                    wireless_clients += 1
+                elif not site_id:
+                    wireless_clients += 1
+
+            return {
+                "site_health": site_health,
+                "wireless_clients": wireless_clients,
+                "client_count": wireless_clients,
+                "alert_type_counts": alert_type_counts,
+                "insight_cat_counts": insight_cat_counts,
+                "hw_devices": hw_devices,
+            }
+
         async with httpx.AsyncClient(timeout=30) as client:
-            if self.api_version == "new_central":
-                site_id: str | None = None
-                try:
-                    data = await self._get(client, "/network-monitoring/v1alpha1/sites-health")
-                    for item in data.get("items") or []:
-                        site_name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
-                        if site_name.lower() != site.lower():
-                            continue
-                        site_id = item.get("id") or item.get("siteId") or item.get("site_id")
-                        good_pct = next(
-                            (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
-                            item.get("healthScore", item.get("health_score", 0)),
-                        )
-                        site_health = int(good_pct or 0)
-                        wireless_clients = int((item.get("clients") or {}).get("count") or item.get("clientCount") or item.get("client_count") or 0)
-                        break
-                except Exception as exc:
-                    logger.warning("Aruba sites-health fetch failed [%s:%s]: %s", self._config_hash, site, exc)
-
-                try:
-                    params: dict[str, Any] = {"limit": 500}
-                    if site_id:
-                        params["filter"] = f"siteId eq '{site_id}'"
-                        logger.debug(
-                            "Aruba New Central devices query uses filter=%s; verify syntax against the API reference if results look incomplete",
-                            params["filter"],
-                        )
-                    data = await self._get(client, "/network-monitoring/v1alpha1/devices", params=params)
-                    for device in data.get("items") or []:
-                        if site_id and str(device.get("siteId") or device.get("site_id") or device.get("id") or "") != str(site_id):
-                            continue
-                        device_type = str(device.get("deviceType") or "").upper()
-                        status = str(device.get("status") or "").upper()
-                        if status in {"UP", "ONLINE"}:
-                            continue
-                        if device_type == "ACCESS_POINT":
-                            alert_id = "AP_DOWN"
-                        elif device_type == "SWITCH":
-                            alert_id = "SWITCH_DOWN"
-                        elif device_type == "GATEWAY":
-                            alert_id = "GATEWAY_DOWN"
-                        else:
-                            continue
-                        alert_type_counts[alert_id] = alert_type_counts.get(alert_id, 0) + 1
-                        if not hw_check_ids or alert_id in hw_check_ids:
-                            device_name = (
-                                device.get("deviceName")
-                                or device.get("name")
-                                or device.get("id")
-                                or device.get("serialNumber")
-                                or device.get("serial")
-                                or ""
-                            ).strip()
-                            if device_name:
-                                hw_devices.setdefault(alert_id, {})[device_name] = hw_devices.setdefault(alert_id, {}).get(device_name, 0) + 1
-                except Exception as exc:
-                    logger.warning("Aruba devices fetch failed [%s:%s]: %s", self._config_hash, site, exc)
-
-                try:
-                    params = {"site-id": site_id} if site_id else None
-                    if params:
-                        logger.debug(
-                            "Aruba New Central clients query uses params=%s; verify syntax against the API reference if results look incomplete",
-                            params,
-                        )
-                    data = await self._get(client, "/network-monitoring/v1alpha1/clients", params=params)
-                    wireless_clients = int(data.get("count") or wireless_clients or 0)
-                except Exception as exc:
-                    logger.warning("Aruba clients fetch failed [%s:%s]: %s", self._config_hash, site, exc)
-
-                return {
-                    "site_health": site_health,
-                    "wireless_clients": wireless_clients,
-                    "client_count": wireless_clients,
-                    "alert_type_counts": alert_type_counts,
-                    "insight_cat_counts": insight_cat_counts,
-                    "hw_devices": hw_devices,
-                }
 
             params: dict[str, Any] = {"site": site, "limit": 1000}
             try:
@@ -623,7 +607,106 @@ class ArubaClient:
             logger.warning("new_central device alerts fetch failed [%s]: %s", self._config_hash, exc)
         return alerts
 
-    async def _new_central_insights(self) -> list[dict[str, Any]]:
+    # ── new_central cached global fetchers ────────────────────────────────────
+
+    async def _nc_sites_health(self) -> list[dict[str, Any]]:
+        """Return cached sites-health list; one API call shared across all site queries."""
+        cached = _sites_health_cache.get(self._config_hash)
+        if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
+            return cached[1]
+        result: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                data = await self._get(http, "/network-monitoring/v1alpha1/sites-health")
+                result = data.get("items") or []
+        except Exception as exc:
+            logger.warning("new_central sites-health cache fetch [%s]: %s", self._config_hash, exc)
+        _sites_health_cache[self._config_hash] = (time.time(), result)
+        return result
+
+    async def _nc_devices(self) -> list[dict[str, Any]]:
+        """Return cached devices list; one API call shared across all site queries."""
+        cached = _devices_cache.get(self._config_hash)
+        if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
+            return cached[1]
+        result: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                data = await self._get(http, "/network-monitoring/v1alpha1/devices", params={"limit": 1000})
+                result = data.get("items") or []
+        except Exception as exc:
+            logger.warning("new_central devices cache fetch [%s]: %s", self._config_hash, exc)
+        _devices_cache[self._config_hash] = (time.time(), result)
+        return result
+
+    async def _nc_clients(self) -> list[dict[str, Any]]:
+        """Return cached clients list; one API call shared across all site queries."""
+        cached = _nc_clients_cache.get(self._config_hash)
+        if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
+            return cached[1]
+        result: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                data = await self._get(http, "/network-monitoring/v1alpha1/clients", params={"limit": 5000})
+                result = data.get("items") or []
+        except Exception as exc:
+            logger.warning("new_central clients cache fetch [%s]: %s", self._config_hash, exc)
+        _nc_clients_cache[self._config_hash] = (time.time(), result)
+        return result
+
+    async def _new_central_alerts(self) -> list[dict[str, Any]]:
+        """Fetch real monitoring alerts (performance, LAN, etc.) for new_central browse view.
+
+        Tries the classic /monitoring/v1/alerts endpoint which is available via new_central
+        token.  Results are cached for 5 minutes.
+        """
+        cached = _alerts_cache.get(self._config_hash)
+        if cached and time.time() - cached[0] < _ALERTS_CACHE_TTL:
+            return cached[1]
+        alerts: list[dict[str, Any]] = []
+        try:
+            async with httpx.AsyncClient(timeout=30) as http:
+                payload = None
+                for path in ("/monitoring/v1/alerts", "/monitoring/v2/alerts"):
+                    try:
+                        payload = await self._get(http, path, params={"limit": 500, "state": "Open"})
+                        if payload is not None:
+                            break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code in (404, 405):
+                            continue
+                        raise
+                raw_list = (
+                    (payload or {}).get("alerts")
+                    or (payload or {}).get("items")
+                    or (payload if isinstance(payload, list) else [])
+                )
+                for item in raw_list:
+                    name = (
+                        item.get("alert_type") or item.get("name")
+                        or item.get("alert_name") or item.get("type") or "Alert"
+                    )
+                    site = (
+                        item.get("site_name") or item.get("site")
+                        or item.get("group") or "—"
+                    ).strip() or "—"
+                    severity = str(item.get("severity") or item.get("severity_id") or "").lower()
+                    device = item.get("device_name") or item.get("device") or item.get("hostname") or ""
+                    category = item.get("category") or item.get("alert_category") or ""
+                    alerts.append({
+                        "name": str(name),
+                        "site": site,
+                        "severity": self._finding_status(severity),
+                        "detail": str(device),
+                        "category": str(category),
+                        "ts": item.get("timestamp") or item.get("raised_at") or item.get("first_occurrence") or None,
+                    })
+        except Exception as exc:
+            logger.warning("new_central monitoring alerts fetch [%s]: %s", self._config_hash, exc)
+        # Short TTL on empty to retry sooner after a 429
+        ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
+        _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
+        return alerts
         """Fetch AIOps insights for new_central environments.
 
         new_central insights are global (not per-site); each insight contains an embedded
@@ -715,39 +798,33 @@ class ArubaClient:
         import asyncio
 
         if self.api_version == "new_central":
-            sites, findings, clients, device_alerts, nc_insights = await asyncio.gather(
+            sites, clients, device_alerts, nc_insights, nc_alerts = await asyncio.gather(
                 self.list_sites(),
-                self.poll_alerts_and_insights(),
                 self.list_clients(),
                 self._new_central_device_alerts(),
                 self._new_central_insights(),
+                self._new_central_alerts(),
                 return_exceptions=True,
             )
             if isinstance(sites, Exception):
                 sites = []
-            if isinstance(findings, Exception):
-                findings = []
             if isinstance(clients, Exception):
                 clients = []
             if isinstance(device_alerts, Exception):
                 device_alerts = []
             if isinstance(nc_insights, Exception):
                 nc_insights = []
-            # Exclude synthetic SITE_HEALTH from alerts browse — use real device alerts + classic alerts if any
-            classic_alerts = [
-                {"name": f.check_name, "site": f.site_name, "severity": f.status, "detail": "", "ts": None}
-                for f in findings
-                if isinstance(f, ArubaFinding) and f.source == "alert" and f.check_name != "SITE_HEALTH"
-            ]
-            alerts = (list(device_alerts) + classic_alerts) or []
-            # Use dedicated new_central insights; fall back to any insight findings from poll
-            classic_insights = [
-                {"name": f.check_name, "site": f.site_name, "severity": f.status, "category": "", "status": "unread", "ts": None}
-                for f in findings
-                if isinstance(f, ArubaFinding) and f.source == "insight"
-            ]
-            insights = list(nc_insights) + classic_insights
-            return {"sites": sites, "alerts": alerts, "insights": insights, "clients": clients}
+            if isinstance(nc_alerts, Exception):
+                nc_alerts = []
+            # Combine device-down alerts with real monitoring alerts (de-dupe by name+site)
+            seen = set()
+            combined_alerts: list[dict[str, Any]] = []
+            for a in list(nc_alerts) + list(device_alerts):
+                key = (str(a.get("name") or "").lower(), str(a.get("site") or "").lower())
+                if key not in seen:
+                    seen.add(key)
+                    combined_alerts.append(a)
+            return {"sites": sites, "alerts": combined_alerts, "insights": list(nc_insights), "clients": clients}
 
         sites, findings, clients = await asyncio.gather(
             self.list_sites(),
