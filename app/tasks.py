@@ -706,7 +706,7 @@ async def aruba_poller() -> None:
 
                     for spoke in centralized_spokes:
                         spokes_status[spoke.id] = {
-                            "assigned_site": spoke.assigned_site,
+                            "assigned_sites": spoke.assigned_sites,
                             "status": dict(aggregated_status),
                             "wireless_clients": dict(aggregated_wireless_clients),
                             "hardware_alerts": list(aggregated_hardware_alerts),

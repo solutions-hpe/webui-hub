@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 import uuid
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 def _now() -> datetime:
@@ -86,7 +86,19 @@ class Spoke(BaseModel):
     hostname: str
     label: str = ""
     spoke_name: str = ""
-    assigned_site: str = ""  # Optional wsite key from the tenant's site_mappings
+    assigned_site: str = ""  # legacy single-site field, kept for backward-compat deserialization
+    assigned_sites: list[str] = Field(default_factory=list)  # multi-site assignment
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_assigned_site(cls, data: Any) -> Any:
+        """Migrate legacy single assigned_site string to assigned_sites list."""
+        if isinstance(data, dict) and not data.get("assigned_sites"):
+            legacy = str(data.get("assigned_site") or "").strip()
+            if legacy:
+                data = dict(data)
+                data["assigned_sites"] = [legacy]
+        return data
     status: str = "pending"
     api_key_enc: Optional[str] = None
     proxmox_host: str = ""

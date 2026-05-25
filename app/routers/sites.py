@@ -22,7 +22,7 @@ class LabelUpdateRequest(BaseModel):
 
 
 class AssignedSiteUpdateRequest(BaseModel):
-    assigned_site: str = ""
+    assigned_sites: list[str] = Field(default_factory=list)
 
 
 def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any]:
@@ -32,7 +32,7 @@ def _serialize_spoke(spoke: Spoke, include_config: bool = True) -> dict[str, Any
         "hostname": spoke.hostname,
         "label": spoke.label,
         "spoke_name": spoke.spoke_name,
-        "assigned_site": spoke.assigned_site,
+        "assigned_sites": spoke.assigned_sites,
         "status": spoke.status,
         "seed_config": spoke.seed_config,
         "processing_mode": spoke.processing_mode,
@@ -155,6 +155,7 @@ def update_spoke_assigned_site(
 ):
     _require_tenant_admin(tenant_id, current_user)
     spoke = _get_spoke(tenant_id, spoke_id)
-    spoke.assigned_site = (payload.assigned_site or "").strip()
+    spoke.assigned_sites = [s.strip() for s in (payload.assigned_sites or []) if s.strip()]
+    spoke.assigned_site = spoke.assigned_sites[0] if spoke.assigned_sites else ""
     store.save_spoke(spoke)
     return _serialize_spoke(spoke)
