@@ -771,11 +771,12 @@ class ArubaClient:
         alerts: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
-                # Fetch all active alerts (max 100 per page, follow pagination)
+                # Fetch all active alerts (max 100 per page, follow pagination).
+                # NOTE: OData filter parameter is "$filter" (with $), not "filter".
+                # "sort" is not a supported query param on this endpoint.
                 params: dict[str, Any] = {
                     "limit": 100,
-                    "filter": "status eq 'Active'",
-                    "sort": "severity DESC",
+                    "$filter": "status eq 'Active'",
                 }
                 raw_alerts: list[dict[str, Any]] = []
                 while True:
@@ -790,7 +791,7 @@ class ArubaClient:
                 # Group by (name, siteName) — same alert type can fire multiple times
                 groups: dict[tuple[str, str], dict[str, Any]] = {}
                 for item in raw_alerts:
-                    name = str(item.get("name") or "Alert").strip()
+                    name = str(item.get("name") or item.get("alertType") or "Alert").strip()
                     site = str(item.get("siteName") or item.get("site") or "—").strip() or "—"
                     key = (name.lower(), site.lower())
                     if key not in groups:
@@ -813,7 +814,8 @@ class ArubaClient:
                     alerts.append(entry)
 
         except Exception as exc:
-            logger.warning("new_central alerts fetch [%s]: %s", self._config_hash, exc)
+            body = getattr(getattr(exc, "response", None), "text", None)
+            logger.warning("new_central alerts fetch [%s]: %s%s", self._config_hash, exc, f" — {body}" if body else "")
         logger.info("new_central alerts fetched [%s]: %d alert groups from /network-notifications/v1/alerts", self._config_hash, len(alerts))
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
