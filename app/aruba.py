@@ -624,30 +624,44 @@ class ArubaClient:
         return result
 
     async def _nc_devices(self) -> list[dict[str, Any]]:
-        """Return cached devices list; one API call shared across all site queries."""
+        """Return cached devices list from /network-monitoring/v1/devices (paginated)."""
         cached = _devices_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
             return cached[1]
         result: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
-                data = await self._get(http, "/network-monitoring/v1alpha1/devices", params={"limit": 1000})
-                result = data.get("items") or []
+                params: dict[str, Any] = {"limit": 1000}
+                while True:
+                    data = await self._get(http, "/network-monitoring/v1/devices", params=params)
+                    items = data.get("items") or []
+                    result.extend(items)
+                    nxt = data.get("next")
+                    if not nxt or len(items) < 1000:
+                        break
+                    params["next"] = nxt
         except Exception as exc:
             logger.warning("new_central devices cache fetch [%s]: %s", self._config_hash, exc)
         _devices_cache[self._config_hash] = (time.time(), result)
         return result
 
     async def _nc_clients(self) -> list[dict[str, Any]]:
-        """Return cached clients list; one API call shared across all site queries."""
+        """Return cached clients list from /network-monitoring/v1/clients (paginated)."""
         cached = _nc_clients_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _NC_GLOBAL_CACHE_TTL:
             return cached[1]
         result: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
-                data = await self._get(http, "/network-monitoring/v1alpha1/clients", params={"limit": 1000})
-                result = data.get("items") or []
+                params: dict[str, Any] = {"limit": 1000}
+                while True:
+                    data = await self._get(http, "/network-monitoring/v1/clients", params=params)
+                    items = data.get("items") or []
+                    result.extend(items)
+                    nxt = data.get("next")
+                    if not nxt or len(items) < 1000:
+                        break
+                    params["next"] = nxt
         except Exception as exc:
             logger.warning("new_central clients cache fetch [%s]: %s", self._config_hash, exc)
         _nc_clients_cache[self._config_hash] = (time.time(), result)
@@ -730,171 +744,200 @@ class ArubaClient:
             return "Device"
         return ""
 
+    @staticmethod
+    def _nc_alert_severity(severity: str) -> str:
+        """Map new_central alert severity (Critical/Major/Minor/Info) to UI colour."""
+        s = str(severity or "").lower()
+        if s == "critical":
+            return "red"
+        if s == "major":
+            return "orange"
+        if s == "minor":
+            return "yellow"
+        return "info"
+
     async def _new_central_alerts(self) -> list[dict[str, Any]]:
-        """Fetch performance/health alerts for new_central from sites-health reasons array.
+        """Fetch active alerts from /network-notifications/v1/alerts.
 
-        The new_central API does not expose /monitoring/v1/alerts. Instead, per-site
-        alert details are embedded as a 'reasons' array in /network-monitoring/v1alpha1/sites-health.
-        Results are cached for 5 minutes.
-
+        This is the real individual-alert endpoint (returned 404 on old paths like
+        /monitoring/v1/alerts).  Each alert has name, site, severity, category,
+        deviceType, summary and createdAt.  Results are grouped by (name, site) so
+        the same alert firing multiple times shows as one row with a count.
+        Cache TTL: 5 minutes.
         """
         cached = _alerts_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _ALERTS_CACHE_TTL:
             return cached[1]
         alerts: list[dict[str, Any]] = []
         try:
-            # Use the cached sites-health data — it embeds a 'reasons' array per site
-            # that contains individual alert/health indicators (performance, device-offline, etc.)
-            for site_item in await self._nc_sites_health():
-                site_name = (
-                    site_item.get("name") or site_item.get("siteName")
-                    or site_item.get("site_name") or "—"
-                ).strip() or "—"
-                reasons = site_item.get("reasons") or []
-                for reason in reasons:
-                    reason_code = str(reason.get("reason") or "").strip()
-                    if not reason_code or reason_code == "EMPTY_SITE":
-                        continue
-                    health = str(reason.get("health") or "").strip()
-                    count = (reason.get("data") or {}).get("count", 0)
-                    alert_name = self._reason_to_alert_name(reason_code)
-                    detail = f"{count} device{'s' if count != 1 else ''}" if count else ""
-                    alerts.append({
-                        "name": alert_name,
-                        "site": site_name,
-                        "severity": self._reason_severity(health),
-                        "detail": detail,
-                        "category": self._reason_category(reason_code),
-                        "ts": None,
-                        "reason_code": reason_code,
-                    })
+            async with httpx.AsyncClient(timeout=30) as http:
+                # Fetch all active alerts (max 100 per page, follow pagination)
+                params: dict[str, Any] = {
+                    "limit": 100,
+                    "filter": "status eq 'Active'",
+                    "sort": "severity DESC",
+                }
+                raw_alerts: list[dict[str, Any]] = []
+                while True:
+                    payload = await self._get(http, "/network-notifications/v1/alerts", params=params)
+                    items = payload.get("items") or []
+                    raw_alerts.extend(items)
+                    next_cursor = payload.get("next")
+                    if not next_cursor or len(items) < 100:
+                        break
+                    params["next"] = next_cursor
+
+                # Group by (name, siteName) — same alert type can fire multiple times
+                groups: dict[tuple[str, str], dict[str, Any]] = {}
+                for item in raw_alerts:
+                    name = str(item.get("name") or "Alert").strip()
+                    site = str(item.get("siteName") or item.get("site") or "—").strip() or "—"
+                    key = (name.lower(), site.lower())
+                    if key not in groups:
+                        groups[key] = {
+                            "name": name,
+                            "site": site,
+                            "severity": self._nc_alert_severity(item.get("severity", "")),
+                            "category": str(item.get("category") or "").strip(),
+                            "device_type": str(item.get("deviceType") or "").strip(),
+                            "detail": str(item.get("summary") or "").strip(),
+                            "ts": item.get("createdAt") or None,
+                            "count": 0,
+                        }
+                    groups[key]["count"] += 1
+
+                for entry in groups.values():
+                    cnt = entry.pop("count")
+                    if cnt > 1:
+                        entry["detail"] = f"{cnt} occurrences" + (f" — {entry['detail']}" if entry["detail"] else "")
+                    alerts.append(entry)
+
         except Exception as exc:
-            logger.warning("new_central alerts (sites-health reasons) [%s]: %s", self._config_hash, exc)
-        logger.info("new_central alerts fetched [%s]: %d alerts from sites-health reasons", self._config_hash, len(alerts))
+            logger.warning("new_central alerts fetch [%s]: %s", self._config_hash, exc)
+        logger.info("new_central alerts fetched [%s]: %d alert groups from /network-notifications/v1/alerts", self._config_hash, len(alerts))
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
         return alerts
 
     async def _new_central_insights(self) -> list[dict[str, Any]]:
-        """Fetch AIOps insights for new_central environments.
+        """Fetch AI-powered insights from /network-notifications/v1/insights.
 
-        new_central insights are global (not per-site); each insight contains an embedded
-        list of affected sites.  Results are cached for 15 minutes to avoid 429 rate-limit
-        errors from the background poller and repeated browse refreshes.
+        Each insight is global (siteId="-1") or site-specific and contains an
+        impactedSites list.  Results are cached for 15 minutes.
         """
-        # Return cached result if still fresh
         cached = _insights_cache.get(self._config_hash)
-        if cached:
-            ts, data = cached
-            if time.time() - ts < _INSIGHTS_CACHE_TTL:
-                return data
+        if cached and time.time() - cached[0] < _INSIGHTS_CACHE_TTL:
+            return cached[1]
 
         insights: list[dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30) as http:
-                payload = None
-                for path in ("/aiops/v1/insights", "/aiops/v2/insights"):
-                    try:
-                        payload = await self._get(http, path, params={"limit": 500})
-                        if payload is not None:
-                            break
-                    except httpx.HTTPStatusError as exc:
-                        if exc.response.status_code in (404, 405):
-                            continue
-                        raise
-                if not payload:
-                    return insights
-
-                # Normalise: response may be {"insights": [...]} or {"items": [...]} or a plain list
-                raw_list = (
-                    payload.get("insights")
-                    or payload.get("items")
-                    or (payload if isinstance(payload, list) else [])
-                )
+                payload = await self._get(http, "/network-notifications/v1/insights", params={"limit": 100})
+                raw_list = payload.get("items") or []
                 for item in raw_list:
-                    name = (
-                        item.get("name")
-                        or item.get("insight_name")
-                        or item.get("rule")
-                        or item.get("category")
-                        or "Insight"
-                    )
-                    category = str(item.get("category") or item.get("type") or "").strip()
-                    read = item.get("read", item.get("status", "unread"))
-                    status_str = "read" if (read is True or str(read).lower() == "read") else "unread"
+                    title = str(item.get("title") or item.get("name") or item.get("category") or "Insight").strip()
+                    category = str(item.get("category") or "").strip()
+                    description = str(item.get("description") or "").strip()
+                    ts = item.get("timestamp") or item.get("createdAt") or None
+                    # Convert epoch-ms timestamp to ISO string if needed
+                    if ts and str(ts).isdigit() and len(str(ts)) == 13:
+                        import datetime
+                        ts = datetime.datetime.utcfromtimestamp(int(ts) / 1000).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-                    # Collect affected sites — new_central embeds them per insight
-                    raw_sites = item.get("sites") or item.get("affected_sites") or []
-                    if raw_sites:
-                        for s in raw_sites:
-                            site_name = (
-                                (s.get("name") or s.get("site_name") or s.get("siteName") or "").strip()
-                                or "unknown"
-                            )
-                            device_count = s.get("devices") or s.get("device_count") or s.get("count") or 0
+                    impacted = item.get("impactedSites") or []
+                    if impacted:
+                        for s in impacted:
+                            site_name = str(s.get("siteName") or s.get("name") or "").strip() or "All Sites"
                             insights.append({
-                                "name": str(name),
+                                "name": title,
                                 "site": site_name,
                                 "category": category,
-                                "status": status_str,
                                 "severity": "info",
-                                "device_count": device_count,
-                                "description": item.get("description") or item.get("message") or "",
-                                "ts": item.get("created_at") or item.get("timestamp") or None,
+                                "description": description,
+                                "device_count": s.get("impactedDeviceCount") or 0,
+                                "client_count": s.get("impactedClientCount") or 0,
+                                "ts": ts,
                             })
                     else:
-                        # No site breakdown — emit one row with no site
-                        site_name = (item.get("site_name") or item.get("site") or item.get("group") or "").strip() or "unknown"
                         insights.append({
-                            "name": str(name),
-                            "site": site_name,
+                            "name": title,
+                            "site": "All Sites",
                             "category": category,
-                            "status": status_str,
                             "severity": "info",
+                            "description": description,
                             "device_count": 0,
-                            "description": item.get("description") or item.get("message") or "",
-                            "ts": item.get("created_at") or item.get("timestamp") or None,
+                            "client_count": 0,
+                            "ts": ts,
                         })
         except Exception as exc:
-            logger.warning("new_central insights fetch failed [%s]: %s", self._config_hash, exc)
-        logger.info("new_central insights fetched [%s]: %d insights", self._config_hash, len(insights))
-        # Cache populated results for 15 min; empty results only 2 min (e.g. after a 429)
+            logger.warning("new_central insights fetch [%s]: %s", self._config_hash, exc)
+        logger.info("new_central insights fetched [%s]: %d insights from /network-notifications/v1/insights", self._config_hash, len(insights))
         ttl = _INSIGHTS_CACHE_TTL if insights else 120
         _insights_cache[self._config_hash] = (time.time() - (_INSIGHTS_CACHE_TTL - ttl), insights)
         return insights
 
     async def browse_all(self) -> dict[str, Any]:
-        """Fetch all Central sites, alerts, insights, and clients for the browse view."""
+        """Fetch all Central sites, alerts, insights, clients, and devices for the browse view."""
         import asyncio
 
         if self.api_version == "new_central":
-            sites, clients, device_alerts, nc_insights, nc_alerts = await asyncio.gather(
+            sites, all_devices, all_clients, nc_insights, nc_alerts = await asyncio.gather(
                 self.list_sites(),
-                self.list_clients(),
-                self._new_central_device_alerts(),
+                self._nc_devices(),
+                self._nc_clients(),
                 self._new_central_insights(),
                 self._new_central_alerts(),
                 return_exceptions=True,
             )
             if isinstance(sites, Exception):
                 sites = []
-            if isinstance(clients, Exception):
-                clients = []
-            if isinstance(device_alerts, Exception):
-                device_alerts = []
+            if isinstance(all_devices, Exception):
+                all_devices = []
+            if isinstance(all_clients, Exception):
+                all_clients = []
             if isinstance(nc_insights, Exception):
                 nc_insights = []
             if isinstance(nc_alerts, Exception):
                 nc_alerts = []
-            # Combine device-down alerts with real monitoring alerts (de-dupe by name+site)
-            seen = set()
-            combined_alerts: list[dict[str, Any]] = []
-            for a in list(nc_alerts) + list(device_alerts):
-                key = (str(a.get("name") or "").lower(), str(a.get("site") or "").lower())
-                if key not in seen:
-                    seen.add(key)
-                    combined_alerts.append(a)
-            return {"sites": sites, "alerts": combined_alerts, "insights": list(nc_insights), "clients": clients}
+
+            # Build devices_by_site: {siteName: [device, ...]}
+            devices_by_site: dict[str, list[dict[str, Any]]] = {}
+            for dev in all_devices:
+                sn = (dev.get("siteName") or dev.get("site_name") or "—").strip() or "—"
+                devices_by_site.setdefault(sn, []).append({
+                    "name": dev.get("deviceName") or dev.get("name") or dev.get("serialNumber") or "—",
+                    "type": dev.get("deviceType") or "",
+                    "model": dev.get("model") or "",
+                    "status": dev.get("status") or "",
+                    "serial": dev.get("serialNumber") or dev.get("id") or "",
+                    "ip": dev.get("ipv4") or dev.get("ipv6") or "",
+                    "firmware": dev.get("firmwareVersion") or "",
+                    "last_seen": dev.get("lastSeenAt") or "",
+                })
+
+            # Build clients_by_site: {siteName: {total, wired, wireless}}
+            clients_by_site: dict[str, dict[str, Any]] = {}
+            for cli in all_clients:
+                sn = (cli.get("siteName") or cli.get("site_name") or "—").strip() or "—"
+                entry = clients_by_site.setdefault(sn, {"total": 0, "wired": 0, "wireless": 0})
+                entry["total"] += 1
+                conn_type = str(cli.get("clientConnectionType") or "").lower()
+                if conn_type == "wired":
+                    entry["wired"] += 1
+                elif conn_type == "wireless":
+                    entry["wireless"] += 1
+
+            # Legacy clients list (total count per site for compatibility)
+            clients = [{"site": sn, **counts} for sn, counts in clients_by_site.items()]
+
+            return {
+                "sites": sites,
+                "alerts": list(nc_alerts),
+                "insights": list(nc_insights),
+                "clients": clients,
+                "devices_by_site": devices_by_site,
+                "clients_by_site": clients_by_site,
+            }
 
         sites, findings, clients = await asyncio.gather(
             self.list_sites(),

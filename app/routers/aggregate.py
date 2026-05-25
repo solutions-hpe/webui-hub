@@ -1835,6 +1835,8 @@ async def hub_central_browse(
         alerts: list[dict[str, Any]] = []
         insights: list[dict[str, Any]] = []
         clients: list[dict[str, Any]] = []
+        devices_by_site: dict[str, list[dict[str, Any]]] = {}
+        clients_by_site: dict[str, dict[str, Any]] = {}
         for spoke in _approved_spokes(resolved_tid):
             central = _central_telemetry(spoke)
             for wsite, central_site in (central.get("site_mappings") or {}).items():
@@ -1848,18 +1850,40 @@ async def hub_central_browse(
                         "site_id": "",
                         "status": central_site or "—",
                     }
-            for wsite, checks in (central.get("status") or {}).items():
-                for check_id, info in (checks or {}).items():
-                    if info and info.get("status") == "ERROR":
-                        alerts.append(
-                            {
-                                "name": info.get("check_name") or check_id,
-                                "site": wsite,
-                                "severity": "error",
-                                "detail": f"Count: {info.get('count', 0)}",
-                                "ts": info.get("ts"),
-                            }
-                        )
+            # Use real alerts from spoke browse data if available; fall back to
+            # check-status errors for spokes that haven't uploaded browse data yet.
+            spoke_nc_alerts = central.get("central_alerts") or []
+            if spoke_nc_alerts:
+                alerts.extend(spoke_nc_alerts)
+            else:
+                for wsite, checks in (central.get("status") or {}).items():
+                    for check_id, info in (checks or {}).items():
+                        if info and info.get("status") == "ERROR":
+                            alerts.append(
+                                {
+                                    "name": info.get("check_name") or check_id,
+                                    "site": wsite,
+                                    "severity": "error",
+                                    "detail": f"Count: {info.get('count', 0)}",
+                                    "ts": info.get("ts"),
+                                }
+                            )
+            # Insights, devices, clients from spoke browse data
+            insights.extend(central.get("central_insights") or [])
+            for site_name, devs in (central.get("central_devices_by_site") or {}).items():
+                devices_by_site.setdefault(site_name, []).extend(devs)
+            for site_name, counts in (central.get("central_clients_by_site") or {}).items():
+                if site_name not in clients_by_site:
+                    clients_by_site[site_name] = counts
+                else:
+                    # Merge counts if multiple spokes cover the same site
+                    existing = clients_by_site[site_name]
+                    clients_by_site[site_name] = {
+                        "total": (existing.get("total") or 0) + (counts.get("total") or 0),
+                        "wired": (existing.get("wired") or 0) + (counts.get("wired") or 0),
+                        "wireless": (existing.get("wireless") or 0) + (counts.get("wireless") or 0),
+                    }
+            # Legacy client list (classic API spokes)
             for client in _telemetry_clients(spoke):
                 if isinstance(client, dict):
                     clients.append(client)
@@ -1868,6 +1892,8 @@ async def hub_central_browse(
             "alerts": alerts,
             "insights": insights,
             "clients": clients,
+            "clients_by_site": clients_by_site,
+            "devices_by_site": devices_by_site,
         }
 
     result = {
