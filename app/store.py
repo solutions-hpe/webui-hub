@@ -762,7 +762,8 @@ def _hub_github_config(tenant: Tenant | None) -> dict[str, Any]:
         logger.warning("Unable to decrypt GitHub config for tenant %s", tenant.id if tenant else "unknown")
         return {}
     return {
-        "repo_branch": str(cfg.get("sim_repo_branch") or "").strip(),
+        "repo_url": str(cfg.get("sim_repo_url") or "").strip(),
+        "repo_branch": str(cfg.get("sim_repo_branch") or "main").strip() or "main",
         "github_token": str(cfg.get("github_token") or "").strip(),
     }
 

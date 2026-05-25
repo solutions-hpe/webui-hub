@@ -396,7 +396,8 @@ def update_github_settings(
 
     tenant.github_config_enc = encrypt_dict(cfg) if any(str(value).strip() for value in cfg.values()) else None
     store.save_tenant(tenant)
-    return _serialize_github_config(tenant)
+    pushed_count = _push_config_updates_to_approved_spokes(tenant_id)
+    return {**_serialize_github_config(tenant), "pushed_to_spokes": pushed_count}
 
 
 @router.get("/{tenant_id}/settings/processing-mode")
