@@ -666,13 +666,19 @@ class ArubaClient:
         try:
             async with httpx.AsyncClient(timeout=30) as http:
                 payload = None
-                for path in ("/monitoring/v1/alerts", "/monitoring/v2/alerts"):
+                for path in (
+                    "/network-monitoring/v1alpha1/alerts",
+                    "/monitoring/v1/alerts",
+                    "/monitoring/v2/alerts",
+                ):
                     try:
                         payload = await self._get(http, path, params={"limit": 500, "state": "Open"})
                         if payload is not None:
+                            logger.info("new_central alerts: using endpoint %s", path)
                             break
                     except httpx.HTTPStatusError as exc:
-                        if exc.response.status_code in (404, 405):
+                        logger.info("new_central alerts: %s → HTTP %s", path, exc.response.status_code)
+                        if exc.response.status_code in (404, 405, 400):
                             continue
                         raise
                 logger.info(
