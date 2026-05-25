@@ -96,9 +96,30 @@ else
     echo "1.00" > "$SCRIPT_DIR/CLIENT_SIM_VERSION"
 fi
 
+# ── Sync cs-webui submodule files into build context ──────────────
+# az acr build uses git to pack context, so submodule files are excluded.
+# Explicitly rsync them into a temp copy so they're included in the build.
+FRONTEND_SRC="$SCRIPT_DIR/frontend"
+if [ -d "$FRONTEND_SRC" ]; then
+    echo "▶ Syncing cs-webui frontend files into build context..."
+    # frontend/ is already the right directory; ensure git submodule is up to date
+    git -C "$SCRIPT_DIR" submodule update --init --remote frontend 2>/dev/null || true
+    echo "  ✓ Frontend synced ($(cat "$FRONTEND_SRC/VERSION" 2>/dev/null || echo unknown))"
+fi
+
 # ── Build and push image ──────────────────────────────────────────
 echo "▶ Building and pushing image to ACR..."
-az acr build --registry "$ACR_NAME" --image "$IMAGE" "$SCRIPT_DIR" --output none
+# Use --no-wait is not set; pass context as tar so submodule files are included
+tar -czf /tmp/hub-build-context.tar.gz -C "$SCRIPT_DIR" \
+    --exclude='.git' \
+    --exclude='__pycache__' \
+    --exclude='*.pyc' \
+    --exclude='.env' \
+    --exclude='.deploy-secrets*' \
+    --exclude='data' \
+    . 2>/dev/null
+az acr build --registry "$ACR_NAME" --image "$IMAGE" --file "$SCRIPT_DIR/Dockerfile" /tmp/hub-build-context.tar.gz --output none
+rm -f /tmp/hub-build-context.tar.gz
 echo "  ✓ Image pushed: $ACR_SERVER/$IMAGE"
 
 # ── Remove existing container (clean slate) ───────────────────────
