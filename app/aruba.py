@@ -580,9 +580,8 @@ class ArubaClient:
         DEVICE_TYPE_ALERT = {"ACCESS_POINT": "AP Down", "SWITCH": "Switch Down", "GATEWAY": "Gateway Down"}
         alerts: list[dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(timeout=30) as http:
-                data = await self._get(http, "/network-monitoring/v1alpha1/devices", params={"limit": 1000})
-            for device in data.get("items") or []:
+            devices = await self._nc_devices()
+            for device in devices:
                 status = str(device.get("status") or "").upper()
                 if status in {"UP", "ONLINE", ""}:
                     continue
@@ -676,6 +675,12 @@ class ArubaClient:
                         if exc.response.status_code in (404, 405):
                             continue
                         raise
+                logger.info(
+                    "new_central alerts raw [%s]: keys=%s total=%s",
+                    self._config_hash,
+                    list((payload or {}).keys()),
+                    (payload or {}).get("total") or (payload or {}).get("count") or "n/a",
+                )
                 raw_list = (
                     (payload or {}).get("alerts")
                     or (payload or {}).get("items")
