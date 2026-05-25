@@ -393,7 +393,7 @@ class RegisterPayload(BaseModel):
 
 
 @router.post("/spokes/register", status_code=201)
-def register_spoke(payload: RegisterPayload, request: Request):
+async def register_spoke(payload: RegisterPayload, request: Request):
     # Strip auth/credential keys — the hub must never store or push spoke auth config
     payload.config = {k: v for k, v in payload.config.items() if k not in _AUTH_KEYS}
     spoke_name = payload.spoke_name.strip() or payload.hostname
