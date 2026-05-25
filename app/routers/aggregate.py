@@ -32,6 +32,9 @@ PASS_STATUSES = {"ok", "pass", "passed", "healthy", "connected"}
 WARNING_STATUSES = {"warn", "warning", "unknown", "no_data", "stale"}
 MODE_VALUES = {"centralized", "distributed"}
 CENTRAL_WEBHOOK_HOST = "cs-hub.westus3.azurecontainer.io:8443"
+_central_browse_cache: dict[str, dict[str, Any]] = {}
+_central_browse_cache_ts: dict[str, float] = {}
+_CENTRAL_BROWSE_TTL = 300
 
 
 def _central_webhook_endpoint_url(tenant_id: str) -> str:
@@ -1745,6 +1748,138 @@ async def hub_central_site_alerts(
     except Exception as exc:
         logger.warning("Error fetching Central alerts for tenant %s site %s: %s", resolved_tid, site, exc)
         return {"alerts": [], "count": 0, "warning": "Error fetching alerts.", "error": str(exc)}
+
+
+@router.get("/central/browse")
+async def hub_central_browse(
+    tenant_id: Optional[str] = Query(default=None),
+    force: bool = Query(default=False),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return all Central browse data with a 5-minute server-side cache."""
+    resolved_tid = _resolve_tenant_id(tenant_id, current_user)
+    now = time.time()
+
+    if not force and resolved_tid in _central_browse_cache:
+        if now - _central_browse_cache_ts.get(resolved_tid, 0) < _CENTRAL_BROWSE_TTL:
+            return {**_central_browse_cache[resolved_tid], "cached": True}
+
+    tenant = _get_tenant(resolved_tid)
+    mode = _central_mode(tenant)
+
+    if mode == "centralized":
+        if not tenant.aruba_config_enc:
+            result = {
+                "sites": [],
+                "alerts": [],
+                "insights": [],
+                "clients": [],
+                "mode": mode,
+                "warning": "Central not configured on hub.",
+                "cached": False,
+                "cached_at": now,
+            }
+            _central_browse_cache[resolved_tid] = result
+            _central_browse_cache_ts[resolved_tid] = now
+            return result
+        try:
+            cfg = decrypt_dict(tenant.aruba_config_enc)
+            cfg["cluster_url"] = validate_cluster_url(cfg.get("cluster_url", ""))
+        except Exception:
+            result = {
+                "sites": [],
+                "alerts": [],
+                "insights": [],
+                "clients": [],
+                "mode": mode,
+                "warning": "Could not read Central config.",
+                "cached": False,
+                "cached_at": now,
+            }
+            _central_browse_cache[resolved_tid] = result
+            _central_browse_cache_ts[resolved_tid] = now
+            return result
+        aruba = ArubaClient(cfg)
+        if not aruba.is_configured():
+            result = {
+                "sites": [],
+                "alerts": [],
+                "insights": [],
+                "clients": [],
+                "mode": mode,
+                "warning": "Central not configured.",
+                "cached": False,
+                "cached_at": now,
+            }
+            _central_browse_cache[resolved_tid] = result
+            _central_browse_cache_ts[resolved_tid] = now
+            return result
+        try:
+            data = await aruba.browse_all()
+        except Exception as exc:
+            result = {
+                "sites": [],
+                "alerts": [],
+                "insights": [],
+                "clients": [],
+                "mode": mode,
+                "warning": str(exc),
+                "cached": False,
+                "cached_at": now,
+            }
+            _central_browse_cache[resolved_tid] = result
+            _central_browse_cache_ts[resolved_tid] = now
+            return result
+    else:
+        sites_map: dict[str, dict[str, Any]] = {}
+        alerts: list[dict[str, Any]] = []
+        insights: list[dict[str, Any]] = []
+        clients: list[dict[str, Any]] = []
+        for spoke in _approved_spokes(resolved_tid):
+            central = _central_telemetry(spoke)
+            for wsite, central_site in (central.get("site_mappings") or {}).items():
+                if wsite not in sites_map:
+                    wc = (central.get("wireless_clients") or {}).get(wsite)
+                    sites_map[wsite] = {
+                        "name": wsite,
+                        "central_site": central_site,
+                        "wireless_clients": wc,
+                        "health_score": None,
+                        "site_id": "",
+                        "status": central_site or "—",
+                    }
+            for wsite, checks in (central.get("status") or {}).items():
+                for check_id, info in (checks or {}).items():
+                    if info and info.get("status") == "ERROR":
+                        alerts.append(
+                            {
+                                "name": info.get("check_name") or check_id,
+                                "site": wsite,
+                                "severity": "error",
+                                "detail": f"Count: {info.get('count', 0)}",
+                                "ts": info.get("ts"),
+                            }
+                        )
+            for client in _telemetry_clients(spoke):
+                if isinstance(client, dict):
+                    clients.append(client)
+        data = {
+            "sites": sorted(sites_map.values(), key=lambda item: str(item.get("name") or "").casefold()),
+            "alerts": alerts,
+            "insights": insights,
+            "clients": clients,
+        }
+
+    result = {
+        **data,
+        "mode": mode,
+        "cached_at": now,
+        "cached": False,
+        "warning": data.get("warning"),
+    }
+    _central_browse_cache[resolved_tid] = result
+    _central_browse_cache_ts[resolved_tid] = now
+    return result
 
 
 @router.post("/aggregate/central")

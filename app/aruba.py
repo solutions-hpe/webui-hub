@@ -531,6 +531,86 @@ class ArubaClient:
             sites.setdefault(site_name.casefold(), {"name": site_name})
         return sorted(sites.values(), key=lambda item: item["name"].casefold())
 
+    async def list_clients(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Return normalized wireless clients from Central API."""
+        if not self.is_configured():
+            return []
+        async with httpx.AsyncClient(timeout=30) as client:
+            if self.api_version == "new_central":
+                try:
+                    data = await self._get(client, "/network-monitoring/v1alpha1/clients", params={"limit": limit})
+                    return [
+                        {
+                            "mac": item.get("macAddress") or item.get("mac") or "—",
+                            "ip": item.get("ipv4") or item.get("ip") or "—",
+                            "hostname": item.get("name") or item.get("hostname") or "—",
+                            "site": item.get("siteName") or item.get("site_name") or "—",
+                            "ap": item.get("associatedDevice") or item.get("ap_name") or "—",
+                            "ssid": item.get("ssid") or "—",
+                            "status": item.get("status") or "—",
+                            "os": item.get("os_type") or "—",
+                            "vlan": str(item.get("vlan") or "—"),
+                        }
+                        for item in (data.get("items") or [])
+                    ]
+                except Exception as exc:
+                    logger.warning("list_clients new_central failed [%s]: %s", self._config_hash, exc)
+                    return []
+            for path in ("/monitoring/v2/clients/wireless", "/monitoring/v1/clients/wireless"):
+                try:
+                    data = await self._get(client, path, params={"limit": limit})
+                    return [
+                        {
+                            "mac": item.get("macaddr") or item.get("mac") or "—",
+                            "ip": item.get("ip_address") or item.get("ip") or "—",
+                            "hostname": item.get("name") or item.get("hostname") or "—",
+                            "site": item.get("site") or item.get("site_name") or "—",
+                            "ap": item.get("associated_device_name") or item.get("ap_name") or "—",
+                            "ssid": item.get("ssid") or "—",
+                            "status": item.get("status") or "connected",
+                            "os": item.get("os_type") or "—",
+                            "vlan": str(item.get("vlan_id") or item.get("vlan") or "—"),
+                        }
+                        for item in (data.get("clients") or data.get("items") or [])
+                    ]
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        continue
+                    logger.warning("list_clients classic failed [%s] %s: %s", self._config_hash, path, exc)
+                    return []
+                except Exception as exc:
+                    logger.warning("list_clients classic failed [%s] %s: %s", self._config_hash, path, exc)
+                    return []
+            return []
+
+    async def browse_all(self) -> dict[str, Any]:
+        """Fetch all Central sites, alerts, insights, and clients for the browse view."""
+        import asyncio
+
+        sites, findings, clients = await asyncio.gather(
+            self.list_sites(),
+            self.poll_alerts_and_insights(),
+            self.list_clients(),
+            return_exceptions=True,
+        )
+        if isinstance(sites, Exception):
+            sites = []
+        if isinstance(findings, Exception):
+            findings = []
+        if isinstance(clients, Exception):
+            clients = []
+        alerts = [
+            {"name": f.check_name, "site": f.site_name, "severity": f.status, "detail": "", "ts": None}
+            for f in findings
+            if isinstance(f, ArubaFinding) and f.source == "alert"
+        ]
+        insights = [
+            {"name": f.check_name, "site": f.site_name, "severity": f.status, "category": "", "ts": None}
+            for f in findings
+            if isinstance(f, ArubaFinding) and f.source == "insight"
+        ]
+        return {"sites": sites, "alerts": alerts, "insights": insights, "clients": clients}
+
     async def register_webhook(self, name: str, endpoint_url: str, api_key: str) -> dict[str, Any]:
         """Register a webhook with Central. Returns the created webhook object."""
         async with httpx.AsyncClient(timeout=15) as client:
