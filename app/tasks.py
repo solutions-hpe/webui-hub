@@ -969,6 +969,9 @@ async def _check_monitored_items(
     if changed:
         cfg["monitored_items"] = items
         store.set_tenant_central_sites_config(tenant_id, cfg)
+
+
+async def maintenance_loop() -> None:
     """Purge expired commands and old audit entries every 5 minutes."""
     while True:
         await asyncio.sleep(300)
