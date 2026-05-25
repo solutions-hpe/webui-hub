@@ -653,85 +653,124 @@ class ArubaClient:
         _nc_clients_cache[self._config_hash] = (time.time(), result)
         return result
 
-    async def _new_central_alerts(self) -> list[dict[str, Any]]:
-        """Fetch real monitoring alerts (performance, LAN, etc.) for new_central browse view.
+    # Reason-code → human-readable alert name mapping for new_central sites-health.
+    # Codes follow the pattern: <device>_<metric>_<severity> e.g. AP_CHANNEL_UTILIZATION_5GHZ_FAIR
+    _REASON_NAMES: dict[str, str] = {
+        "DEVICE_OFFLINE": "Device Offline",
+        "AP_OFFLINE": "AP Offline",
+        "SWITCH_OFFLINE": "Switch Offline",
+        "GW_OFFLINE": "Gateway Offline",
+        "AP_CHANNEL_UTILIZATION_5GHZ_FAIR": "AP 5GHz Channel Utilization",
+        "AP_CHANNEL_UTILIZATION_5GHZ_POOR": "AP 5GHz Channel Utilization",
+        "AP_CHANNEL_UTILIZATION_24GHZ_FAIR": "AP 2.4GHz Channel Utilization",
+        "AP_CHANNEL_UTILIZATION_24GHZ_POOR": "AP 2.4GHz Channel Utilization",
+        "AP_CHANNEL_UTILIZATION_FAIR": "AP Channel Utilization",
+        "AP_CHANNEL_UTILIZATION_POOR": "AP Channel Utilization",
+        "GW_TUNNEL_FLAP_FAIR": "Gateway Tunnel Flap",
+        "GW_TUNNEL_FLAP_POOR": "Gateway Tunnel Flap",
+        "GW_UPLINK_UTIL_FAIR": "Gateway Uplink Utilization",
+        "GW_UPLINK_UTIL_POOR": "Gateway Uplink Utilization",
+        "AP_UPLINK_UTIL_FAIR": "AP Uplink Utilization",
+        "AP_UPLINK_UTIL_POOR": "AP Uplink Utilization",
+        "AP_DOWNLINK_PKT_DROP_FAIR": "Downlink Packet Drops",
+        "AP_DOWNLINK_PKT_DROP_POOR": "Downlink Packet Drops",
+        "AP_DOWNLINK_PACKET_DROPS_FAIR": "Downlink Packet Drops",
+        "AP_DOWNLINK_PACKET_DROPS_POOR": "Downlink Packet Drops",
+        "AP_UPLINK_PKT_DROP_FAIR": "Uplink Packet Drops",
+        "AP_UPLINK_PKT_DROP_POOR": "Uplink Packet Drops",
+        "CLIENT_COUNT_FAIR": "High Client Count",
+        "CLIENT_COUNT_POOR": "High Client Count",
+        "AP_CLIENT_COUNT_FAIR": "AP High Client Count",
+        "AP_CLIENT_COUNT_POOR": "AP High Client Count",
+        "MEMORY_USAGE_FAIR": "Memory Usage",
+        "MEMORY_USAGE_POOR": "Memory Usage",
+        "CPU_USAGE_FAIR": "CPU Usage",
+        "CPU_USAGE_POOR": "CPU Usage",
+        "AP_NOISE_5GHZ_FAIR": "AP 5GHz Noise Floor",
+        "AP_NOISE_5GHZ_POOR": "AP 5GHz Noise Floor",
+        "AP_NOISE_24GHZ_FAIR": "AP 2.4GHz Noise Floor",
+        "AP_NOISE_24GHZ_POOR": "AP 2.4GHz Noise Floor",
+        "EMPTY_SITE": "Empty Site",
+    }
 
-        Tries the classic /monitoring/v1/alerts endpoint which is available via new_central
-        token.  Results are cached for 5 minutes.
+    @classmethod
+    def _reason_to_alert_name(cls, reason_code: str) -> str:
+        """Convert a sites-health reason code to a human-readable alert name."""
+        name = cls._REASON_NAMES.get(reason_code)
+        if name:
+            return name
+        # Fallback: clean up the code e.g. AP_DOWNLINK_PKT_DROP_FAIR → "AP Downlink Pkt Drop"
+        clean = reason_code.replace("_FAIR", "").replace("_POOR", "")
+        return " ".join(w.capitalize() for w in clean.split("_"))
+
+    @classmethod
+    def _reason_severity(cls, health: str) -> str:
+        """Map a sites-health reason health value to a severity string."""
+        h = str(health or "").lower()
+        if h == "poor":
+            return "red"
+        if h == "fair":
+            return "yellow"
+        return "green"
+
+    @classmethod
+    def _reason_category(cls, reason_code: str) -> str:
+        """Infer alert category from the reason code prefix."""
+        code = reason_code.upper()
+        # Check specific metrics before generic prefixes
+        if "CHANNEL" in code or "NOISE" in code or "PKT_DROP" in code or "PACKET_DROP" in code:
+            return "LAN"
+        if "TUNNEL" in code or "UPLINK_UTIL" in code:
+            return "WAN"
+        if "CLIENT" in code:
+            return "Client"
+        if "OFFLINE" in code:
+            return "Device"
+        if code.startswith("AP_") or code.startswith("SWITCH_") or code.startswith("GW_"):
+            return "Device"
+        return ""
+
+    async def _new_central_alerts(self) -> list[dict[str, Any]]:
+        """Fetch performance/health alerts for new_central from sites-health reasons array.
+
+        The new_central API does not expose /monitoring/v1/alerts. Instead, per-site
+        alert details are embedded as a 'reasons' array in /network-monitoring/v1alpha1/sites-health.
+        Results are cached for 5 minutes.
+
         """
         cached = _alerts_cache.get(self._config_hash)
         if cached and time.time() - cached[0] < _ALERTS_CACHE_TTL:
             return cached[1]
         alerts: list[dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(timeout=30) as http:
-                payload = None
-                for path in (
-                    "/network-monitoring/v1alpha1/alerts",
-                    "/monitoring/v1/alerts",
-                    "/monitoring/v2/alerts",
-                ):
-                    try:
-                        payload = await self._get(http, path, params={"limit": 500, "state": "Open"})
-                        if payload is not None:
-                            logger.info("new_central alerts: using endpoint %s", path)
-                            break
-                    except httpx.HTTPStatusError as exc:
-                        logger.info("new_central alerts: %s → HTTP %s", path, exc.response.status_code)
-                        if exc.response.status_code in (404, 405, 400):
-                            continue
-                        raise
-                logger.info(
-                    "new_central alerts raw [%s]: keys=%s total=%s",
-                    self._config_hash,
-                    list((payload or {}).keys()),
-                    (payload or {}).get("total") or (payload or {}).get("count") or "n/a",
-                )
-                raw_list = (
-                    (payload or {}).get("alerts")
-                    or (payload or {}).get("items")
-                    or (payload if isinstance(payload, list) else [])
-                )
-                if raw_list:
-                    logger.info("new_central alerts first item keys [%s]: %s", self._config_hash, list(raw_list[0].keys()))
-                for item in raw_list:
-                    name = (
-                        item.get("alert_type") or item.get("alertType")
-                        or item.get("name") or item.get("alert_name")
-                        or item.get("alertName") or item.get("type") or "Alert"
-                    )
-                    site = (
-                        item.get("site_name") or item.get("siteName")
-                        or item.get("site") or item.get("group") or "—"
-                    ).strip() or "—"
-                    severity = str(
-                        item.get("severity") or item.get("severity_id")
-                        or item.get("severityId") or ""
-                    ).lower()
-                    device = (
-                        item.get("device_name") or item.get("deviceName")
-                        or item.get("device") or item.get("hostname") or ""
-                    )
-                    category = (
-                        item.get("category") or item.get("alert_category")
-                        or item.get("alertCategory") or ""
-                    )
+            # Use the cached sites-health data — it embeds a 'reasons' array per site
+            # that contains individual alert/health indicators (performance, device-offline, etc.)
+            for site_item in await self._nc_sites_health():
+                site_name = (
+                    site_item.get("name") or site_item.get("siteName")
+                    or site_item.get("site_name") or "—"
+                ).strip() or "—"
+                reasons = site_item.get("reasons") or []
+                for reason in reasons:
+                    reason_code = str(reason.get("reason") or "").strip()
+                    if not reason_code or reason_code == "EMPTY_SITE":
+                        continue
+                    health = str(reason.get("health") or "").strip()
+                    count = (reason.get("data") or {}).get("count", 0)
+                    alert_name = self._reason_to_alert_name(reason_code)
+                    detail = f"{count} device{'s' if count != 1 else ''}" if count else ""
                     alerts.append({
-                        "name": str(name),
-                        "site": site,
-                        "severity": self._finding_status(severity),
-                        "detail": str(device),
-                        "category": str(category),
-                        "ts": (
-                            item.get("timestamp") or item.get("raised_at")
-                            or item.get("raisedAt") or item.get("createdAt")
-                            or item.get("first_occurrence") or None
-                        ),
+                        "name": alert_name,
+                        "site": site_name,
+                        "severity": self._reason_severity(health),
+                        "detail": detail,
+                        "category": self._reason_category(reason_code),
+                        "ts": None,
+                        "reason_code": reason_code,
                     })
         except Exception as exc:
-            logger.warning("new_central monitoring alerts fetch [%s]: %s", self._config_hash, exc)
-        logger.info("new_central alerts fetched [%s]: %d alerts", self._config_hash, len(alerts))
-        # Short TTL on empty to retry sooner after a 429
+            logger.warning("new_central alerts (sites-health reasons) [%s]: %s", self._config_hash, exc)
+        logger.info("new_central alerts fetched [%s]: %d alerts from sites-health reasons", self._config_hash, len(alerts))
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
         return alerts
