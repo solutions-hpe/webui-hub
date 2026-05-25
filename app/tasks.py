@@ -515,8 +515,6 @@ async def aruba_poller() -> None:
             active_tenant_ids = {tenant.id for tenant in tenants}
             for tenant in tenants:
                 spokes = [spoke for spoke in store.list_spokes(tenant.id) if spoke.status == "approved"]
-                if not spokes:
-                    continue
 
                 client = _get_aruba_client(tenant.id)
                 tenant_config: dict[str, Any] | None = None
@@ -536,7 +534,13 @@ async def aruba_poller() -> None:
                     store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "distributed", "pending", "Aruba config pushed"))
 
                 centralized_spokes = [spoke for spoke in spokes if spoke.processing_mode.resolve("aruba_polling") == "centralized"]
-                if not centralized_spokes:
+                # Poll Central if there are centralized spokes, OR if no spokes are approved yet
+                # but the tenant's default mode is centralized — the hub should show Central data
+                # even before any spokes are provisioned.
+                should_poll_central = bool(centralized_spokes) or (
+                    not spokes and tenant.default_processing_mode.resolve("aruba_polling") == "centralized"
+                )
+                if not should_poll_central:
                     _clear_hub_central_status(tenant.id)
                     continue
                 if not client or not client.is_configured():
