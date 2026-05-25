@@ -1882,6 +1882,80 @@ async def hub_central_browse(
     return result
 
 
+# ── Monitored Items ──────────────────────────────────────────────────────────
+
+class MonitoredItemCreate(BaseModel):
+    type: str  # "site", "alert", "insight", "client"
+    name: str
+    identifier: str  # lookup key: site/alert/insight name, or client MAC
+
+
+@router.get("/{tenant_id}/aggregate/monitored-items")
+async def get_monitored_items(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return all monitored items for a tenant."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    cfg = store.get_tenant_central_sites_config(resolved_tenant_id)
+    items = cfg.get("monitored_items") if isinstance(cfg.get("monitored_items"), list) else []
+    return {"items": items}
+
+
+@router.post("/{tenant_id}/aggregate/monitored-items")
+async def add_monitored_item(
+    tenant_id: str,
+    body: MonitoredItemCreate,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Add an item to the monitored items list (idempotent by type + identifier)."""
+    import uuid as _uuid
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    cfg = store.get_tenant_central_sites_config(resolved_tenant_id)
+    items: list[dict[str, Any]] = list(cfg.get("monitored_items") or [])
+    existing = next(
+        (item for item in items if isinstance(item, dict)
+         and item.get("type") == body.type
+         and item.get("identifier") == body.identifier),
+        None,
+    )
+    if existing:
+        return {"item": existing, "created": False}
+    new_item: dict[str, Any] = {
+        "id": str(_uuid.uuid4()),
+        "type": str(body.type),
+        "name": str(body.name),
+        "identifier": str(body.identifier),
+        "added_at": time.time(),
+        "consecutive_failures": 0,
+        "last_seen": None,
+        "last_notified": None,
+        "status": "ok",
+    }
+    items.append(new_item)
+    cfg["monitored_items"] = items
+    store.set_tenant_central_sites_config(resolved_tenant_id, cfg)
+    return {"item": new_item, "created": True}
+
+
+@router.delete("/{tenant_id}/aggregate/monitored-items/{item_id}")
+async def delete_monitored_item(
+    tenant_id: str,
+    item_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Remove a monitored item by ID."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    cfg = store.get_tenant_central_sites_config(resolved_tenant_id)
+    items = [
+        item for item in (cfg.get("monitored_items") or [])
+        if isinstance(item, dict) and item.get("id") != item_id
+    ]
+    cfg["monitored_items"] = items
+    store.set_tenant_central_sites_config(resolved_tenant_id, cfg)
+    return {"ok": True}
+
+
 @router.post("/aggregate/central")
 async def update_aggregate_central(
     payload: CentralUpdateRequest,

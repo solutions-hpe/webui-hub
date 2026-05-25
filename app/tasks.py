@@ -533,6 +533,34 @@ async def aruba_poller() -> None:
                     store.enqueue_command(_cmd(spoke.id, tenant.id, "aruba_config_update", tenant_config))
                     store.append_audit(_audit(spoke.id, tenant.id, "aruba_poll", "distributed", "pending", "Aruba config pushed"))
 
+                # Check monitored items for distributed spokes using spoke telemetry
+                if distributed_spokes:
+                    try:
+                        dist_site_names: set[str] = set()
+                        dist_alert_names: set[str] = set()
+                        dist_insight_names: set[str] = set()
+                        dist_client_macs: set[str] = set()
+                        for spoke in distributed_spokes:
+                            central_tel = spoke.telemetry.get("central", {}) if isinstance(spoke.telemetry, dict) else {}
+                            for wsite, csite in (central_tel.get("site_mappings") or {}).items():
+                                dist_site_names.add(str(wsite).strip().lower())
+                                dist_site_names.add(str(csite).strip().lower())
+                            for wsite, checks in (central_tel.get("status") or {}).items():
+                                for check_id, info in (checks or {}).items():
+                                    if isinstance(info, dict) and int(info.get("count") or 0) > 0:
+                                        ctype = str(info.get("check_type") or "alert").lower()
+                                        cname = str(info.get("check_name") or check_id).strip().lower()
+                                        if ctype == "insight":
+                                            dist_insight_names.add(cname)
+                                        else:
+                                            dist_alert_names.add(cname)
+                            for client_entry in (central_tel.get("clients") or []):
+                                if isinstance(client_entry, dict) and client_entry.get("mac"):
+                                    dist_client_macs.add(str(client_entry["mac"]).strip().lower())
+                        await _check_monitored_items(tenant.id, "distributed", dist_site_names, dist_alert_names, dist_insight_names, dist_client_macs)
+                    except Exception as exc:
+                        logger.warning("Distributed monitored items check failed for tenant %s: %s", tenant.id, exc)
+
                 centralized_spokes = [spoke for spoke in spokes if spoke.processing_mode.resolve("aruba_polling") == "centralized"]
                 # Poll Central if there are centralized spokes, OR if no spokes are approved yet
                 # but the tenant's default mode is centralized — the hub should show Central data
@@ -750,6 +778,24 @@ async def aruba_poller() -> None:
                             "token_state": {"state": "connected", "detail": ""},
                         }
                     )
+                    # Check monitored items against fresh Central data
+                    try:
+                        site_names_lower = {str(s).strip().lower() for s in hub_site_mappings.values() if s} | {str(s).strip().lower() for s in hub_site_mappings.keys() if s}
+                        alert_names_lower = {str(f.check_name or "").strip().lower() for f in findings if isinstance(f, ArubaFinding) and f.source == "alert"}
+                        insight_names_lower = {str(f.check_name or "").strip().lower() for f in findings if isinstance(f, ArubaFinding) and f.source == "insight"}
+                        # Fetch clients only if there are client-type monitored items
+                        cfg_snap = store.get_tenant_central_sites_config(tenant.id)
+                        needs_clients = any(isinstance(mi, dict) and mi.get("type") == "client" for mi in (cfg_snap.get("monitored_items") or []))
+                        client_macs_lower: set[str] = set()
+                        if needs_clients:
+                            try:
+                                cl_list = await client.list_clients()
+                                client_macs_lower = {str(c.get("mac") or "").strip().lower() for c in cl_list if c.get("mac")}
+                            except Exception:
+                                pass
+                        await _check_monitored_items(tenant.id, "centralized", site_names_lower, alert_names_lower, insight_names_lower, client_macs_lower)
+                    except Exception as exc:
+                        logger.warning("Monitored items check failed for tenant %s: %s", tenant.id, exc)
                 except Exception as exc:
                     _set_hub_central_status(
                         tenant.id,
@@ -863,7 +909,66 @@ async def send_notification(tenant_id: str, spoke_id: str, title: str, message: 
         store.append_audit(_audit(spoke_id, tenant_id, "notification", "centralized", "success", title))
 
 
-async def maintenance_loop() -> None:
+async def _check_monitored_items(
+    tenant_id: str,
+    mode: str,
+    site_names: set[str],
+    alert_names: set[str],
+    insight_names: set[str],
+    client_macs: set[str],
+) -> None:
+    """Check each monitored item against current Central data; fire notification at 5 consecutive failures."""
+    cfg = store.get_tenant_central_sites_config(tenant_id)
+    items: list[dict[str, Any]] = list(cfg.get("monitored_items") or [])
+    if not items:
+        return
+
+    now = time.time()
+    changed = False
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        identifier = str(item.get("identifier") or "").strip().lower()
+
+        if item_type == "site":
+            found = identifier in site_names
+        elif item_type == "alert":
+            found = identifier in alert_names
+        elif item_type == "insight":
+            found = identifier in insight_names
+        elif item_type == "client":
+            found = identifier in client_macs
+        else:
+            continue
+
+        if found:
+            item["consecutive_failures"] = 0
+            item["last_seen"] = now
+            item["status"] = "ok"
+            changed = True
+        else:
+            prev = int(item.get("consecutive_failures") or 0)
+            item["consecutive_failures"] = prev + 1
+            item["status"] = "missing"
+            changed = True
+            if item["consecutive_failures"] == 5:
+                item["last_notified"] = now
+                item_name = item.get("name") or identifier
+                title = f"⚠️ Monitored {item_type.title()} No Longer Reporting"
+                message = (
+                    f'The monitored {item_type} "{item_name}" has stopped reporting in Aruba Central '
+                    f"for 5 consecutive checks."
+                )
+                try:
+                    await send_notification(tenant_id, "", title, message, mode)
+                except Exception as exc:
+                    logger.warning("Monitored item notification failed for tenant %s: %s", tenant_id, exc)
+
+    if changed:
+        cfg["monitored_items"] = items
+        store.set_tenant_central_sites_config(tenant_id, cfg)
     """Purge expired commands and old audit entries every 5 minutes."""
     while True:
         await asyncio.sleep(300)
