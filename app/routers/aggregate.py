@@ -766,7 +766,10 @@ def get_aggregate_clients(
                 "spoke_name": spoke_name,
                 "spoke_hostname": spoke.hostname,
                 "spoke_label": spoke.label,
-                "has_usb": _client_has_usb(row, usb_vmids, usb_hostnames, vmids_by_hostname),
+                # Trust the spoke's own has_usb if True (serialize_client sets it via
+                # _hostname_has_usb which has direct access to proxmox_state). Fall back
+                # to the hub's telemetry-based lookup in case the spoke hasn't set it.
+                "has_usb": bool(row.get("has_usb")) or _client_has_usb(row, usb_vmids, usb_hostnames, vmids_by_hostname),
                 # T3: node-level PCI device info — same value for all clients on this spoke.
                 "has_t3_pci": t3_pci_count > 0,
                 "t3_pci_count": t3_pci_count,
@@ -1921,8 +1924,8 @@ async def get_monitored_items(
     tenant_id: str,
     current_user: User = Depends(auth.get_current_user),
 ):
-    """Return all monitored items for a tenant."""
-    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    """Return all monitored items for a tenant (viewer-accessible for button state)."""
+    resolved_tenant_id = _require_tenant_access(tenant_id, current_user)
     cfg = store.get_tenant_central_sites_config(resolved_tenant_id)
     items = cfg.get("monitored_items") if isinstance(cfg.get("monitored_items"), list) else []
     return {"items": items}
