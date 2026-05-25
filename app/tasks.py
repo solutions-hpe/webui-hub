@@ -554,6 +554,15 @@ async def aruba_poller() -> None:
                                             dist_insight_names.add(cname)
                                         else:
                                             dist_alert_names.add(cname)
+                            # Also pull from real browse data (new_central spokes send this in telemetry)
+                            for ins in (central_tel.get("central_browse_insights") or []):
+                                n = str(ins.get("name") or "").strip().lower()
+                                if n:
+                                    dist_insight_names.add(n)
+                            for alt in (central_tel.get("central_browse_alerts") or []):
+                                n = str(alt.get("name") or "").strip().lower()
+                                if n:
+                                    dist_alert_names.add(n)
                             for client_entry in (central_tel.get("clients") or []):
                                 if isinstance(client_entry, dict) and client_entry.get("mac"):
                                     dist_client_macs.add(str(client_entry["mac"]).strip().lower())
@@ -783,6 +792,22 @@ async def aruba_poller() -> None:
                         site_names_lower = {str(s).strip().lower() for s in hub_site_mappings.values() if s} | {str(s).strip().lower() for s in hub_site_mappings.keys() if s}
                         alert_names_lower = {str(f.check_name or "").strip().lower() for f in findings if isinstance(f, ArubaFinding) and f.source == "alert"}
                         insight_names_lower = {str(f.check_name or "").strip().lower() for f in findings if isinstance(f, ArubaFinding) and f.source == "insight"}
+                        # Also augment from the real browse_all() data (cached — no extra API calls).
+                        # poll_alerts_and_insights() uses sites-health reasons which does NOT include
+                        # the insights/alerts from /network-notifications/v1/* so monitored items
+                        # added via the browse tab would never match without this.
+                        try:
+                            browse = await client.browse_all()
+                            for ins in (browse.get("insights") or []):
+                                n = str(ins.get("name") or "").strip().lower()
+                                if n:
+                                    insight_names_lower.add(n)
+                            for alt in (browse.get("alerts") or []):
+                                n = str(alt.get("name") or "").strip().lower()
+                                if n:
+                                    alert_names_lower.add(n)
+                        except Exception as browse_exc:
+                            logger.debug("browse_all() augment for monitored check failed: %s", browse_exc)
                         # Fetch clients only if there are client-type monitored items
                         cfg_snap = store.get_tenant_central_sites_config(tenant.id)
                         needs_clients = any(isinstance(mi, dict) and mi.get("type") == "client" for mi in (cfg_snap.get("monitored_items") or []))
