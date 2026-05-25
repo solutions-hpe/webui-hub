@@ -102,3 +102,4 @@ Initial stable production release of the Hub platform on `main`. The `2.x` entri
 See git log for history prior to the v2.0 refactor.
 # bump to trigger cs-webui v1.78 pickup
 # bump for cs-webui v1.79
+# bump cs-webui v1.80
