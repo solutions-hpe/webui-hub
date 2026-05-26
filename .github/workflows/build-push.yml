@@ -52,32 +52,25 @@ jobs:
           echo "client-sim installer version: $VER"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=sha,prefix=sha-
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Build and push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BUILD_SHA=${{ github.sha }}
-            BUILD_REF=${{ github.ref_name }}
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+          SHA_TAG="sha-$(echo '${{ github.sha }}' | cut -c1-7)"
+          docker build \
+            --build-arg BUILD_SHA="${{ github.sha }}" \
+            --build-arg BUILD_REF="${{ github.ref_name }}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            -t "${IMAGE}:${TAG}" \
+            -t "${IMAGE}:${SHA_TAG}" \
+            -t "${IMAGE}:latest" \
+            .
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:${SHA_TAG}"
+          docker push "${IMAGE}:latest"
 
       - name: Also push to Azure Container Registry
         run: |
@@ -117,27 +110,26 @@ jobs:
 
     steps:
       - name: Delete old runs (keep last 5)
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const runs = await github.paginate(
-              github.rest.actions.listWorkflowRuns,
-              {
-                owner: context.repo.owner,
-                repo:  context.repo.repo,
-                workflow_id: 'build-push.yml',
-                per_page: 100,
-              }
-            );
-            const completed = runs.filter(r => r.status === 'completed');
-            const toDelete  = completed.slice(5);   // keep 5 most recent
-            for (const run of toDelete) {
-              await github.rest.actions.deleteWorkflowRun({
-                owner:  context.repo.owner,
-                repo:   context.repo.repo,
-                run_id: run.id,
-              });
-              console.log(`Deleted run #${run.run_number} (${run.id})`);
-            }
-            console.log(`Kept ${Math.min(completed.length, 5)}, deleted ${toDelete.length}`);
+        run: |
+          REPO="${{ github.repository }}"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          WORKFLOW="build-push.yml"
+          # Fetch completed runs
+          RUNS=$(curl -s \
+            -H "Authorization: token $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100&status=completed" \
+            | python3 -c "
+import sys, json
+runs = json.load(sys.stdin).get('workflow_runs', [])
+ids = [str(r['id']) for r in runs[5:]]
+print('\n'.join(ids))
+")
+          for RUN_ID in $RUNS; do
+            curl -s -X DELETE \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID"
+            echo "Deleted run $RUN_ID"
+          done
 
