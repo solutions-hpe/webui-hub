@@ -115,6 +115,11 @@ def _require_tenant_admin(tenant_id: str, current_user: User) -> str:
     raise HTTPException(status_code=403, detail="Admin role required")
 
 
+def _require_tenant_access(tenant_id: str, current_user: User) -> str:
+    """Allow any authenticated user with tenant access (viewer or admin)."""
+    auth.require_tenant_access(tenant_id, current_user)
+    return tenant_id
+
 
 def _approved_spokes(tenant_id: str) -> list[Spoke]:
     return [spoke for spoke in store.list_spokes(tenant_id) if spoke.status == "approved"]
