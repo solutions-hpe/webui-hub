@@ -234,11 +234,31 @@ def get_tenant_detail(tenant_id: str, _: User = Depends(auth.require_superadmin)
 
 @router.delete("/superadmin/tenants/{tenant_id}")
 def delete_tenant(tenant_id: str, _: User = Depends(auth.require_superadmin)):
+    """Soft delete a tenant — marks as deleted but preserves data for 30-day recovery period."""
     tenant = store.get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    if tenant.deleted_at:
+        raise HTTPException(status_code=400, detail="Tenant already deleted")
     store.delete_tenant(tenant_id)
-    return {"status": "deleted"}
+    return {"status": "deleted", "message": "Tenant soft-deleted. Recoverable for 30 days."}
+
+
+@router.post("/superadmin/tenants/{tenant_id}/restore")
+def restore_tenant(tenant_id: str, _: User = Depends(auth.require_superadmin)):
+    """Restore a soft-deleted tenant."""
+    restored = store.restore_tenant(tenant_id)
+    if not restored:
+        raise HTTPException(status_code=404, detail="Tenant not found or not deleted")
+    return {"status": "restored", "message": "Tenant restored successfully"}
+
+
+@router.get("/superadmin/deleted-tenants")
+def get_deleted_tenants(_: User = Depends(auth.require_superadmin)):
+    """List soft-deleted tenants (recoverable for 30 days)."""
+    all_tenants = store.list_tenants(include_deleted=True)
+    deleted = [_tenant_response(t) for t in all_tenants if t.deleted_at]
+    return deleted
 
 
 @router.post("/superadmin/tenants/{tenant_id}/aruba")

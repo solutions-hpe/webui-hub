@@ -1003,8 +1003,11 @@ async def maintenance_loop() -> None:
         try:
             purged_cmds = store.purge_expired_commands()
             purged_audit = store.purge_old_audit()
+            purged_tenants = store.purge_old_deleted_tenants(days=30)
             if purged_cmds or purged_audit:
                 logger.info("Maintenance: purged %s expired commands, %s old audit entries", purged_cmds, purged_audit)
+            if purged_tenants:
+                logger.info("Maintenance: purged %s tenant(s) deleted >30 days ago: %s", len(purged_tenants), purged_tenants)
         except Exception as exc:
             logger.warning("Maintenance error: %s", exc)
 

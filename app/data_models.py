@@ -78,6 +78,7 @@ class Tenant(BaseModel):
     onboarding_psks_enc: list[str] = Field(default_factory=list)  # List of encrypted PSKs
     created_at: datetime = Field(default_factory=_now)
     created_by: str = ""
+    deleted_at: Optional[datetime] = None  # Soft delete timestamp — tenant is hidden but recoverable for 30 days
 
 
 class Spoke(BaseModel):

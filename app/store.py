@@ -310,9 +310,13 @@ def set_tenant_central_sites_config(tenant_id: str, config: dict[str, Any]) -> N
         save_tenant(tenant)
 
 
-def list_tenants() -> list[Tenant]:
+def list_tenants(include_deleted: bool = False) -> list[Tenant]:
+    """List all tenants. By default, exclude soft-deleted tenants unless include_deleted=True."""
     with _lock:
-        return _load_tenants()
+        tenants = _load_tenants()
+        if not include_deleted:
+            tenants = [t for t in tenants if t.deleted_at is None]
+        return tenants
 
 
 def save_tenant(tenant: Tenant) -> None:
@@ -324,9 +328,54 @@ def save_tenant(tenant: Tenant) -> None:
 
 
 def delete_tenant(tenant_id: str) -> None:
+    """Soft delete a tenant by setting deleted_at timestamp. Tenant data is preserved for 30 days."""
     with _lock:
-        tenants = [t for t in _load_tenants() if t.id != tenant_id]
+        from datetime import datetime, timezone
+        tenants = _load_tenants()
+        for tenant in tenants:
+            if tenant.id == tenant_id:
+                tenant.deleted_at = datetime.now(timezone.utc)
+                break
         _save_tenants(tenants)
+
+
+def restore_tenant(tenant_id: str) -> bool:
+    """Restore a soft-deleted tenant. Returns True if restored, False if not found or not deleted."""
+    with _lock:
+        tenants = _load_tenants()
+        for tenant in tenants:
+            if tenant.id == tenant_id and tenant.deleted_at is not None:
+                tenant.deleted_at = None
+                _save_tenants(tenants)
+                return True
+        return False
+
+
+def purge_old_deleted_tenants(days: int = 30) -> list[str]:
+    """Permanently delete tenants that were soft-deleted more than 'days' ago. Returns list of purged tenant IDs."""
+    from datetime import datetime, timedelta, timezone
+    with _lock:
+        tenants = _load_tenants()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        purged_ids = []
+        remaining = []
+        
+        for tenant in tenants:
+            if tenant.deleted_at and tenant.deleted_at < cutoff:
+                # Actually purge this tenant and its data
+                purged_ids.append(tenant.id)
+                tenant_dir = _data_dir() / tenant.id
+                if tenant_dir.exists():
+                    import shutil
+                    shutil.rmtree(tenant_dir, ignore_errors=True)
+                logger.info(f"Purged tenant {tenant.id} (deleted {tenant.deleted_at}, >30 days old)")
+            else:
+                remaining.append(tenant)
+        
+        if purged_ids:
+            _save_tenants(remaining)
+        
+        return purged_ids
 
         users = _load_users()
         changed = False
