@@ -139,11 +139,11 @@ def _merge_dns_credentials(existing: dict[str, Any], incoming: dict[str, Any]) -
 
 
 def _serialize_processing_summary(tenant: Tenant) -> dict[str, Any]:
-    islands = []
+    spokes = []
     for spoke in store.list_spokes(tenant.id):
         feature_overrides = {feature: getattr(spoke.processing_mode, feature) for feature in PROCESSING_FEATURES}
         effective_modes = {feature: spoke.processing_mode.resolve(feature) for feature in PROCESSING_FEATURES}
-        islands.append(
+        spokes.append(
             {
                 "spoke_id": spoke.id,
                 "hostname": spoke.hostname,
@@ -155,7 +155,7 @@ def _serialize_processing_summary(tenant: Tenant) -> dict[str, Any]:
     return {
         "tenant_id": tenant.id,
         "default_mode": tenant.default_processing_mode.global_mode,
-        "islands": islands,
+        "spokes": spokes,
     }
 
 

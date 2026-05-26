@@ -407,7 +407,7 @@ def delete_pending_spoke(spoke_id: str) -> None:
 
 
 def _spoke_path(tenant_id: str) -> Path:
-    return _data_dir() / tenant_id / "islands.json"
+    return _data_dir() / tenant_id / "spokes.json"
 
 
 def _load_spokes(tenant_id: str) -> list[Spoke]:
@@ -1292,6 +1292,19 @@ def init_store() -> None:
     base = _data_dir()
     for d in [base, base / "pending"]:
         d.mkdir(parents=True, exist_ok=True)
+
+    # Migrate legacy islands.json → spokes.json for all tenant directories
+    for tenant_dir in base.iterdir():
+        if not tenant_dir.is_dir() or tenant_dir.name in ("pending", "tls"):
+            continue
+        old_spoke_file = tenant_dir / "islands.json"
+        new_spoke_file = tenant_dir / "spokes.json"
+        if old_spoke_file.exists() and not new_spoke_file.exists():
+            try:
+                old_spoke_file.rename(new_spoke_file)
+                logger.info("init_store: migrated %s → %s", old_spoke_file, new_spoke_file)
+            except OSError as exc:
+                logger.error("init_store: could not migrate islands.json → spokes.json: %s", exc)
 
     # Rolling startup backup: copy users.json → users.json.bak (if readable)
     users_path = base / "users.json"
