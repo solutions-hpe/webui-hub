@@ -1055,3 +1055,39 @@ async def check_state_engine() -> None:
         except Exception as exc:
             logger.exception("Check state engine error: %s", exc)
         await asyncio.sleep(60)
+
+
+async def central_browse_poller() -> None:
+    """Refresh the Central browse cache for every tenant every 5 minutes.
+
+    On the first iteration (no sleep) it loads disk cache into memory so the
+    endpoint can serve instantly after a restart.  Subsequent iterations fetch
+    fresh data from Central and persist to disk.
+    """
+    from .routers.aggregate import _refresh_central_browse, _central_browse_cache, _load_browse_disk_cache
+
+    first_run = True
+    while True:
+        try:
+            tenants = store.list_tenants()
+            for tenant in tenants:
+                if first_run:
+                    # Warm in-memory cache from disk — no network call
+                    if tenant.id not in _central_browse_cache:
+                        disk = _load_browse_disk_cache(tenant.id)
+                        if disk:
+                            _central_browse_cache[tenant.id] = disk
+                            logger.info("central_browse_poller: loaded disk cache for tenant %s", tenant.id)
+                else:
+                    try:
+                        await _refresh_central_browse(tenant.id)
+                        logger.debug("central_browse_poller: refreshed tenant %s", tenant.id)
+                    except Exception as exc:
+                        logger.warning("central_browse_poller: refresh failed for %s: %s", tenant.id, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("central_browse_poller error: %s", exc)
+
+        first_run = False
+        await asyncio.sleep(300)
