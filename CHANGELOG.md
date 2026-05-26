@@ -105,3 +105,4 @@ See git log for history prior to the v2.0 refactor.
 # bump cs-webui v1.80
 # cs-webui v1.81
 # cs-webui v1.84
+# cs-webui v1.85 + spoke monitored-items
