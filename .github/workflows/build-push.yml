@@ -100,36 +100,3 @@ jobs:
           VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
           echo "✅ Pushed version ${VERSION}:"
           echo "   ghcr.io/${{ github.repository }}:${{ github.ref_name }}"
-
-  cleanup-old-runs:
-    name: Delete old workflow runs
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-
-    steps:
-      - name: Delete old runs (keep last 5)
-        run: |
-          REPO="${{ github.repository }}"
-          TOKEN="${{ secrets.GITHUB_TOKEN }}"
-          WORKFLOW="build-push.yml"
-          # Fetch completed runs
-          RUNS=$(curl -s \
-            -H "Authorization: token $TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100&status=completed" \
-            | python3 -c "
-import sys, json
-runs = json.load(sys.stdin).get('workflow_runs', [])
-ids = [str(r['id']) for r in runs[5:]]
-print('\n'.join(ids))
-")
-          for RUN_ID in $RUNS; do
-            curl -s -X DELETE \
-              -H "Authorization: token $TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID"
-            echo "Deleted run $RUN_ID"
-          done
-
