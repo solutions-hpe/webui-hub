@@ -47,6 +47,57 @@ echo "  Container      : $CONTAINER_NAME"
 echo "  Image          : $ACR_SERVER/$IMAGE"
 echo ""
 
+# ── Check for unpushed commits ────────────────────────────────────
+echo "▶ Checking for unpushed commits..."
+cd "$SCRIPT_DIR"
+
+# Check main repo
+MAIN_UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l | xargs)
+if [ "$MAIN_UNPUSHED" -gt 0 ]; then
+    echo "  ⚠  Main repo has $MAIN_UNPUSHED unpushed commit(s)"
+    echo "  ▶  Pushing main repo to origin..."
+    git push origin main || {
+        echo "❌ Failed to push main repo"
+        exit 1
+    }
+    echo "  ✓  Main repo pushed"
+fi
+
+# Check frontend submodule
+if [ -d "$SCRIPT_DIR/frontend" ]; then
+    cd "$SCRIPT_DIR/frontend"
+    FRONTEND_UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l | xargs)
+    if [ "$FRONTEND_UNPUSHED" -gt 0 ]; then
+        echo "  ⚠  Frontend submodule has $FRONTEND_UNPUSHED unpushed commit(s)"
+        echo "  ▶  Pushing frontend submodule to origin..."
+        git push origin main || {
+            echo "❌ Failed to push frontend submodule"
+            exit 1
+        }
+        echo "  ✓  Frontend submodule pushed"
+        
+        # Update parent repo's submodule pointer and push
+        cd "$SCRIPT_DIR"
+        if git diff --quiet HEAD -- frontend; then
+            echo "  ℹ  Parent repo submodule pointer already up to date"
+        else
+            echo "  ▶  Updating parent repo submodule pointer..."
+            git add frontend
+            git commit -m "Update frontend submodule pointer
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>" || true
+            git push origin main || {
+                echo "❌ Failed to push parent repo after submodule update"
+                exit 1
+            }
+            echo "  ✓  Parent repo submodule pointer updated and pushed"
+        fi
+    fi
+    cd "$SCRIPT_DIR"
+fi
+
+echo "  ✓  All commits pushed"
+
 # ── Prerequisite check ────────────────────────────────────────────
 if ! command -v az &>/dev/null; then
     echo "❌ Azure CLI (az) not found."
