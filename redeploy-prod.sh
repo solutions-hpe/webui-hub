@@ -124,25 +124,31 @@ else:
 " 2>/dev/null || echo "pending")
     if [ "$STATUS" = "success" ]; then
         echo "  ✓ GitHub Actions build completed"
+        GHA_BUILD_OK=true
         break
     elif [ "$STATUS" = "failure" ] || [ "$STATUS" = "cancelled" ]; then
-        echo "  ⚠ GitHub Actions build status: $STATUS — importing last successful image anyway"
+        echo "  ⚠ GitHub Actions build status: $STATUS — skipping ghcr.io import, using existing ACR image"
+        GHA_BUILD_OK=false
         break
     fi
     echo "  ⏳ Build status: $STATUS (attempt $i/30)..."
     sleep 10
 done
 
-echo "▶ Importing image from ghcr.io into ACR..."
-az acr import \
-    --name "$ACR_NAME" \
-    --source "$GHCR_IMAGE" \
-    --image "$IMAGE" \
-    --username "$GHCR_USER" \
-    --password "$GHCR_TOKEN" \
-    --force \
-    --output none
-echo "  ✓ Image imported: $ACR_SERVER/$IMAGE"
+if [ "${GHA_BUILD_OK:-false}" = "true" ]; then
+    echo "▶ Importing image from ghcr.io into ACR..."
+    az acr import \
+        --name "$ACR_NAME" \
+        --source "$GHCR_IMAGE" \
+        --image "$IMAGE" \
+        --username "$GHCR_USER" \
+        --password "$GHCR_TOKEN" \
+        --force \
+        --output none
+    echo "  ✓ Image imported: $ACR_SERVER/$IMAGE"
+else
+    echo "▶ Using existing ACR image (ghcr.io import skipped due to build failure)"
+fi
 
 # ── Remove existing container (clean slate) ───────────────────────
 EXISTING=$(az container show --name "$CONTAINER_NAME" --resource-group "$RG" \
