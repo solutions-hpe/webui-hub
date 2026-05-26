@@ -1064,6 +1064,34 @@ def get_inbox(
     return _get_spoke_inbox(tenant_id, spoke_id)
 
 
+@router.get("/{tenant_id}/spokes/{spoke_id}/monitored-items")
+def get_spoke_monitored_items(
+    tenant_id: str,
+    spoke_id: str,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+):
+    """Return hub-managed monitored items filtered to this spoke's assigned sites.
+    If the spoke has no assigned sites, returns empty with has_sites=False."""
+    spoke = _auth_spoke(tenant_id, spoke_id, x_api_key)
+    assigned_sites = set(spoke.assigned_sites or [])
+    if not assigned_sites:
+        return {"items": [], "has_sites": False, "assigned_sites": []}
+    cfg = store.get_tenant_central_sites_config(tenant_id)
+    all_items = cfg.get("monitored_items") if isinstance(cfg.get("monitored_items"), list) else []
+    filtered = []
+    for item in all_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "site":
+            # Only include site items whose identifier or name matches an assigned site
+            if item.get("identifier") in assigned_sites or item.get("name") in assigned_sites:
+                filtered.append(item)
+        else:
+            # Alerts, insights, clients are tenant-wide
+            filtered.append(item)
+    return {"items": filtered, "has_sites": True, "assigned_sites": sorted(assigned_sites)}
+
+
 class AckResultPayload(BaseModel):
     success: Optional[bool] = None
     task_type: Optional[str] = None
