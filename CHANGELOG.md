@@ -104,3 +104,4 @@ See git log for history prior to the v2.0 refactor.
 # bump for cs-webui v1.79
 # bump cs-webui v1.80
 # cs-webui v1.81
+# cs-webui v1.84
