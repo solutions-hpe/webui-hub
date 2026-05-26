@@ -44,6 +44,28 @@ fi
 
 echo "[pre-commit] Syntax checks passed ✓"
 
+# ── Submodule push check ──────────────────────────────────────────────────────
+
+# Check if frontend submodule has unpushed changes when staging submodule pointer
+if git diff --cached --name-only | grep -q '^frontend$'; then
+    if [[ -d frontend/.git ]]; then
+        cd frontend
+        # Check if local commits exist that aren't on remote
+        unpushed=$(git log origin/main..HEAD --oneline 2>/dev/null || true)
+        if [[ -n "$unpushed" ]]; then
+            echo "[pre-commit] ✗ ERROR: frontend submodule has unpushed commits:"
+            echo "$unpushed"
+            echo ""
+            echo "GitHub Actions builds cs-webui directly from GitHub, not from the submodule."
+            echo "Push frontend changes first:"
+            echo "  cd frontend && git push origin main"
+            cd ..
+            exit 1
+        fi
+        cd ..
+    fi
+fi
+
 # ── Version bump ──────────────────────────────────────────────────────────────
 
 staged_non_ver=$(git diff --cached --name-only --diff-filter=ACM | grep -v '^VERSION$' || true)
