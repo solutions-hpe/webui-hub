@@ -118,6 +118,7 @@ async def spa_fallback(full_path: str):
         ver = version_file.read_text().strip() if version_file.exists() else "dev"
         html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={ver}"')
         html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
+        html = html.replace('src="/static/js/main.js"', f'src="/static/js/main.js?v={ver}"')
         html = html.replace("'{{WEBUI_MODE}}'", "'hub'")
         return HTMLResponse(content=html)
     except FileNotFoundError:
