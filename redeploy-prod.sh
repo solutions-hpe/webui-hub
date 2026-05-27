@@ -66,8 +66,11 @@ fi
 # Check frontend submodule
 if [ -d "$SCRIPT_DIR/frontend" ]; then
     cd "$SCRIPT_DIR/frontend"
-    # Submodule may be in detached HEAD with no upstream — guard against git exit 128
-    FRONTEND_UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l | xargs || echo 0)
+    # Submodule may be in detached HEAD with no upstream — only check if upstream exists
+    FRONTEND_UNPUSHED=0
+    if git rev-parse @{u} &>/dev/null; then
+        FRONTEND_UNPUSHED=$(git log @{u}.. --oneline | wc -l | xargs)
+    fi
     if [ "$FRONTEND_UNPUSHED" -gt 0 ]; then
         echo "  ⚠  Frontend submodule has $FRONTEND_UNPUSHED unpushed commit(s)"
         echo "  ▶  Pushing frontend submodule to origin..."
