@@ -113,6 +113,7 @@ class CentralSitesConfigPayload(BaseModel):
     site_mappings: dict[str, str] = Field(default_factory=dict)
     monitored_checks: list[dict[str, Any]] = Field(default_factory=list)
     hardware_checks: list[dict[str, Any]] = Field(default_factory=list)
+    excluded_sites: list[str] = Field(default_factory=list)
 
 
 class SimulationConfUpdateRequest(BaseModel):
@@ -528,7 +529,8 @@ def _normalize_central_sites_config(config: dict[str, Any] | None) -> dict[str, 
     site_mappings = raw.get("site_mappings") if isinstance(raw.get("site_mappings"), dict) else {}
     monitored_checks = raw.get("monitored_checks") if isinstance(raw.get("monitored_checks"), list) else []
     hardware_checks = raw.get("hardware_checks") if isinstance(raw.get("hardware_checks"), list) else []
-    return {
+    excluded_sites = raw.get("excluded_sites") if isinstance(raw.get("excluded_sites"), list) else []
+    result: dict[str, Any] = {
         "site_mappings": {
             str(wsite).strip(): str(site_name).strip()
             for wsite, site_name in site_mappings.items()
@@ -536,7 +538,13 @@ def _normalize_central_sites_config(config: dict[str, Any] | None) -> dict[str, 
         },
         "monitored_checks": [check for check in monitored_checks if isinstance(check, dict)],
         "hardware_checks": [check for check in hardware_checks if isinstance(check, dict)],
+        "excluded_sites": [str(s).strip().casefold() for s in excluded_sites if str(s).strip()],
     }
+    # Preserve any extra fields (e.g. monitored_items) stored in the raw config
+    for key, value in raw.items():
+        if key not in result:
+            result[key] = value
+    return result
 
 
 def _aggregate_central_payload(tenant_id: str) -> dict[str, Any]:
@@ -1331,9 +1339,12 @@ def set_tenant_aggregate_central_sites_config(
     current_user: User = Depends(auth.get_current_user),
 ):
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
-    config = _normalize_central_sites_config(payload.model_dump())
-    store.set_tenant_central_sites_config(resolved_tenant_id, config)
-    return config
+    # Merge with existing stored config so unrelated fields (e.g. monitored_items) are preserved
+    existing = store.get_tenant_central_sites_config(resolved_tenant_id) or {}
+    merged = dict(existing)
+    merged.update(_normalize_central_sites_config(payload.model_dump()))
+    store.set_tenant_central_sites_config(resolved_tenant_id, merged)
+    return _normalize_central_sites_config(merged)
 
 
 @router.get("/aggregate/central-status")
@@ -2072,12 +2083,13 @@ async def update_aggregate_central(
             discovered_sites = []
         existing_wsites = {str(name).strip().casefold() for name in central_sites_config.get("site_mappings", {})}
         existing_central = {str(name).strip().casefold() for name in central_sites_config.get("site_mappings", {}).values()}
+        excluded = {str(s).strip().casefold() for s in central_sites_config.get("excluded_sites", []) if s}
         for site in discovered_sites:
             site_name = str((site or {}).get("name") or "").strip()
             if not site_name:
                 continue
             normalized = site_name.casefold()
-            if normalized in existing_wsites or normalized in existing_central:
+            if normalized in existing_wsites or normalized in existing_central or normalized in excluded:
                 continue
             central_sites_config.setdefault("site_mappings", {})[site_name] = site_name
             existing_wsites.add(normalized)
