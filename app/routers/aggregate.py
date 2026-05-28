@@ -364,6 +364,33 @@ def _spoke_usb_lookup(spoke: Spoke) -> tuple[set[str], set[str], dict[str, str]]
 
 
 
+def _spoke_t3_lookup(spoke: Spoke) -> set[str]:
+    proxmox = _telemetry_dict(spoke, "proxmox")
+    proxmox_vms = _telemetry_list(spoke, "proxmox_vms")
+    if not proxmox_vms and isinstance(proxmox.get("vms"), list):
+        proxmox_vms = proxmox.get("vms")
+    t3_pci_devices = proxmox.get("t3_pci_devices") if isinstance(proxmox.get("t3_pci_devices"), list) else []
+    t3_addrs = {
+        _normalize_lookup_value(device.get("id"))
+        for device in t3_pci_devices
+        if isinstance(device, dict)
+    }
+    t3_addrs.discard("")
+    if not t3_addrs:
+        return set()
+
+    t3_vmids: set[str] = set()
+    for vm in proxmox_vms:
+        if not isinstance(vm, dict):
+            continue
+        vmid = str(vm.get("vmid")).strip() if vm.get("vmid") is not None else ""
+        pci_passthrough_addrs = vm.get("pci_passthrough_addrs") if isinstance(vm.get("pci_passthrough_addrs"), list) else []
+        if vmid and any(_normalize_lookup_value(addr) in t3_addrs for addr in pci_passthrough_addrs):
+            t3_vmids.add(vmid)
+    return t3_vmids
+
+
+
 def _client_has_usb(client: dict[str, Any], usb_vmids: set[str], usb_hostnames: set[str], vmids_by_hostname: dict[str, str]) -> bool:
     vmid = str(client.get("vmid") or client.get("proxmox_vmid") or "").strip()
     hostname = _normalize_lookup_value(client.get("hostname"))
@@ -372,6 +399,15 @@ def _client_has_usb(client: dict[str, Any], usb_vmids: set[str], usb_hostnames: 
     if vmid and vmid in usb_vmids:
         return True
     return bool(hostname and hostname in usb_hostnames)
+
+
+
+def _client_has_t3_pci(client: dict[str, Any], t3_vmids: set[str], vmids_by_hostname: dict[str, str]) -> bool:
+    vmid = str(client.get("vmid") or client.get("proxmox_vmid") or "").strip()
+    hostname = _normalize_lookup_value(client.get("hostname"))
+    if not vmid and hostname:
+        vmid = vmids_by_hostname.get(hostname, "")
+    return bool(vmid and vmid in t3_vmids)
 
 
 
@@ -840,6 +876,7 @@ def get_aggregate_clients(
     for spoke in _approved_spokes(resolved_tenant_id):
         spoke_name = spoke.spoke_name or spoke.hostname
         usb_vmids, usb_hostnames, vmids_by_hostname = _spoke_usb_lookup(spoke)
+        t3_vmids = _spoke_t3_lookup(spoke)
         proxmox_tel = _telemetry_dict(spoke, "proxmox")
         t3_pci_devices: list[dict[str, Any]] = []
         if isinstance(proxmox_tel.get("t3_pci_devices"), list):
@@ -857,8 +894,9 @@ def get_aggregate_clients(
                 # _hostname_has_usb which has direct access to proxmox_state). Fall back
                 # to the hub's telemetry-based lookup in case the spoke hasn't set it.
                 "has_usb": bool(row.get("has_usb")) or _client_has_usb(row, usb_vmids, usb_hostnames, vmids_by_hostname),
-                # T3: node-level PCI device info — same value for all clients on this spoke.
-                "has_t3_pci": t3_pci_count > 0,
+                # T3 stays node-scoped for section counts, but client classification must
+                # follow the VM's own PCI passthrough config.
+                "has_t3_pci": _client_has_t3_pci(row, t3_vmids, vmids_by_hostname),
                 "t3_pci_count": t3_pci_count,
                 "t3_pci_devices": t3_pci_devices,
             })
