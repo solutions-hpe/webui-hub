@@ -2030,7 +2030,20 @@ async def update_aggregate_central(
             cfg[key] = existing_cfg[key]
 
     tenant.aruba_cid = cfg.get("customer_id") or tenant.aruba_cid
-    tenant.aruba_config_enc = encrypt_dict(cfg) if any(str(value).strip() for key, value in cfg.items() if key != "api_version") or cfg.get("client_secret") else None
+    # Safeguard: only update the encrypted config if the form actually contains values.
+    # If all fields are empty (e.g. a masked form was submitted without changes), keep
+    # the existing encrypted config rather than wiping it.  Use a dedicated DELETE
+    # endpoint to intentionally clear the config.
+    _has_new_aruba_values = (
+        any(str(value).strip() for key, value in cfg.items() if key != "api_version")
+        or bool(cfg.get("client_secret"))
+    )
+    if _has_new_aruba_values:
+        tenant.aruba_config_enc = encrypt_dict(cfg)
+    elif not tenant.aruba_config_enc:
+        # No existing config and nothing new — store None (first-time empty save)
+        tenant.aruba_config_enc = None
+    # else: keep existing aruba_config_enc unchanged to prevent accidental wipe
     tenant.default_processing_mode.aruba_polling = mode
     store.save_tenant(tenant)
 

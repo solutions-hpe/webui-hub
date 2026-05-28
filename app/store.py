@@ -95,12 +95,34 @@ def _write_json(path: Path, data: Any) -> None:
         raise
 
 
+@contextlib.contextmanager
+def _file_lock(lock_path: Path):
+    """Cross-process exclusive lock via fcntl.flock.
+
+    Combines with the module-level threading.RLock (_lock) so that both
+    intra-process and inter-process (gunicorn multi-worker) concurrent
+    read-modify-write cycles are serialised.  Always acquire _lock first
+    (caller's responsibility), then this context manager for flock.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def _users_path() -> Path:
     return _data_dir() / "users.json"
+
+
+def _users_lock_path() -> Path:
+    return _data_dir() / "users.lock"
 
 
 def _load_users() -> list[User]:
@@ -128,7 +150,8 @@ def load_backup_config() -> BackupConfig:
 
 def save_backup_config(config: BackupConfig) -> None:
     with _lock:
-        _write_json(_BACKUP_CONFIG_FILE, config.model_dump(mode="json"))
+        with _file_lock(_data_dir() / "backup_config.lock"):
+            _write_json(_BACKUP_CONFIG_FILE, config.model_dump(mode="json"))
 
 
 def load_auth_config() -> HubAuthConfig:
@@ -141,7 +164,8 @@ def load_auth_config() -> HubAuthConfig:
 
 def save_auth_config(config: HubAuthConfig) -> None:
     with _lock:
-        _write_json(_AUTH_CONFIG_FILE, config.model_dump(mode="json"))
+        with _file_lock(_data_dir() / "auth_config.lock"):
+            _write_json(_AUTH_CONFIG_FILE, config.model_dump(mode="json"))
 
 
 def get_user(username: str) -> Optional[User]:
@@ -167,16 +191,18 @@ def list_users() -> list[User]:
 
 def save_user(user: User) -> None:
     with _lock:
-        users = _load_users()
-        users = [u for u in users if u.id != user.id]
-        users.append(user)
-        _save_users(users)
+        with _file_lock(_users_lock_path()):
+            users = _load_users()
+            users = [u for u in users if u.id != user.id]
+            users.append(user)
+            _save_users(users)
 
 
 def delete_user(user_id: str) -> None:
     with _lock:
-        users = [u for u in _load_users() if u.id != user_id]
-        _save_users(users)
+        with _file_lock(_users_lock_path()):
+            users = [u for u in _load_users() if u.id != user_id]
+            _save_users(users)
 
 
 def ensure_admin(username: str, hashed_password: str, force_password: bool = False) -> None:
@@ -198,71 +224,76 @@ def ensure_admin(username: str, hashed_password: str, force_password: bool = Fal
          partial data is never mistaken for an empty store.
     """
     with _lock:
-        users_path = _users_path()
+        with _file_lock(_users_lock_path()):
+            users_path = _users_path()
 
-        # ── Guard 1: check for file existence, treating IO errors as "exists" ──
-        file_exists: bool = False
-        try:
-            file_exists = users_path.exists()
-        except OSError:
-            # Can't stat the file — assume it exists to avoid any bootstrap
-            logger.warning(
-                "ensure_admin: could not stat %s (mount error?) — "
-                "skipping bootstrap to prevent data loss.",
-                users_path,
-            )
-            return
-
-        # ── Guard 2: check for ANY other data files as evidence of prior use ──
-        data_dir = _data_dir()
-        prior_data_exists = False
-        try:
-            # tenants.json, global_config.json, oui_pool.json, or tenant dirs
-            sentinel_paths = [
-                data_dir / "tenants.json",
-                data_dir / "global_config.json",
-                data_dir / "oui_pool.json",
-            ]
-            prior_data_exists = any(p.exists() for p in sentinel_paths) or any(
-                p.is_dir() for p in data_dir.iterdir()
-                if p.name not in {"tls", "pending", "tmp"}
-            )
-        except OSError:
-            prior_data_exists = True  # if we can't check, assume prior data
-
-        users = _load_users()
-
-        if not users:
-            if file_exists:
+            # ── Guard 1: check for file existence, treating IO errors as "exists" ──
+            file_exists: bool = False
+            try:
+                file_exists = users_path.exists()
+            except OSError:
+                # Can't stat the file — assume it exists to avoid any bootstrap
                 logger.warning(
-                    "ensure_admin: %s exists but loaded 0 users — "
-                    "possible mount/read error; skipping bootstrap to prevent data loss.",
+                    "ensure_admin: could not stat %s (mount error?) — "
+                    "skipping bootstrap to prevent data loss.",
                     users_path,
                 )
                 return
-            if prior_data_exists:
-                logger.warning(
-                    "ensure_admin: users.json absent but other data files exist — "
-                    "this does not look like a fresh install; skipping bootstrap "
-                    "to prevent data loss. Restore users.json from backup if needed.",
-                )
-                return
-            # Genuine first run: no users, no prior data
-            admin = User(username=username, hashed_password=hashed_password, is_superadmin=True)
-            _save_users([admin])
-            logger.info("ensure_admin: bootstrapped superadmin '%s' (first run).", username)
-            return
 
-        if force_password:
-            for user in users:
-                if user.username == username and user.is_superadmin:
-                    user.hashed_password = hashed_password
-                    _save_users(users)
-                    break
+            # ── Guard 2: check for ANY other data files as evidence of prior use ──
+            data_dir = _data_dir()
+            prior_data_exists = False
+            try:
+                # tenants.json, global_config.json, oui_pool.json, or tenant dirs
+                sentinel_paths = [
+                    data_dir / "tenants.json",
+                    data_dir / "global_config.json",
+                    data_dir / "oui_pool.json",
+                ]
+                prior_data_exists = any(p.exists() for p in sentinel_paths) or any(
+                    p.is_dir() for p in data_dir.iterdir()
+                    if p.name not in {"tls", "pending", "tmp"}
+                )
+            except OSError:
+                prior_data_exists = True  # if we can't check, assume prior data
+
+            users = _load_users()
+
+            if not users:
+                if file_exists:
+                    logger.warning(
+                        "ensure_admin: %s exists but loaded 0 users — "
+                        "possible mount/read error; skipping bootstrap to prevent data loss.",
+                        users_path,
+                    )
+                    return
+                if prior_data_exists:
+                    logger.warning(
+                        "ensure_admin: users.json absent but other data files exist — "
+                        "this does not look like a fresh install; skipping bootstrap "
+                        "to prevent data loss. Restore users.json from backup if needed.",
+                    )
+                    return
+                # Genuine first run: no users, no prior data
+                admin = User(username=username, hashed_password=hashed_password, is_superadmin=True)
+                _save_users([admin])
+                logger.info("ensure_admin: bootstrapped superadmin '%s' (first run).", username)
+                return
+
+            if force_password:
+                for user in users:
+                    if user.username == username and user.is_superadmin:
+                        user.hashed_password = hashed_password
+                        _save_users(users)
+                        break
 
 
 def _tenants_path() -> Path:
     return _data_dir() / "tenants.json"
+
+
+def _tenants_lock_path() -> Path:
+    return _data_dir() / "tenants.lock"
 
 
 def _load_tenants() -> list[Tenant]:
@@ -321,61 +352,64 @@ def list_tenants(include_deleted: bool = False) -> list[Tenant]:
 
 def save_tenant(tenant: Tenant) -> None:
     with _lock:
-        tenants = _load_tenants()
-        tenants = [t for t in tenants if t.id != tenant.id]
-        tenants.append(tenant)
-        _save_tenants(tenants)
+        with _file_lock(_tenants_lock_path()):
+            tenants = _load_tenants()
+            tenants = [t for t in tenants if t.id != tenant.id]
+            tenants.append(tenant)
+            _save_tenants(tenants)
 
 
 def delete_tenant(tenant_id: str) -> None:
     """Soft delete a tenant by setting deleted_at timestamp. Tenant data is preserved for 30 days."""
     with _lock:
-        from datetime import datetime, timezone
-        tenants = _load_tenants()
-        for tenant in tenants:
-            if tenant.id == tenant_id:
-                tenant.deleted_at = datetime.now(timezone.utc)
-                break
-        _save_tenants(tenants)
+        with _file_lock(_tenants_lock_path()):
+            from datetime import datetime, timezone
+            tenants = _load_tenants()
+            for tenant in tenants:
+                if tenant.id == tenant_id:
+                    tenant.deleted_at = datetime.now(timezone.utc)
+                    break
+            _save_tenants(tenants)
 
 
 def restore_tenant(tenant_id: str) -> bool:
     """Restore a soft-deleted tenant. Returns True if restored, False if not found or not deleted."""
     with _lock:
-        tenants = _load_tenants()
-        for tenant in tenants:
-            if tenant.id == tenant_id and tenant.deleted_at is not None:
-                tenant.deleted_at = None
-                _save_tenants(tenants)
-                return True
-        return False
+        with _file_lock(_tenants_lock_path()):
+            tenants = _load_tenants()
+            for tenant in tenants:
+                if tenant.id == tenant_id and tenant.deleted_at is not None:
+                    tenant.deleted_at = None
+                    _save_tenants(tenants)
+                    return True
+            return False
 
 
 def purge_old_deleted_tenants(days: int = 30) -> list[str]:
     """Permanently delete tenants that were soft-deleted more than 'days' ago. Returns list of purged tenant IDs."""
     from datetime import datetime, timedelta, timezone
     with _lock:
-        tenants = _load_tenants()
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        purged_ids = []
-        remaining = []
-        
-        for tenant in tenants:
-            if tenant.deleted_at and tenant.deleted_at < cutoff:
-                # Actually purge this tenant and its data
-                purged_ids.append(tenant.id)
-                tenant_dir = _data_dir() / tenant.id
-                if tenant_dir.exists():
-                    import shutil
-                    shutil.rmtree(tenant_dir, ignore_errors=True)
-                logger.info(f"Purged tenant {tenant.id} (deleted {tenant.deleted_at}, >30 days old)")
-            else:
-                remaining.append(tenant)
-        
-        if purged_ids:
-            _save_tenants(remaining)
-        
-        return purged_ids
+        with _file_lock(_tenants_lock_path()):
+            tenants = _load_tenants()
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            purged_ids = []
+            remaining = []
+
+            for tenant in tenants:
+                if tenant.deleted_at and tenant.deleted_at < cutoff:
+                    purged_ids.append(tenant.id)
+                    tenant_dir = _data_dir() / tenant.id
+                    if tenant_dir.exists():
+                        import shutil
+                        shutil.rmtree(tenant_dir, ignore_errors=True)
+                    logger.info(f"Purged tenant {tenant.id} (deleted {tenant.deleted_at}, >30 days old)")
+                else:
+                    remaining.append(tenant)
+
+            if purged_ids:
+                _save_tenants(remaining)
+
+            return purged_ids
 
         users = _load_users()
         changed = False
@@ -457,6 +491,10 @@ def delete_pending_spoke(spoke_id: str) -> None:
 
 def _spoke_path(tenant_id: str) -> Path:
     return _data_dir() / tenant_id / "spokes.json"
+
+
+def _spokes_lock_path(tenant_id: str) -> Path:
+    return _data_dir() / tenant_id / "spokes.lock"
 
 
 def _load_spokes(tenant_id: str) -> list[Spoke]:
@@ -585,10 +623,11 @@ def list_spokes(tenant_id: str) -> list[Spoke]:
 
 def save_spoke(spoke: Spoke) -> None:
     with _lock:
-        spokes = _load_spokes(spoke.tenant_id)
-        spokes = [i for i in spokes if i.id != spoke.id]
-        spokes.append(spoke)
-        _save_spokes(spoke.tenant_id, spokes)
+        with _file_lock(_spokes_lock_path(spoke.tenant_id)):
+            spokes = _load_spokes(spoke.tenant_id)
+            spokes = [i for i in spokes if i.id != spoke.id]
+            spokes.append(spoke)
+            _save_spokes(spoke.tenant_id, spokes)
 
 
 def mark_spoke_config_applied(tenant_id: str, spoke_id: str, version: int) -> None:

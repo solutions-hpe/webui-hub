@@ -394,7 +394,7 @@ def update_github_settings(
     elif existing.get("github_token"):
         cfg["github_token"] = existing["github_token"]
 
-    tenant.github_config_enc = encrypt_dict(cfg) if any(str(value).strip() for value in cfg.values()) else None
+    tenant.github_config_enc = encrypt_dict(cfg) if any(str(value).strip() for value in cfg.values()) else tenant.github_config_enc
     store.save_tenant(tenant)
     pushed_count = _push_config_updates_to_approved_spokes(tenant_id)
     return {**_serialize_github_config(tenant), "pushed_to_spokes": pushed_count}
