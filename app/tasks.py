@@ -1061,18 +1061,24 @@ async def check_state_engine() -> None:
 
 
 async def central_browse_poller() -> None:
-    """Refresh the Central browse cache for every tenant every 5 minutes.
+    """Refresh the Central browse cache for every tenant at the per-tenant configured interval.
 
     On the first iteration (no sleep) it loads disk cache into memory so the
     endpoint can serve instantly after a restart.  Subsequent iterations fetch
     fresh data from Central and persist to disk.
+
+    The poll interval is configurable per tenant (central_browse_interval_minutes,
+    default 5).  The poller sleeps for 1 minute between iterations and only
+    refreshes tenants whose cache is older than their configured interval.
     """
-    from .routers.aggregate import _refresh_central_browse, _central_browse_cache, _load_browse_disk_cache
+    from .routers.aggregate import _refresh_central_browse, _central_browse_cache, _central_browse_cache_ts, _load_browse_disk_cache
+    import time as _time
 
     first_run = True
     while True:
         try:
             tenants = store.list_tenants()
+            now = _time.time()
             for tenant in tenants:
                 if first_run:
                     # Warm in-memory cache from disk — no network call
@@ -1080,17 +1086,21 @@ async def central_browse_poller() -> None:
                         disk = _load_browse_disk_cache(tenant.id)
                         if disk:
                             _central_browse_cache[tenant.id] = disk
+                            _central_browse_cache_ts[tenant.id] = disk.get("cached_at", 0)
                             logger.info("central_browse_poller: loaded disk cache for tenant %s", tenant.id)
                 else:
-                    try:
-                        await _refresh_central_browse(tenant.id)
-                        logger.debug("central_browse_poller: refreshed tenant %s", tenant.id)
-                    except Exception as exc:
-                        logger.warning("central_browse_poller: refresh failed for %s: %s", tenant.id, exc)
+                    interval_secs = max(60, (tenant.central_browse_interval_minutes or 5) * 60)
+                    last_ts = _central_browse_cache_ts.get(tenant.id, 0)
+                    if now - last_ts >= interval_secs:
+                        try:
+                            await _refresh_central_browse(tenant.id)
+                            logger.debug("central_browse_poller: refreshed tenant %s (interval=%dm)", tenant.id, tenant.central_browse_interval_minutes)
+                        except Exception as exc:
+                            logger.warning("central_browse_poller: refresh failed for %s: %s", tenant.id, exc)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("central_browse_poller error: %s", exc)
 
         first_run = False
-        await asyncio.sleep(300)
+        await asyncio.sleep(60)  # Check every minute; actual refresh depends on per-tenant interval

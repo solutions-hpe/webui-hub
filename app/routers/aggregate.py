@@ -106,6 +106,7 @@ class CentralUpdateRequest(BaseModel):
     tenant_id: str = ""
     mode: str = "distributed"
     hub_central_config: CentralConfigPayload = Field(default_factory=CentralConfigPayload)
+    central_browse_interval_minutes: int = 5
 
 
 class CentralSitesConfigPayload(BaseModel):
@@ -374,11 +375,11 @@ def _build_checks_summary(spokes: list[Spoke]) -> dict[str, int]:
 
 def _serialize_hub_central_config(tenant: Tenant) -> dict[str, Any]:
     if not tenant.aruba_config_enc:
-        return {"configured": False, "api_version": "classic"}
+        return {"configured": False, "api_version": "classic", "central_browse_interval_minutes": tenant.central_browse_interval_minutes}
     try:
         cfg = decrypt_dict(tenant.aruba_config_enc)
     except Exception:
-        return {"configured": True, "error": "unreadable", "api_version": "classic"}
+        return {"configured": True, "error": "unreadable", "api_version": "classic", "central_browse_interval_minutes": tenant.central_browse_interval_minutes}
     return {
         "configured": True,
         "cluster_url": cfg.get("cluster_url", ""),
@@ -390,6 +391,7 @@ def _serialize_hub_central_config(tenant: Tenant) -> dict[str, Any]:
         "access_token_configured": bool(cfg.get("access_token")),
         "refresh_token_configured": bool(cfg.get("refresh_token")),
         "webhook_registered": bool(cfg.get("webhook_id")),
+        "central_browse_interval_minutes": tenant.central_browse_interval_minutes,
     }
 
 
@@ -2030,6 +2032,7 @@ async def update_aggregate_central(
             cfg[key] = existing_cfg[key]
 
     tenant.aruba_cid = cfg.get("customer_id") or tenant.aruba_cid
+    tenant.central_browse_interval_minutes = max(1, min(60, payload.central_browse_interval_minutes or 5))
     # Safeguard: only update the encrypted config if the form actually contains values.
     # If all fields are empty (e.g. a masked form was submitted without changes), keep
     # the existing encrypted config rather than wiping it.  Use a dedicated DELETE

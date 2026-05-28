@@ -31,6 +31,7 @@ class ArubaSettingsRequest(BaseModel):
     customer_id: str = ""
     workspace_id: str = ""
     api_version: str = "classic"
+    central_browse_interval_minutes: int = 5
 
 
 class NotificationSettingsRequest(BaseModel):
@@ -178,11 +179,11 @@ def _normalize_notification_config(payload: NotificationSettingsRequest) -> dict
 
 def _serialize_aruba_config(tenant: Tenant) -> dict[str, Any]:
     if not tenant.aruba_config_enc:
-        return {"configured": False}
+        return {"configured": False, "central_browse_interval_minutes": tenant.central_browse_interval_minutes}
     try:
         cfg = decrypt_dict(tenant.aruba_config_enc)
     except Exception:
-        return {"configured": True, "error": "unreadable"}
+        return {"configured": True, "error": "unreadable", "central_browse_interval_minutes": tenant.central_browse_interval_minutes}
     return {
         "configured": True,
         "cluster_url": cfg.get("cluster_url", ""),
@@ -194,6 +195,7 @@ def _serialize_aruba_config(tenant: Tenant) -> dict[str, Any]:
         "access_token_configured": bool(cfg.get("access_token")),
         "refresh_token_configured": bool(cfg.get("refresh_token")),
         "webhook_registered": bool(cfg.get("webhook_id")),
+        "central_browse_interval_minutes": tenant.central_browse_interval_minutes,
     }
 
 
@@ -344,12 +346,13 @@ def update_aruba_settings(
             existing_cfg = decrypt_dict(tenant.aruba_config_enc)
         except Exception:
             existing_cfg = {}
-    cfg = payload.model_dump()
+    cfg = payload.model_dump(exclude={"central_browse_interval_minutes"})
     for key in ("webhook_id", "webhook_api_key"):
         if existing_cfg.get(key):
             cfg[key] = existing_cfg[key]
     tenant.aruba_config_enc = encrypt_dict(cfg)
     tenant.aruba_cid = payload.customer_id or tenant.aruba_cid
+    tenant.central_browse_interval_minutes = max(1, min(60, payload.central_browse_interval_minutes))
     store.save_tenant(tenant)
     _push_config_updates_to_approved_spokes(tenant_id)
     return _serialize_aruba_config(tenant)
