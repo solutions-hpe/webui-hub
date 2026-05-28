@@ -527,6 +527,24 @@ def get_spoke_by_api_key(tenant_id: str, api_key: str) -> Optional[Spoke]:
     return None
 
 
+def get_approved_spoke_by_api_key(api_key: str, tenant_id: str = "") -> Optional[tuple[str, Spoke]]:
+    """Return (tenant_id, spoke) for an approved spoke matching the plaintext API key."""
+    if not api_key:
+        return None
+    with _lock:
+        tenants = [t for t in _load_tenants() if not tenant_id or t.id == tenant_id]
+        for tenant in tenants:
+            for spoke in _load_spokes(tenant.id):
+                if spoke.status != "approved" or not spoke.api_key_enc:
+                    continue
+                try:
+                    if decrypt_str(spoke.api_key_enc) == api_key:
+                        return tenant.id, spoke
+                except Exception:
+                    logger.warning("Failed to decrypt API key for spoke %s", spoke.id)
+    return None
+
+
 def get_approved_spoke_by_hostname(hostname: str) -> Optional[tuple[str, Spoke]]:
     """Return (tenant_id, spoke) for the first approved spoke matching hostname across all tenants."""
     with _lock:

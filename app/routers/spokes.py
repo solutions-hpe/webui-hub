@@ -418,6 +418,8 @@ async def register_spoke(payload: RegisterPayload, request: Request):
     approved = store.get_approved_spoke_by_id(requested_spoke_id) if requested_spoke_id else None
     if not approved:
         approved = store.get_approved_spoke_by_hostname(payload.hostname)
+    if not approved and payload.api_key:
+        approved = store.get_approved_spoke_by_api_key(payload.api_key, tenant_hint)
     if approved:
         tenant_id, spoke = approved
         if requested_spoke_id and spoke.id != requested_spoke_id:
