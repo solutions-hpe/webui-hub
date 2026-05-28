@@ -144,8 +144,21 @@ KEY_FILE_EXISTS=$(az storage file exists \
     --account-key "$STORAGE_KEY" \
     --query 'exists' -o tsv 2>/dev/null || echo "false")
 if [ "$KEY_FILE_EXISTS" != "true" ]; then
-    echo "  hub.key not found — generating and uploading new key..."
-    python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /tmp/hub.key
+    echo "  hub.key not found — seeding from WEBUI_SECRET_KEY..."
+    # Write the EXISTING key so already-encrypted data stays readable.
+    # Only generate a brand-new key if WEBUI_SECRET_KEY is somehow empty.
+    if [ -n "${WEBUI_SECRET_KEY:-}" ]; then
+        printf '%s' "$WEBUI_SECRET_KEY" > /tmp/hub.key
+    else
+        python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" > /tmp/hub.key
+        echo "  ⚠  WEBUI_SECRET_KEY was empty — generated a new key (existing encrypted data will be unreadable)"
+    fi
+    az storage file delete \
+        --share-name "$FILE_SHARE" \
+        --path "hub.key" \
+        --account-name "$STORAGE_ACCOUNT" \
+        --account-key "$STORAGE_KEY" \
+        --output none 2>/dev/null || true
     az storage file upload \
         --share-name "$FILE_SHARE" \
         --source /tmp/hub.key \
@@ -154,7 +167,7 @@ if [ "$KEY_FILE_EXISTS" != "true" ]; then
         --account-key "$STORAGE_KEY" \
         --output none
     rm -f /tmp/hub.key
-    echo "  ✓ hub.key generated and uploaded to Azure Files"
+    echo "  ✓ hub.key uploaded to Azure Files"
 else
     echo "  ✓ hub.key already exists on Azure Files — not overwriting"
 fi
