@@ -920,6 +920,7 @@ class ArubaClient:
 
             # Build clients_by_site: {siteName: {total, wired, wireless}}
             clients_by_site: dict[str, dict[str, Any]] = {}
+            normalized_clients: list[dict[str, Any]] = []
             for cli in all_clients:
                 sn = (cli.get("siteName") or cli.get("site_name") or "—").strip() or "—"
                 entry = clients_by_site.setdefault(sn, {"total": 0, "wired": 0, "wireless": 0})
@@ -929,15 +930,23 @@ class ArubaClient:
                     entry["wired"] += 1
                 elif conn_type == "wireless":
                     entry["wireless"] += 1
-
-            # Legacy clients list (total count per site for compatibility)
-            clients = [{"site": sn, **counts} for sn, counts in clients_by_site.items()]
+                normalized_clients.append({
+                    "mac": cli.get("macAddress") or cli.get("mac") or "—",
+                    "ip": cli.get("ipv4") or cli.get("ip") or "—",
+                    "hostname": cli.get("name") or cli.get("hostname") or "—",
+                    "site": sn,
+                    "ap": cli.get("associatedDevice") or cli.get("ap_name") or "—",
+                    "ssid": cli.get("ssid") or "—",
+                    "status": cli.get("status") or "—",
+                    "os": cli.get("os_type") or "—",
+                    "vlan": str(cli.get("vlan") or "—"),
+                })
 
             return {
                 "sites": sites,
                 "alerts": list(nc_alerts),
                 "insights": list(nc_insights),
-                "clients": clients,
+                "clients": normalized_clients,
                 "devices_by_site": devices_by_site,
                 "clients_by_site": clients_by_site,
             }
