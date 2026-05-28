@@ -26,6 +26,16 @@ _logger = logging.getLogger(__name__)
 _KEY_FILE_PATH = Path(os.environ.get("DATA_DIR", "/data")) / "hub.key"
 
 
+def _persist_key_to_file(path: Path, key: str) -> None:
+    """Write key to hub.key so future restarts use the same key regardless of env var."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(key)
+        _logger.info("WEBUI_SECRET_KEY persisted to key file: %s", path)
+    except OSError as exc:
+        _logger.warning("Could not persist key to %s: %s", path, exc)
+
+
 def _load_key_from_file(path: Path) -> str | None:
     """Return the trimmed key string from the key file, or None if absent/unreadable."""
     try:
@@ -47,12 +57,17 @@ def _get_fernet() -> Fernet:
         if not key:
             settings = get_settings()
             key = settings.webui_secret_key.strip()
+            if key:
+                # Persist the env-var key to hub.key so future restarts use it
+                # even if WEBUI_SECRET_KEY is later changed or rotated.
+                _persist_key_to_file(_KEY_FILE_PATH, key)
         if not key:
             key = Fernet.generate_key().decode()
             _logger.warning(
                 "WEBUI_SECRET_KEY not set in dev — generated ephemeral key. "
                 "Secrets will not survive restart. Set WEBUI_SECRET_KEY in .env"
             )
+            _persist_key_to_file(_KEY_FILE_PATH, key)
         try:
             _fernet = Fernet(key.encode())
         except Exception as exc:

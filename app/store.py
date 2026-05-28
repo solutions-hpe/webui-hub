@@ -298,7 +298,13 @@ def _tenants_lock_path() -> Path:
 
 def _load_tenants() -> list[Tenant]:
     raw = _read_json(_tenants_path()) or []
-    return [Tenant(**t) for t in raw]
+    tenants: list[Tenant] = []
+    for t in raw:
+        try:
+            tenants.append(Tenant(**t))
+        except Exception as exc:
+            logger.error("_load_tenants: skipping bad record id=%s: %s", t.get("id", "?"), exc)
+    return tenants
 
 
 def _save_tenants(tenants: list[Tenant]) -> None:
@@ -1421,6 +1427,22 @@ def init_store() -> None:
             logger.info("init_store: backed up %s → %s", users_path, backup_path)
     except OSError as exc:
         logger.warning("init_store: could not back up users.json: %s", exc)
+
+    # Rolling startup backup: copy tenants.json → tenants.json.bak (if readable)
+    tenants_path = base / "tenants.json"
+    tenants_bak = base / "tenants.json.bak"
+    try:
+        if tenants_path.exists() and tenants_path.stat().st_size > 2:
+            shutil.copy2(str(tenants_path), str(tenants_bak))
+            logger.info("init_store: backed up %s → %s", tenants_path, tenants_bak)
+        elif not tenants_path.exists() and tenants_bak.exists() and tenants_bak.stat().st_size > 2:
+            # tenants.json disappeared but backup exists — auto-restore
+            shutil.copy2(str(tenants_bak), str(tenants_path))
+            logger.warning(
+                "init_store: tenants.json missing — restored from backup %s", tenants_bak
+            )
+    except OSError as exc:
+        logger.warning("init_store: could not back up/restore tenants.json: %s", exc)
 
 
 # ── T3 MAC Profile store ──────────────────────────────────────────────────────
