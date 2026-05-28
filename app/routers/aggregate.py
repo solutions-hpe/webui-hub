@@ -1882,7 +1882,13 @@ async def hub_central_browse(
 
     cached = _central_browse_cache.get(resolved_tid)
 
-    if force or _has_legacy_client_summary_rows(cached):
+    # Also refresh when clients is empty but clients_by_site has data — stale disk cache from old format
+    def _needs_client_refresh(d: dict | None) -> bool:
+        if not isinstance(d, dict):
+            return False
+        return not d.get("clients") and bool(d.get("clients_by_site"))
+
+    if force or _has_legacy_client_summary_rows(cached) or _needs_client_refresh(cached):
         await _refresh_central_browse(resolved_tid)
         cached = _central_browse_cache.get(resolved_tid)
 
