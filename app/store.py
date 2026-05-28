@@ -80,14 +80,25 @@ def _read_json(path: Path) -> Any:
 
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Use a unique per-process temp file so concurrent gunicorn workers don't
-    # race on the same .tmp path. os.replace() is atomic on the same filesystem.
+    # Serialise first so any encoding errors surface before we touch disk.
+    content = json.dumps(data, indent=2, default=str)
+    # Try atomic write via temp-file + rename (safe on local/POSIX filesystems).
+    # Azure Files (SMB) rejects rename-over-a-file that another worker has open;
+    # in that case fall back to a direct overwrite — the caller already holds
+    # _file_lock (flock), so concurrent writes are serialised.
     fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=path.stem + ".")
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2, default=str)
-        tmp.replace(path)
+            f.write(content)
+        try:
+            tmp.replace(path)
+        except OSError:
+            # SMB rename failed — clean up temp and write directly.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            with open(path, "w") as f:
+                f.write(content)
     except OSError as exc:
         logger.error("Failed to write %s: %s", path, exc)
         with contextlib.suppress(OSError):
