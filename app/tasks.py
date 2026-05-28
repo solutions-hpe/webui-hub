@@ -549,6 +549,8 @@ async def aruba_poller() -> None:
                         dist_alert_names: set[str] = set()
                         dist_insight_names: set[str] = set()
                         dist_client_macs: set[str] = set()
+                        dist_alert_ts: dict[str, str] = {}
+                        dist_insight_ts: dict[str, str] = {}
                         for spoke in distributed_spokes:
                             central_tel = spoke.telemetry.get("central", {}) if isinstance(spoke.telemetry, dict) else {}
                             for wsite, csite in (central_tel.get("site_mappings") or {}).items():
@@ -568,14 +570,18 @@ async def aruba_poller() -> None:
                                 n = str(ins.get("name") or "").strip().lower()
                                 if n:
                                     dist_insight_names.add(n)
+                                    if ins.get("ts") and n not in dist_insight_ts:
+                                        dist_insight_ts[n] = str(ins["ts"])
                             for alt in (central_tel.get("central_browse_alerts") or []):
                                 n = str(alt.get("name") or "").strip().lower()
                                 if n:
                                     dist_alert_names.add(n)
+                                    if alt.get("ts") and n not in dist_alert_ts:
+                                        dist_alert_ts[n] = str(alt["ts"])
                             for client_entry in (central_tel.get("clients") or []):
                                 if isinstance(client_entry, dict) and client_entry.get("mac"):
                                     dist_client_macs.add(str(client_entry["mac"]).strip().lower())
-                        await _check_monitored_items(tenant.id, "distributed", dist_site_names, dist_alert_names, dist_insight_names, dist_client_macs)
+                        await _check_monitored_items(tenant.id, "distributed", dist_site_names, dist_alert_names, dist_insight_names, dist_client_macs, dist_alert_ts, dist_insight_ts)
                     except Exception as exc:
                         logger.warning("Distributed monitored items check failed for tenant %s: %s", tenant.id, exc)
 
@@ -807,15 +813,23 @@ async def aruba_poller() -> None:
                         # added via the browse tab would never match without this.
                         try:
                             browse = await client.browse_all()
+                            alert_ts: dict[str, str] = {}
+                            insight_ts: dict[str, str] = {}
                             for ins in (browse.get("insights") or []):
                                 n = str(ins.get("name") or "").strip().lower()
                                 if n:
                                     insight_names_lower.add(n)
+                                    if ins.get("ts"):
+                                        insight_ts[n] = str(ins["ts"])
                             for alt in (browse.get("alerts") or []):
                                 n = str(alt.get("name") or "").strip().lower()
                                 if n:
                                     alert_names_lower.add(n)
+                                    if alt.get("ts"):
+                                        alert_ts[n] = str(alt["ts"])
                         except Exception as browse_exc:
+                            alert_ts = {}
+                            insight_ts = {}
                             logger.debug("browse_all() augment for monitored check failed: %s", browse_exc)
                         # Fetch clients only if there are client-type monitored items
                         cfg_snap = store.get_tenant_central_sites_config(tenant.id)
@@ -827,7 +841,7 @@ async def aruba_poller() -> None:
                                 client_macs_lower = {str(c.get("mac") or "").strip().lower() for c in cl_list if c.get("mac")}
                             except Exception:
                                 pass
-                        await _check_monitored_items(tenant.id, "centralized", site_names_lower, alert_names_lower, insight_names_lower, client_macs_lower)
+                        await _check_monitored_items(tenant.id, "centralized", site_names_lower, alert_names_lower, insight_names_lower, client_macs_lower, alert_ts, insight_ts)
                     except Exception as exc:
                         logger.warning("Monitored items check failed for tenant %s: %s", tenant.id, exc)
                 except Exception as exc:
@@ -950,14 +964,21 @@ async def _check_monitored_items(
     alert_names: set[str],
     insight_names: set[str],
     client_macs: set[str],
+    alert_ts: dict[str, str] | None = None,
+    insight_ts: dict[str, str] | None = None,
 ) -> None:
-    """Check each monitored item against current Central data; fire notification at 5 consecutive failures."""
+    """Check each monitored item against current Central data; fire notification at 30 minutes absent."""
     cfg = store.get_tenant_central_sites_config(tenant_id)
     items: list[dict[str, Any]] = list(cfg.get("monitored_items") or [])
     if not items:
         return
 
     now = time.time()
+    WARN_SECS  = 15 * 60   # 15 minutes → yellow
+    CRIT_SECS  = 30 * 60   # 30 minutes → red
+    NOTIFY_SECS = 30 * 60  # notify once when crossing 30-minute threshold
+    alert_ts = alert_ts or {}
+    insight_ts = insight_ts or {}
     changed = False
 
     for item in items:
@@ -968,32 +989,56 @@ async def _check_monitored_items(
 
         if item_type == "site":
             found = identifier in site_names
+            central_ts = None
         elif item_type == "alert":
             found = identifier in alert_names
+            central_ts = alert_ts.get(identifier)
         elif item_type == "insight":
             found = identifier in insight_names
+            central_ts = insight_ts.get(identifier)
         elif item_type == "client":
             found = identifier in client_macs
+            central_ts = None
         else:
             continue
 
         if found:
             item["consecutive_failures"] = 0
             item["last_seen"] = now
+            item["missing_since"] = None
             item["status"] = "ok"
+            # Store the actual Central API timestamp when the alert/insight last fired.
+            if central_ts:
+                item["central_last_seen"] = str(central_ts)
+                if not item.get("central_first_seen"):
+                    item["central_first_seen"] = str(central_ts)
             changed = True
         else:
+            # Record when the item first went missing so we can show time-based status.
+            if not item.get("missing_since"):
+                item["missing_since"] = now
+            missing_for = now - float(item["missing_since"])
+
             prev = int(item.get("consecutive_failures") or 0)
             item["consecutive_failures"] = prev + 1
-            item["status"] = "missing"
+
+            if missing_for >= CRIT_SECS:
+                item["status"] = "missing"   # red
+            elif missing_for >= WARN_SECS:
+                item["status"] = "warning"   # yellow
+            else:
+                item["status"] = "ok"        # grace period — don't alarm yet
             changed = True
-            if item["consecutive_failures"] == 5:
+
+            # Notify once when the item first crosses the 30-minute threshold.
+            last_notified = float(item.get("last_notified") or 0)
+            if missing_for >= NOTIFY_SECS and (now - last_notified) > NOTIFY_SECS:
                 item["last_notified"] = now
                 item_name = item.get("name") or identifier
                 title = f"⚠️ Monitored {item_type.title()} No Longer Reporting"
                 message = (
-                    f'The monitored {item_type} "{item_name}" has stopped reporting in Aruba Central '
-                    f"for 5 consecutive checks."
+                    f'The monitored {item_type} "{item_name}" has not been seen in Aruba Central '
+                    f"for 30+ minutes."
                 )
                 try:
                     await send_notification(tenant_id, "", title, message, mode)
