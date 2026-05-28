@@ -833,12 +833,13 @@ def get_aggregate_clients(
     current_user: User = Depends(auth.get_current_user),
 ):
     resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
-    rows: list[dict[str, Any]] = []
+    # Collect all candidate rows keyed by MAC (or hostname fallback) so we can
+    # deduplicate VMs that appear on multiple spokes due to client_history.json
+    # retention.  A client with active simulations beats a stale historical one.
+    candidates: dict[str, dict[str, Any]] = {}
     for spoke in _approved_spokes(resolved_tenant_id):
         spoke_name = spoke.spoke_name or spoke.hostname
         usb_vmids, usb_hostnames, vmids_by_hostname = _spoke_usb_lookup(spoke)
-        # Pull T3 PCI device list from this spoke's proxmox telemetry so every
-        # client row on this spoke carries the node-level T3 device info.
         proxmox_tel = _telemetry_dict(spoke, "proxmox")
         t3_pci_devices: list[dict[str, Any]] = []
         if isinstance(proxmox_tel.get("t3_pci_devices"), list):
@@ -861,8 +862,25 @@ def get_aggregate_clients(
                 "t3_pci_count": t3_pci_count,
                 "t3_pci_devices": t3_pci_devices,
             })
-            rows.append(row)
-    rows.sort(key=lambda item: (str(item.get("spoke_name") or "").lower(), str(item.get("hostname") or "").lower()))
+            # Dedup key: prefer MAC, fall back to hostname. VMs that appear in
+            # multiple spokes' client_history.json should only be counted once —
+            # on whichever spoke has them actively simulated.
+            dedup_key = str(row.get("mac") or row.get("hostname") or "").lower().strip()
+            if not dedup_key:
+                candidates[id(row)] = row  # no key available, always include
+                continue
+            existing = candidates.get(dedup_key)
+            if existing is None:
+                candidates[dedup_key] = row
+            else:
+                # Prefer the spoke that has an active simulation running
+                existing_active = bool(existing.get("active_simulations"))
+                new_active = bool(row.get("active_simulations"))
+                if new_active and not existing_active:
+                    candidates[dedup_key] = row
+    rows = sorted(candidates.values(),
+                  key=lambda item: (str(item.get("spoke_name") or "").lower(),
+                                    str(item.get("hostname") or "").lower()))
     return {"tenant_id": resolved_tenant_id, "clients": rows}
 
 
@@ -1448,6 +1466,11 @@ async def get_aggregate_central_status(
             spoke = spoke_map.get(spoke_id)
             spoke_data = tenant_spokes_data.get(spoke_id, {}) if isinstance(tenant_spokes_data.get(spoke_id), dict) else {}
             site_mappings = spoke_data.get("site_mappings", {}) if isinstance(spoke_data.get("site_mappings"), dict) else {}
+            # Fall back to tenant-level config when spoke cache is empty (e.g. fresh start
+            # before the background task has run). In centralized mode the hub monitors all
+            # sites on behalf of every spoke, so the tenant config is always authoritative.
+            if not site_mappings:
+                site_mappings = dict(central_sites_config.get("site_mappings") or {}) if isinstance(central_sites_config.get("site_mappings"), dict) else {}
             status = spoke_data.get("status", {}) if isinstance(spoke_data.get("status"), dict) else {}
             wireless = spoke_data.get("wireless_clients", {}) if isinstance(spoke_data.get("wireless_clients"), dict) else {}
             hw_alerts = spoke_data.get("hardware_alerts", []) if isinstance(spoke_data.get("hardware_alerts"), list) else []
