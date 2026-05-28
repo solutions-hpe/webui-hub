@@ -1955,6 +1955,10 @@ async def _refresh_central_browse(tenant_id: str) -> None:
         clients: list[dict[str, Any]] = []
         devices_by_site: dict[str, list[dict[str, Any]]] = {}
         clients_by_site: dict[str, dict[str, Any]] = {}
+        # Track seen alert/insight/device keys to deduplicate across spokes sharing the same sites
+        seen_alert_keys: set[tuple[str, str]] = set()
+        seen_insight_keys: set[tuple[str, str]] = set()
+        seen_device_keys: set[tuple[str, str]] = set()
         for spoke in _approved_spokes(tenant_id):
             central = _central_telemetry(spoke)
             for wsite, central_site in (central.get("site_mappings") or {}).items():
@@ -1965,31 +1969,53 @@ async def _refresh_central_browse(tenant_id: str) -> None:
                                         "site_id": "", "status": central_site or "—"}
             spoke_nc_alerts = central.get("central_alerts") or []
             if spoke_nc_alerts:
-                alerts.extend(spoke_nc_alerts)
+                for alert in spoke_nc_alerts:
+                    key = (str(alert.get("name") or "").lower(), str(alert.get("site") or "").lower())
+                    if key not in seen_alert_keys:
+                        seen_alert_keys.add(key)
+                        alerts.append(alert)
             else:
                 for wsite, checks in (central.get("status") or {}).items():
                     for check_id, info in (checks or {}).items():
                         if info and info.get("status") == "ERROR":
-                            alerts.append({"name": info.get("check_name") or check_id,
-                                           "site": wsite, "severity": "error",
-                                           "detail": f"Count: {info.get('count', 0)}",
-                                           "ts": info.get("ts")})
-            insights.extend(central.get("central_insights") or [])
+                            key = (check_id, wsite)
+                            if key not in seen_alert_keys:
+                                seen_alert_keys.add(key)
+                                alerts.append({"name": info.get("check_name") or check_id,
+                                               "site": wsite, "severity": "error",
+                                               "detail": f"Count: {info.get('count', 0)}",
+                                               "ts": info.get("ts")})
+            for insight in (central.get("central_insights") or []):
+                key = (str(insight.get("name") or "").lower(), str(insight.get("site") or "").lower())
+                if key not in seen_insight_keys:
+                    seen_insight_keys.add(key)
+                    insights.append(insight)
             for site_name, devs in (central.get("central_devices_by_site") or {}).items():
-                devices_by_site.setdefault(site_name, []).extend(devs)
+                for dev in devs:
+                    key = (site_name, str(dev.get("name") or dev.get("serial") or "").lower())
+                    if key not in seen_device_keys:
+                        seen_device_keys.add(key)
+                        devices_by_site.setdefault(site_name, []).append(dev)
             for site_name, counts in (central.get("central_clients_by_site") or {}).items():
+                # First-seen wins: multiple spokes report the same Central site counts
+                # (they all query the same Aruba Central API). Adding them together
+                # would multiply the real count by the number of spokes.
                 if site_name not in clients_by_site:
                     clients_by_site[site_name] = counts
-                else:
-                    existing = clients_by_site[site_name]
-                    clients_by_site[site_name] = {
-                        "total": (existing.get("total") or 0) + (counts.get("total") or 0),
-                        "wired": (existing.get("wired") or 0) + (counts.get("wired") or 0),
-                        "wireless": (existing.get("wireless") or 0) + (counts.get("wireless") or 0),
-                    }
+            seen_client_keys: set[str] = {
+                str(c.get("mac") or c.get("hostname") or "")
+                for c in clients if isinstance(c, dict)
+            }
             for client in _telemetry_clients(spoke):
-                if isinstance(client, dict):
-                    clients.append(client)
+                if not isinstance(client, dict):
+                    continue
+                # Deduplicate across spokes by MAC (preferred) or hostname
+                key = str(client.get("mac") or client.get("hostname") or "")
+                if key and key in seen_client_keys:
+                    continue
+                if key:
+                    seen_client_keys.add(key)
+                clients.append(client)
         result = {
             "sites": sorted(sites_map.values(), key=lambda item: str(item.get("name") or "").casefold()),
             "alerts": alerts, "insights": insights, "clients": clients,
