@@ -134,13 +134,6 @@ if [ "$SHARE_EXISTS" != "true" ]; then
         --account-name "$STORAGE_ACCOUNT" \
         --account-key "$STORAGE_KEY" \
         --output none
-if [ "$SHARE_EXISTS" != "true" ]; then
-    echo "  Share not found — creating..."
-    az storage share create \
-        --name "$FILE_SHARE" \
-        --account-name "$STORAGE_ACCOUNT" \
-        --account-key "$STORAGE_KEY" \
-        --output none
 fi
 
 echo "▶ Ensuring hub.key exists on Azure Files share..."
