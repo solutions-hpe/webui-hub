@@ -892,7 +892,8 @@ class ArubaClient:
                 return_exceptions=True,
             )
             if isinstance(sites, Exception):
-                sites = []
+                # Re-raise so _refresh_central_browse preserves the existing cache
+                raise sites
             if isinstance(all_devices, Exception):
                 all_devices = []
             if isinstance(all_clients, Exception):
@@ -948,7 +949,7 @@ class ArubaClient:
             return_exceptions=True,
         )
         if isinstance(sites, Exception):
-            sites = []
+            raise sites
         if isinstance(findings, Exception):
             findings = []
         if isinstance(clients, Exception):
