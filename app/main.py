@@ -120,6 +120,7 @@ async def spa_fallback(full_path: str):
         html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ver}"')
         html = html.replace('src="/static/js/main.js"', f'src="/static/js/main.js?v={ver}"')
         html = html.replace("'{{WEBUI_MODE}}'", "'hub'")
+        html = html.replace("'{{WEBUI_VERSION}}'", f"'{ver}'")
         return HTMLResponse(content=html)
     except FileNotFoundError:
         logger.error("index.html not found at %s — frontend may not be built", index)
