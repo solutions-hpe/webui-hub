@@ -62,6 +62,52 @@ def _save_browse_disk_cache(tenant_id: str, data: dict[str, Any]) -> None:
         logger.warning("central_browse: could not write disk cache: %s", exc)
 
 
+def _is_individual_browse_client(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return any(key in item for key in ("mac", "hostname", "ip", "ap", "ssid", "status", "os", "vlan"))
+
+
+def _has_legacy_client_summary_rows(data: dict[str, Any] | None) -> bool:
+    clients = data.get("clients") if isinstance(data, dict) else None
+    if not isinstance(clients, list) or not clients:
+        return False
+    has_individual = any(_is_individual_browse_client(item) for item in clients)
+    has_summary = any(
+        isinstance(item, dict) and any(key in item for key in ("total", "wired", "wireless"))
+        for item in clients
+    )
+    return has_summary and not has_individual
+
+
+def _normalize_browse_cache(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    normalized = dict(data)
+    clients = normalized.get("clients")
+    if not _has_legacy_client_summary_rows(normalized):
+        if not isinstance(clients, list):
+            normalized["clients"] = []
+        return normalized
+
+    clients_by_site = normalized.get("clients_by_site")
+    if not isinstance(clients_by_site, dict):
+        derived: dict[str, dict[str, Any]] = {}
+        for item in clients:
+            if not isinstance(item, dict):
+                continue
+            site_name = str(item.get("site") or "—").strip() or "—"
+            derived[site_name] = {
+                "total": int(item.get("total") or 0),
+                "wired": int(item.get("wired") or 0),
+                "wireless": int(item.get("wireless") or 0),
+            }
+        normalized["clients_by_site"] = derived
+
+    normalized["clients"] = []
+    return normalized
+
+
 def _central_webhook_endpoint_url(tenant_id: str) -> str:
     return f"https://{CENTRAL_WEBHOOK_HOST}/api/{tenant_id}/webhook/central"
 
@@ -1824,8 +1870,7 @@ async def hub_central_browse(
     current_user: User = Depends(auth.get_current_user),
 ):
     """Return Central browse data from the in-memory cache (refreshed every 5 min by background task).
-    force=true triggers an immediate background refresh and returns current cached data."""
-    import asyncio as _asyncio
+    force=true performs a synchronous refresh before returning the current payload."""
     resolved_tid = _resolve_tenant_id(tenant_id, current_user)
 
     # Load disk cache into memory if cold (e.g. first request after restart)
@@ -1837,18 +1882,25 @@ async def hub_central_browse(
 
     cached = _central_browse_cache.get(resolved_tid)
 
-    if force:
-        # Kick a background refresh so the caller gets the current data instantly
-        # and the fresh fetch runs without blocking the response.
-        _asyncio.create_task(_refresh_central_browse(resolved_tid))
+    if force or _has_legacy_client_summary_rows(cached):
+        await _refresh_central_browse(resolved_tid)
+        cached = _central_browse_cache.get(resolved_tid)
 
     if cached:
-        return {**cached, "cached": True}
+        normalized_cached = _normalize_browse_cache(cached) or {}
+        if normalized_cached != cached:
+            _central_browse_cache[resolved_tid] = normalized_cached
+            _save_browse_disk_cache(resolved_tid, normalized_cached)
+        return {**normalized_cached, "cached": True}
 
     # Nothing in memory or on disk yet — do a blocking fetch (first-ever load)
     await _refresh_central_browse(resolved_tid)
     cached = _central_browse_cache.get(resolved_tid, {})
-    return {**cached, "cached": False}
+    normalized_cached = _normalize_browse_cache(cached) or {}
+    if normalized_cached != cached:
+        _central_browse_cache[resolved_tid] = normalized_cached
+        _save_browse_disk_cache(resolved_tid, normalized_cached)
+    return {**normalized_cached, "cached": False}
 
 
 async def _refresh_central_browse(tenant_id: str) -> None:
