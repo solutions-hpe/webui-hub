@@ -1147,6 +1147,27 @@ def aggregate_refresh_webui(
     return {"ok": True, "queued": queued}
 
 
+@router.post("/{tenant_id}/aggregate/update-all-spokes")
+def aggregate_update_all_spokes(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue self_update and proxmox_agent_update commands on all approved spokes."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    queued = 0
+    for spoke in _approved_spokes(resolved_tenant_id):
+        for cmd_type in ("proxmox_agent_update", "self_update"):
+            store.enqueue_command(Command(
+                spoke_id=spoke.id,
+                tenant_id=resolved_tenant_id,
+                type=cmd_type,
+                payload={},
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ))
+        queued += 1
+    return {"ok": True, "spokes_queued": queued}
+
+
 @router.post("/{tenant_id}/aggregate/test-central")
 async def test_central_connection(
     tenant_id: str,
