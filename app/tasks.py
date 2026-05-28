@@ -346,6 +346,7 @@ async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient)
     site_mappings = dict(config.get("site_mappings") or {}) if isinstance(config.get("site_mappings"), dict) else {}
     monitored_checks = list(config.get("monitored_checks") or []) if isinstance(config.get("monitored_checks"), list) else []
     hardware_checks = list(config.get("hardware_checks") or []) if isinstance(config.get("hardware_checks"), list) else []
+    excluded_sites = {str(s).strip().casefold() for s in (config.get("excluded_sites") or []) if str(s).strip()}
     changed = False
 
     discovered_sites = await client.list_sites()
@@ -359,7 +360,8 @@ async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient)
     for site in discovered_sites:
         site_name = str((site or {}).get("name") or "").strip()
         normalized = _normalize_site_token(site_name)
-        if not normalized or normalized in existing_wsites or normalized in existing_central:
+        # Skip sites already mapped, or explicitly excluded by the user
+        if not normalized or normalized in existing_wsites or normalized in existing_central or normalized in excluded_sites:
             continue
         site_mappings[site_name] = site_name
         existing_wsites.add(normalized)
@@ -373,13 +375,20 @@ async def _auto_discover_hub_central_config(tenant_id: str, client: ArubaClient)
         hardware_checks = [dict(item) for item in DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS]
         changed = True
 
+    if changed:
+        # Merge changes back into the full stored config to preserve all other fields
+        # (excluded_sites, monitored_items, etc.) — never do a partial overwrite.
+        updated = dict(config)
+        updated["site_mappings"] = {str(wsite).strip(): str(central_site).strip() for wsite, central_site in site_mappings.items() if str(wsite).strip() and str(central_site).strip()}
+        updated["monitored_checks"] = [dict(item) for item in monitored_checks if isinstance(item, dict)]
+        updated["hardware_checks"] = [dict(item) for item in hardware_checks if isinstance(item, dict)]
+        store.set_tenant_central_sites_config(tenant_id, updated)
+
     normalized_config = {
         "site_mappings": {str(wsite).strip(): str(central_site).strip() for wsite, central_site in site_mappings.items() if str(wsite).strip() and str(central_site).strip()},
         "monitored_checks": [dict(item) for item in monitored_checks if isinstance(item, dict)],
         "hardware_checks": [dict(item) for item in hardware_checks if isinstance(item, dict)],
     }
-    if changed:
-        store.set_tenant_central_sites_config(tenant_id, normalized_config)
     return normalized_config, site_id_map
 
 
