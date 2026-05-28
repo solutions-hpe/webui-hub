@@ -134,6 +134,36 @@ if [ "$SHARE_EXISTS" != "true" ]; then
         --account-name "$STORAGE_ACCOUNT" \
         --account-key "$STORAGE_KEY" \
         --output none
+if [ "$SHARE_EXISTS" != "true" ]; then
+    echo "  Share not found — creating..."
+    az storage share create \
+        --name "$FILE_SHARE" \
+        --account-name "$STORAGE_ACCOUNT" \
+        --account-key "$STORAGE_KEY" \
+        --output none
+fi
+
+echo "▶ Ensuring hub.key exists on Azure Files share..."
+KEY_FILE_EXISTS=$(az storage file exists \
+    --share-name "$FILE_SHARE" \
+    --path "hub.key" \
+    --account-name "$STORAGE_ACCOUNT" \
+    --account-key "$STORAGE_KEY" \
+    --query 'exists' -o tsv 2>/dev/null || echo "false")
+if [ "$KEY_FILE_EXISTS" != "true" ]; then
+    echo "  hub.key not found — generating and uploading new key..."
+    python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > /tmp/hub.key
+    az storage file upload \
+        --share-name "$FILE_SHARE" \
+        --source /tmp/hub.key \
+        --path "hub.key" \
+        --account-name "$STORAGE_ACCOUNT" \
+        --account-key "$STORAGE_KEY" \
+        --output none
+    rm -f /tmp/hub.key
+    echo "  ✓ hub.key generated and uploaded to Azure Files"
+else
+    echo "  ✓ hub.key already exists on Azure Files — not overwriting"
 fi
 
 echo "▶ Fetching ACR credentials..."

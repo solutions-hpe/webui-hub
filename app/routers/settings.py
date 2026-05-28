@@ -400,6 +400,45 @@ def update_github_settings(
     return {**_serialize_github_config(tenant), "pushed_to_spokes": pushed_count}
 
 
+@router.delete("/{tenant_id}/settings/aruba")
+def clear_aruba_settings(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Intentionally clear the Central API (Aruba) configuration."""
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    tenant.aruba_config_enc = None
+    store.save_tenant(tenant)
+    return {"cleared": True}
+
+
+@router.delete("/{tenant_id}/settings/github")
+def clear_github_settings(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Intentionally clear the GitHub configuration."""
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    tenant.github_config_enc = None
+    store.save_tenant(tenant)
+    return {"cleared": True}
+
+
+@router.delete("/{tenant_id}/settings/notifications")
+def clear_notification_settings(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Intentionally clear the notification configuration."""
+    _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(tenant_id)
+    tenant.notification_config_enc = None
+    store.save_tenant(tenant)
+    return {"cleared": True}
+
+
 @router.get("/{tenant_id}/settings/processing-mode")
 def get_default_processing_mode(tenant_id: str, current_user: User = Depends(auth.get_current_user)):
     _require_tenant_admin(tenant_id, current_user)

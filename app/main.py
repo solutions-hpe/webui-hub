@@ -23,11 +23,55 @@ TEMPLATE_DIR = FRONTEND_DIR / "templates"
 SHARED_DIR = BASE_DIR / "shared"
 
 
+_SENTINEL_FILE = Path(get_settings().data_dir) / ".keycheck"
+_SENTINEL_VALUE = "hub-key-ok"
+
+
+def _run_key_health_check() -> None:
+    """Verify the encryption key is consistent between restarts.
+
+    On first run: encrypt a sentinel string and write it to .keycheck.
+    On subsequent runs: decrypt the sentinel and compare to the expected value.
+    If the sentinel cannot be decrypted (key changed or corrupted), log a
+    CRITICAL warning but continue — the hub can still operate, existing
+    encrypted configs will just fail to decrypt.
+    """
+    from .crypto import decrypt_str, encrypt_str
+
+    try:
+        if _SENTINEL_FILE.exists():
+            ciphertext = _SENTINEL_FILE.read_text().strip()
+            try:
+                plaintext = decrypt_str(ciphertext)
+                if plaintext == _SENTINEL_VALUE:
+                    logger.info("Key health check: WEBUI_SECRET_KEY verified ✓")
+                else:
+                    logger.critical(
+                        "Key health check FAILED: decrypted sentinel mismatch — "
+                        "WEBUI_SECRET_KEY may have changed. Existing encrypted configs will be unreadable."
+                    )
+            except Exception as exc:
+                logger.critical(
+                    "Key health check FAILED: cannot decrypt sentinel — "
+                    "WEBUI_SECRET_KEY may have changed or be wrong: %s. "
+                    "Existing encrypted configs will be unreadable.",
+                    exc,
+                )
+        else:
+            # First run — write the sentinel
+            _SENTINEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _SENTINEL_FILE.write_text(encrypt_str(_SENTINEL_VALUE))
+            logger.info("Key health check: sentinel written (first run) ✓")
+    except Exception as exc:
+        logger.warning("Key health check skipped (mount not ready?): %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     store.init_store()
     ensure_admin()
+    _run_key_health_check()
     set_main_loop(asyncio.get_running_loop())
     logger.info(f"Hub starting — data dir: {settings.data_dir}")
 

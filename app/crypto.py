@@ -5,9 +5,11 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -16,17 +18,38 @@ from .config import get_settings
 _fernet: Fernet | None = None
 _value_fernet: Fernet | None = None
 
+_logger = logging.getLogger(__name__)
+
+# If this file exists on the Azure Files mount, its contents are used as
+# WEBUI_SECRET_KEY instead of the env var.  This allows the key to be
+# provisioned once on the persistent share and rotated without redeploying.
+_KEY_FILE_PATH = Path(os.environ.get("DATA_DIR", "/data")) / "hub.key"
+
+
+def _load_key_from_file(path: Path) -> str | None:
+    """Return the trimmed key string from the key file, or None if absent/unreadable."""
+    try:
+        if path.exists():
+            key = path.read_text().strip()
+            if key:
+                _logger.info("WEBUI_SECRET_KEY loaded from key file: %s", path)
+                return key
+    except OSError as exc:
+        _logger.warning("Could not read key file %s: %s — falling back to env var", path, exc)
+    return None
+
 
 def _get_fernet() -> Fernet:
     global _fernet
     if _fernet is None:
-        settings = get_settings()
-        key = settings.webui_secret_key.strip()
+        # Prefer key file on Azure Files share; fall back to env var
+        key = _load_key_from_file(_KEY_FILE_PATH)
+        if not key:
+            settings = get_settings()
+            key = settings.webui_secret_key.strip()
         if not key:
             key = Fernet.generate_key().decode()
-            import logging
-
-            logging.getLogger(__name__).warning(
+            _logger.warning(
                 "WEBUI_SECRET_KEY not set in dev — generated ephemeral key. "
                 "Secrets will not survive restart. Set WEBUI_SECRET_KEY in .env"
             )
