@@ -708,6 +708,21 @@ def set_global_usb_vidpids(devices: list[dict[str, Any]]) -> None:
         _write_json(_global_config_path(), config)
 
 
+def get_global_usb_ignored_vidpids() -> list[dict[str, Any]]:
+    """Return the platform-wide (superadmin-ignored) USB device list."""
+    with _lock:
+        devices = _load_global_config().get("usb_ignored_vidpids", [])
+        return [dict(d) for d in devices if isinstance(d, dict)]
+
+
+def set_global_usb_ignored_vidpids(devices: list[dict[str, Any]]) -> None:
+    """Persist the platform-wide USB ignored device list."""
+    with _lock:
+        config = _load_global_config()
+        config["usb_ignored_vidpids"] = [dict(d) for d in (devices or []) if isinstance(d, dict)]
+        _write_json(_global_config_path(), config)
+
+
 def _tenant_usb_vidpids(tenant: Tenant | None) -> list[dict[str, Any]]:
     if not tenant:
         return []
@@ -854,13 +869,26 @@ def _hub_core_config(tenant: Tenant | None) -> dict[str, Any]:
         for key, value in hub_config.items()
         if key not in _RELAY_CONFIG_KEYS and key not in _HUB_LOCAL_CONFIG_KEYS and key != "usb_vidpids"
     }
-    # Push the effective (global + tenant) USB list to spokes so devices certified
-    # at either level are recognised by every spoke in the tenant.
+    # Push the effective (global + tenant) USB certified list to spokes.
     global_devices = _load_global_config().get("usb_vidpids", [])
     effective = _effective_usb_vidpids_from(global_devices, tenant)
     if effective or "usb_vidpids" in hub_config:
         # Strip the source annotation before sending to spokes
         payload["usb_vidpids"] = [{k: v for k, v in d.items() if k != "source"} for d in effective]
+    # Push the effective global USB ignored list to spokes.  Merge with any
+    # tenant-level usb_ignored_vidpids already in hub_config (stored as a JSON
+    # string by the spoke, so we send a JSON string back).
+    global_ignored = _load_global_config().get("usb_ignored_vidpids", [])
+    if global_ignored:
+        global_vids: set[str] = {str(d.get("vidpid") or "").lower() for d in global_ignored if d.get("vidpid")}
+        # Merge with whatever the tenant already has in hub_config
+        existing_str = hub_config.get("usb_ignored_vidpids", "[]")
+        try:
+            existing: list[str] = json.loads(existing_str) if isinstance(existing_str, str) else list(existing_str)
+        except Exception:
+            existing = []
+        merged = list(global_vids | {str(v).lower() for v in existing if v})
+        payload["usb_ignored_vidpids"] = json.dumps(sorted(merged))
     return payload
 
 

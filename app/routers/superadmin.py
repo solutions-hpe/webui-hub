@@ -474,6 +474,10 @@ class GlobalUsbRequest(BaseModel):
     usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class GlobalUsbIgnoredRequest(BaseModel):
+    usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)
+
+
 @router.get("/superadmin/global-usb-vidpids")
 def get_global_usb_vidpids(_: User = Depends(auth.require_superadmin)):
     """Return the platform-wide (superadmin-certified) USB device list."""
@@ -492,6 +496,35 @@ def update_global_usb_vidpids(
     # Trigger a config push to all approved spokes across all tenants.
     # USB cert changes always propagate regardless of hub_config_enabled —
     # the spoke's _apply_hub_config sets hub_managed=True before processing USB.
+    pushed_count = 0
+    for tenant in store.list_tenants():
+        for spoke in store.list_spokes(tenant.id):
+            if spoke.status != "approved":
+                continue
+            spoke.config_version += 1
+            store.save_spoke(spoke)
+            store.ensure_config_update_command(tenant.id, spoke.id)
+            pushed_count += 1
+
+    return {"status": "saved", "pushed_to_spokes": pushed_count}
+
+
+@router.get("/superadmin/global-usb-ignored-vidpids")
+def get_global_usb_ignored_vidpids(_: User = Depends(auth.require_superadmin)):
+    """Return the platform-wide (superadmin-ignored) USB device list."""
+    return {"usb_vidpids": store.get_global_usb_ignored_vidpids()}
+
+
+@router.put("/superadmin/global-usb-ignored-vidpids")
+def update_global_usb_ignored_vidpids(
+    payload: GlobalUsbIgnoredRequest,
+    _: User = Depends(auth.require_superadmin),
+):
+    """Replace the platform-wide USB ignored list and push to all approved spokes.
+    Globally ignored VIDs are merged with any tenant-level ignored VIDs and sent
+    as usb_ignored_vidpids in the hub config payload."""
+    store.set_global_usb_ignored_vidpids(payload.usb_vidpids)
+
     pushed_count = 0
     for tenant in store.list_tenants():
         for spoke in store.list_spokes(tenant.id):
