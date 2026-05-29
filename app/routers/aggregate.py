@@ -194,6 +194,12 @@ def _require_tenant_access(tenant_id: str, current_user: User) -> str:
     return tenant_id
 
 
+def _require_tenant_demo_or_above(tenant_id: str, current_user: User) -> str:
+    """Allow demo, viewer, and admin roles (any authenticated tenant member)."""
+    auth.require_tenant_access(tenant_id, current_user)
+    return tenant_id
+
+
 def _approved_spokes(tenant_id: str) -> list[Spoke]:
     return [spoke for spoke in store.list_spokes(tenant_id) if spoke.status == "approved"]
 
@@ -838,6 +844,64 @@ def clear_user_conf_override(
     store.save_tenant(tenant)
     pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
     return {"ok": True, "cleared": True, "pushed_to_spokes": pushed}
+
+
+# ── Demo Scenario Endpoints ────────────────────────────────────────────────────
+# Hub → Spoke relay for demo user scenario triggers.
+# Demo scenarios are ephemeral (in-memory on spoke, cleared on hub/spoke reboot
+# and auto-expired after 120 minutes).
+
+class DemoScenarioRequest(BaseModel):
+    scenario: str  # e.g. "dns_fail", "dhcp_fail", "normal"
+
+
+async def _relay_demo_command(tenant_id: str, spoke_id: str, message: dict) -> bool:
+    """Send a demo command to a spoke via WebSocket relay. Returns True if sent."""
+    from ..ws import relay_ws
+    return await relay_ws.send_to_spoke(tenant_id, spoke_id, message)
+
+
+@router.post("/{tenant_id}/spokes/{spoke_id}/clients/{hostname}/demo-scenario")
+async def hub_demo_set_scenario(
+    tenant_id: str,
+    spoke_id: str,
+    hostname: str,
+    payload: DemoScenarioRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Trigger a named demo scenario on a specific client via spoke WebSocket relay.
+
+    Accessible to demo, viewer, and admin roles.  The spoke applies the scenario
+    in-memory — it reverts automatically after 120 minutes or on hub/spoke reboot.
+    """
+    _require_tenant_demo_or_above(tenant_id, current_user)
+    sent = await _relay_demo_command(tenant_id, spoke_id, {
+        "type": "demo_scenario",
+        "hostname": hostname,
+        "scenario": payload.scenario,
+        "triggered_by": current_user.username,
+    })
+    if not sent:
+        raise HTTPException(status_code=502, detail="Spoke relay is offline")
+    return {"ok": True, "hostname": hostname, "scenario": payload.scenario}
+
+
+@router.delete("/{tenant_id}/spokes/{spoke_id}/clients/{hostname}/demo-scenario")
+async def hub_demo_clear_scenario(
+    tenant_id: str,
+    spoke_id: str,
+    hostname: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Clear the demo scenario for a specific client on a spoke."""
+    _require_tenant_demo_or_above(tenant_id, current_user)
+    sent = await _relay_demo_command(tenant_id, spoke_id, {
+        "type": "demo_clear",
+        "hostname": hostname,
+    })
+    if not sent:
+        raise HTTPException(status_code=502, detail="Spoke relay is offline")
+    return {"ok": True, "hostname": hostname, "cleared": True}
 
 
 class UsbVidpidEntry(BaseModel):
