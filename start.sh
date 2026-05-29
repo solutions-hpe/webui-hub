@@ -36,12 +36,13 @@ else
 fi
 
 echo "[$(date -u)] Starting gunicorn (uvicorn workers) on port $HUB_PORT..."
-# Workers: 2 per CPU + 1. ACI default is 1 CPU → 3 workers.
-# Each worker is a full uvicorn async event loop — handles its own WebSocket
-# connections independently. Commands are persisted to JSON queue files on
-# disk so any worker can read them; delivery to a spoke happens on the next
-# telemetry heartbeat (~15s) if the enqueue-time push misses the right worker.
-WORKERS=${UVICORN_WORKERS:-$(python3 -c "import os; print(2 * os.cpu_count() + 1)")}
+# Single worker: FastAPI+uvicorn is async (I/O-bound), so one process with
+# an async event loop handles all concurrent WebSocket connections via
+# coroutines. Multiple workers cause concurrent writes to Azure Files SMB
+# where fcntl.flock does NOT provide real mutual exclusion, leading to
+# JSON corruption. Single worker means threading.Lock() in store.py works
+# correctly across all requests with zero cross-process contention.
+WORKERS=${UVICORN_WORKERS:-1}
 echo "[$(date -u)] Worker count: $WORKERS"
 exec "$PYTHON_BIN" -m gunicorn app.main:app \
     --workers "$WORKERS" \
