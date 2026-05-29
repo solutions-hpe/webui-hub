@@ -707,12 +707,24 @@ async def get_simulation_conf(
 ):
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
     tenant = _get_tenant(resolved_tenant_id)
+    cfg = _github_repo_settings(tenant)
+    if not cfg.get("github_token"):
+        # No GitHub API key — serve hub-managed override content (persistent local mode).
+        # Content is empty string if no override has been saved yet.
+        return {
+            "content": tenant.sim_conf_override or "",
+            "sha": "",
+            "branch": "",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "override",
+        }
     content, sha, branch = await _fetch_simulation_conf_from_github(tenant)
     return {
         "content": content,
         "sha": sha,
         "branch": branch,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "github",
     }
 
 
@@ -724,6 +736,13 @@ async def save_simulation_conf(
 ):
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
     tenant = _get_tenant(resolved_tenant_id)
+    cfg = _github_repo_settings(tenant)
+    if not cfg.get("github_token"):
+        # No GitHub API key — save as hub-managed override pushed to all spokes.
+        tenant.sim_conf_override = payload.content
+        store.save_tenant(tenant)
+        pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+        return {"ok": True, "pushed_to_spokes": pushed, "mode": "override"}
     github_token, owner, repo, branch = _require_sim_repo_config(tenant)
     _, sha, _ = await _fetch_simulation_conf_from_github(tenant)
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/configs/simulation.conf"
@@ -740,7 +759,7 @@ async def save_simulation_conf(
     response_payload = response.json()
     commit_sha = str((response_payload.get("commit") or {}).get("sha") or "")
     synced_spokes = _queue_repo_sync_for_all_spokes(resolved_tenant_id, current_user)
-    return {"ok": True, "commit_sha": commit_sha, "synced_spokes": synced_spokes}
+    return {"ok": True, "commit_sha": commit_sha, "synced_spokes": synced_spokes, "mode": "github"}
 
 
 # ── Hub-managed conf overrides ────────────────────────────────────────────────
@@ -844,6 +863,40 @@ def clear_user_conf_override(
     store.save_tenant(tenant)
     pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
     return {"ok": True, "cleared": True, "pushed_to_spokes": pushed}
+
+
+# ── User-overrides.conf editor endpoints ─────────────────────────────────────
+# These are always in "override" mode (no GitHub path needed).
+
+@router.get("/{tenant_id}/config/user-overrides-conf")
+def get_user_overrides_conf(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return the hub-managed user-overrides.conf content (INI text).
+    Always served from the hub override store — no GitHub dependency."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    return {
+        "content": tenant.user_conf_override or "",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "mode": "override",
+    }
+
+
+@router.put("/{tenant_id}/config/user-overrides-conf")
+def save_user_overrides_conf(
+    tenant_id: str,
+    payload: ConfOverrideRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Save hub-managed user-overrides.conf and push to all approved spokes."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    tenant.user_conf_override = payload.content
+    store.save_tenant(tenant)
+    pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+    return {"ok": True, "pushed_to_spokes": pushed, "mode": "override"}
 
 
 # ── Demo Scenario Endpoints ────────────────────────────────────────────────────
