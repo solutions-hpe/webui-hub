@@ -514,13 +514,87 @@ def _spokes_lock_path(tenant_id: str) -> Path:
     return _data_dir() / tenant_id / "spokes.lock"
 
 
+# ── Per-spoke volatile state (telemetry + last_seen) ─────────────────────────
+# Written to individual files so concurrent gunicorn workers never contend on
+# the shared spokes.json.  Each spoke's WS connection is pinned to one worker,
+# so only one process ever writes a given spoke's state file.
+
+_SPOKE_STATE_FIELDS = frozenset({"telemetry", "last_seen"})
+_SPOKE_CONFIG_FIELDS = frozenset(
+    f for f in Spoke.model_fields if f not in _SPOKE_STATE_FIELDS
+)
+
+
+def _spoke_state_dir(tenant_id: str) -> Path:
+    return _data_dir() / tenant_id / "spoke_state"
+
+
+def _spoke_state_path(tenant_id: str, spoke_id: str) -> Path:
+    return _spoke_state_dir(tenant_id) / f"{spoke_id}.json"
+
+
+def _load_spoke_state(tenant_id: str, spoke_id: str) -> dict:
+    """Return {last_seen, telemetry} for a single spoke, or empty dict."""
+    raw = _read_json(_spoke_state_path(tenant_id, spoke_id))
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_spoke_state(tenant_id: str, spoke_id: str, last_seen, telemetry: dict) -> None:
+    """Write only volatile state fields to a per-spoke file (no locking needed —
+    only the worker owning that spoke's WS connection ever writes this file)."""
+    state_dir = _spoke_state_dir(tenant_id)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        _spoke_state_path(tenant_id, spoke_id),
+        {
+            "last_seen": last_seen.isoformat() if hasattr(last_seen, "isoformat") else last_seen,
+            "telemetry": telemetry or {},
+        },
+    )
+
+
+def _merge_spoke_state(spoke: Spoke, state: dict) -> Spoke:
+    """Merge volatile state into a spoke config object (in-place)."""
+    if "last_seen" in state and state["last_seen"]:
+        try:
+            from datetime import datetime, timezone
+            ls = state["last_seen"]
+            if isinstance(ls, str):
+                spoke.last_seen = datetime.fromisoformat(ls)
+            elif isinstance(ls, (int, float)):
+                spoke.last_seen = datetime.fromtimestamp(ls, tz=timezone.utc)
+        except Exception:
+            pass
+    if "telemetry" in state:
+        spoke.telemetry = state["telemetry"]
+    return spoke
+
+
 def _load_spokes(tenant_id: str) -> list[Spoke]:
     raw = _read_json(_spoke_path(tenant_id)) or []
-    return [Spoke(**i) for i in raw]
+    spokes = []
+    for item in raw:
+        try:
+            spoke = Spoke(**item)
+            # Merge volatile state from per-spoke file (fast, no contention)
+            state = _load_spoke_state(tenant_id, spoke.id)
+            if state:
+                _merge_spoke_state(spoke, state)
+            spokes.append(spoke)
+        except Exception as exc:
+            logger.warning("store: skipping malformed spoke entry: %s", exc)
+    return spokes
 
 
 def _save_spokes(tenant_id: str, spokes: list[Spoke]) -> None:
-    _write_json(_spoke_path(tenant_id), [i.model_dump(mode="json") for i in spokes])
+    """Persist only config fields — no telemetry, no last_seen.
+    Keeps spokes.json tiny (<5 KB for any realistic fleet) so concurrent writes
+    from multiple gunicorn workers never produce multi-MB collisions."""
+    rows = []
+    for s in spokes:
+        d = s.model_dump(mode="json")
+        rows.append({k: v for k, v in d.items() if k in _SPOKE_CONFIG_FIELDS})
+    _write_json(_spoke_path(tenant_id), rows)
 
 
 def get_spoke(tenant_id: str, spoke_id: str) -> Optional[Spoke]:
@@ -657,12 +731,16 @@ def list_spokes(tenant_id: str) -> list[Spoke]:
 
 
 def save_spoke(spoke: Spoke) -> None:
+    """Persist spoke config to spokes.json and volatile state to per-spoke file."""
     with _lock:
         with _file_lock(_spokes_lock_path(spoke.tenant_id)):
             spokes = _load_spokes(spoke.tenant_id)
             spokes = [i for i in spokes if i.id != spoke.id]
             spokes.append(spoke)
             _save_spokes(spoke.tenant_id, spokes)
+    # Persist volatile state separately (outside the config lock — no contention)
+    if spoke.last_seen or spoke.telemetry:
+        _save_spoke_state(spoke.tenant_id, spoke.id, spoke.last_seen, spoke.telemetry)
 
 
 def mark_spoke_config_applied(tenant_id: str, spoke_id: str, version: int) -> None:
@@ -1251,14 +1329,9 @@ def revoke_spoke(tenant_id: str, spoke_id: str) -> None:
 
 
 def update_spoke_telemetry(tenant_id: str, spoke_id: str, telemetry: dict) -> None:
-    with _lock:
-        spokes = _load_spokes(tenant_id)
-        for i in spokes:
-            if i.id == spoke_id:
-                i.telemetry = telemetry
-                i.last_seen = _now()
-                break
-        _save_spokes(tenant_id, spokes)
+    """Write telemetry + last_seen to the per-spoke state file only.
+    Never touches spokes.json — eliminates the 116 KB concurrent-write race."""
+    _save_spoke_state(tenant_id, spoke_id, _now(), telemetry)
 
 
 def _queue_lock_path(tenant_id: str, spoke_id: str) -> Path:
