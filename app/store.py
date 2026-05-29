@@ -796,22 +796,33 @@ def get_discovered_usb_vidpids() -> list[dict[str, Any]]:
     certified list.  Sorted by vidpid ascending.
     """
     with _lock:
-        global_set = {d.get("vidpid") for d in _load_global_config().get("usb_vidpids", []) if d.get("vidpid")}
+        global_cfg = _load_global_config()
+        global_set = {d.get("vidpid") for d in global_cfg.get("usb_vidpids", []) if d.get("vidpid")}
         # Normalise to lowercase for consistent comparison
         global_set_lower = {v.lower() for v in global_set if v}
-        # vidpid → {"vidpid", "name", "seen_on": [{"tenant_name", "spoke_name"}], "is_global"}
+        global_ignored_lower = {
+            str(d.get("vidpid") or "").lower()
+            for d in global_cfg.get("usb_ignored_vidpids", [])
+            if d.get("vidpid")
+        }
+        # vidpid → {"vidpid", "name", "seen_on": [...], "is_global", "locally_ignored"}
         discovered: dict[str, dict[str, Any]] = {}
 
-        def _ensure(vidpid: str, name: str = "") -> None:
+        def _ensure(vidpid: str, name: str = "", locally_ignored: bool = False) -> None:
             if vidpid not in discovered:
                 discovered[vidpid] = {
                     "vidpid": vidpid,
                     "name": name,
                     "seen_on": [],
                     "is_global": vidpid in global_set_lower,
+                    "locally_ignored": locally_ignored,
                 }
-            elif not discovered[vidpid]["name"] and name:
-                discovered[vidpid]["name"] = name
+            else:
+                if not discovered[vidpid]["name"] and name:
+                    discovered[vidpid]["name"] = name
+                # Once flagged locally_ignored, keep it (other spokes may not have it ignored)
+                if locally_ignored:
+                    discovered[vidpid]["locally_ignored"] = True
 
         for tenant in _load_tenants():
             tenant_label = tenant.name or tenant.id
@@ -849,6 +860,22 @@ def get_discovered_usb_vidpids() -> list[dict[str, Any]]:
                     if not vidpid:
                         continue
                     _ensure(vidpid, dev.get("name") or "")
+                    entry = {"tenant_name": tenant_label, "spoke_name": spoke_label}
+                    if entry not in discovered[vidpid]["seen_on"]:
+                        discovered[vidpid]["seen_on"].append(entry)
+
+                # ── Include devices locally ignored on this spoke but not globally ignored ──
+                spoke_cfg = spoke.config or {}
+                ignored_str = spoke_cfg.get("usb_ignored_vidpids", "[]")
+                try:
+                    locally_ignored_vids: list[str] = json.loads(ignored_str) if isinstance(ignored_str, str) else list(ignored_str)
+                except Exception:
+                    locally_ignored_vids = []
+                for vidpid_raw in locally_ignored_vids:
+                    vidpid = str(vidpid_raw or "").strip().lower()
+                    if not vidpid or vidpid in global_ignored_lower:
+                        continue
+                    _ensure(vidpid, "", locally_ignored=True)
                     entry = {"tenant_name": tenant_label, "spoke_name": spoke_label}
                     if entry not in discovered[vidpid]["seen_on"]:
                         discovered[vidpid]["seen_on"].append(entry)
