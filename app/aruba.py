@@ -354,6 +354,7 @@ class ArubaClient:
         hw_check_ids = {str(check_id).strip() for check_id in (hw_check_ids or set()) if str(check_id).strip()}
         site_health: int | None = None
         wireless_clients = 0
+        wired_clients = 0
         alert_type_counts: dict[str, int] = {}
         insight_cat_counts: dict[str, int] = {}
         hw_devices: dict[str, dict[str, int]] = {}
@@ -371,7 +372,6 @@ class ArubaClient:
                     item.get("healthScore", item.get("health_score", 0)),
                 )
                 site_health = int(good_pct or 0)
-                wireless_clients = int((item.get("clients") or {}).get("count") or item.get("clientCount") or item.get("client_count") or 0)
                 break
 
             DEVICE_ALERT = {"ACCESS_POINT": "AP_DOWN", "SWITCH": "SWITCH_DOWN", "GATEWAY": "GATEWAY_DOWN"}
@@ -395,17 +395,23 @@ class ArubaClient:
                     if device_name:
                         hw_devices.setdefault(alert_id, {})[device_name] = hw_devices.setdefault(alert_id, {}).get(device_name, 0) + 1
 
+            # Count all clients (wired + wireless) for the site from the global clients list
             for cl in await self._nc_clients():
                 cl_site_id = str(cl.get("siteId") or cl.get("site_id") or "").strip()
-                if site_id and cl_site_id and cl_site_id == site_id:
-                    wireless_clients += 1
-                elif not site_id:
+                matches = (site_id and cl_site_id and cl_site_id == site_id) or (not site_id)
+                if not matches:
+                    continue
+                conn_type = str(cl.get("clientConnectionType") or cl.get("connection_type") or "").lower()
+                if conn_type == "wired":
+                    wired_clients += 1
+                else:
                     wireless_clients += 1
 
             return {
                 "site_health": site_health,
                 "wireless_clients": wireless_clients,
-                "client_count": wireless_clients,
+                "wired_clients": wired_clients,
+                "client_count": wireless_clients + wired_clients,
                 "alert_type_counts": alert_type_counts,
                 "insight_cat_counts": insight_cat_counts,
                 "hw_devices": hw_devices,
@@ -477,10 +483,29 @@ class ArubaClient:
                 if fetched_wireless:
                     break
 
+            fetched_wired = False
+            for clients_path in ("/monitoring/v2/clients/wired", "/monitoring/v1/clients/wired"):
+                for site_param in ("site", "site_name"):
+                    try:
+                        payload = await self._get(client, clients_path, params={site_param: site, "limit": 1})
+                        wired_clients = int(payload.get("total") or payload.get("count") or 0)
+                        fetched_wired = True
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        if exc.response.status_code == 404:
+                            continue
+                        raise
+                    except Exception as exc:
+                        logger.warning("Aruba wired clients fetch failed [%s:%s]: %s", self._config_hash, site, exc)
+                        break
+                if fetched_wired:
+                    break
+
         return {
             "site_health": site_health,
             "wireless_clients": wireless_clients,
-            "client_count": wireless_clients,
+            "wired_clients": wired_clients,
+            "client_count": wireless_clients + wired_clients,
             "alert_type_counts": alert_type_counts,
             "insight_cat_counts": insight_cat_counts,
             "hw_devices": hw_devices,

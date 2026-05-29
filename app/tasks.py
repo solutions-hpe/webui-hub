@@ -686,6 +686,7 @@ async def aruba_poller() -> None:
 
                     aggregated_status: dict[str, dict[str, Any]] = {}
                     aggregated_wireless_clients: dict[str, int] = {}
+                    aggregated_total_clients: dict[str, int] = {}
                     hw_sites: dict[str, dict[str, list[str]]] = {
                         str(check.get("id")): {}
                         for check in hub_hardware_checks
@@ -722,7 +723,8 @@ async def aruba_poller() -> None:
                             }
 
                         aggregated_status[wsite] = site_status
-                        aggregated_wireless_clients[wsite] = int(raw.get("wireless_clients") or raw.get("client_count") or 0)
+                        aggregated_wireless_clients[wsite] = int(raw.get("wireless_clients") or 0)
+                        aggregated_total_clients[wsite] = int(raw.get("client_count") or raw.get("wireless_clients") or 0)
 
                         for check in hub_hardware_checks:
                             if not isinstance(check, dict):
@@ -761,6 +763,7 @@ async def aruba_poller() -> None:
                             "assigned_sites": spoke.assigned_sites,
                             "status": dict(aggregated_status),
                             "wireless_clients": dict(aggregated_wireless_clients),
+                            "total_clients": dict(aggregated_total_clients),
                             "hardware_alerts": list(aggregated_hardware_alerts),
                             "client_count_status": dict(client_count_status),
                             "site_mappings": dict(hub_site_mappings),
@@ -781,6 +784,7 @@ async def aruba_poller() -> None:
                             "token_state": "connected",
                             "status": aggregated_status,
                             "wireless_clients": aggregated_wireless_clients,
+                            "total_clients": aggregated_total_clients,
                             "hardware_alerts": aggregated_hardware_alerts,
                             "client_count_status": client_count_status,
                             "central_sites_config": hub_sites_cfg,
@@ -796,6 +800,7 @@ async def aruba_poller() -> None:
                             "findings": merged_findings,
                             "status": aggregated_status,
                             "wireless_clients": aggregated_wireless_clients,
+                            "total_clients": aggregated_total_clients,
                             "hardware_alerts": aggregated_hardware_alerts,
                             "client_count_status": client_count_status,
                             "central_sites_config": hub_sites_cfg,

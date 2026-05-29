@@ -294,6 +294,7 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
     return {
         "status": spoke_data.get("status", {}),
         "wireless_clients": spoke_data.get("wireless_clients", {}),
+        "total_clients": spoke_data.get("total_clients", {}),
         "hardware_alerts": spoke_data.get("hardware_alerts", []),
         "client_count_status": spoke_data.get("client_count_status", tenant_data.get("client_count_status", {})),
         "token_valid": token_valid,
