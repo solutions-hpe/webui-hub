@@ -983,12 +983,15 @@ def get_aggregate_proxmox(
         vms = _telemetry_list(spoke, "proxmox_vms") or (proxmox.get("vms") if isinstance(proxmox.get("vms"), list) else [])
         usb_devices = _telemetry_list(spoke, "usb_devices") or (proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else [])
         _used_slots, _total_slots, _dongle_count, auto_provision = _spoke_usb_capacity(spoke)
+        tel = spoke.telemetry or {}
         hosts.append({
             "tenant_id": resolved_tenant_id,
             "spoke_id": spoke.id,
             "spoke_name": spoke.spoke_name or spoke.hostname,
             "spoke_online": _is_online(spoke),
             "last_seen": spoke.last_seen,
+            "hub_rtt_ms": tel.get("hub_rtt_ms"),
+            "hub_processing_ms": tel.get("hub_processing_ms"),
             "node": proxmox.get("node") if isinstance(proxmox.get("node"), dict) else {},
             "proxmox": proxmox,
             "proxmox_vms": vms,
