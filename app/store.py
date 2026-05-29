@@ -1510,6 +1510,24 @@ def init_store() -> None:
     except OSError as exc:
         logger.warning("init_store: could not back up/restore tenants.json: %s", exc)
 
+    # Rolling startup backup: copy spokes.json → spokes.json.bak for each tenant
+    for tenant_dir in base.iterdir():
+        if not tenant_dir.is_dir() or tenant_dir.name in ("pending", "tls"):
+            continue
+        spokes_path = tenant_dir / "spokes.json"
+        spokes_bak = tenant_dir / "spokes.json.bak"
+        try:
+            if spokes_path.exists() and spokes_path.stat().st_size > 2:
+                shutil.copy2(str(spokes_path), str(spokes_bak))
+                logger.info("init_store: backed up %s → %s", spokes_path, spokes_bak)
+            elif not spokes_path.exists() and spokes_bak.exists() and spokes_bak.stat().st_size > 2:
+                shutil.copy2(str(spokes_bak), str(spokes_path))
+                logger.warning(
+                    "init_store: spokes.json missing — restored from backup %s", spokes_bak
+                )
+        except OSError as exc:
+            logger.warning("init_store: could not back up/restore spokes.json for %s: %s", tenant_dir.name, exc)
+
 
 # ── T3 MAC Profile store ──────────────────────────────────────────────────────
 
