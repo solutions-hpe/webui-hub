@@ -82,27 +82,16 @@ def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Serialise first so any encoding errors surface before we touch disk.
     content = json.dumps(data, indent=2, default=str)
-    # Try atomic write via temp-file + rename (safe on local/POSIX filesystems).
-    # Azure Files (SMB) rejects rename-over-a-file that another worker has open;
-    # in that case fall back to a direct overwrite — the caller already holds
-    # _file_lock (flock), so concurrent writes are serialised.
-    fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=path.stem + ".")
-    tmp = Path(tmp_str)
+    # Write directly without atomic rename — callers always hold _file_lock
+    # (fcntl.flock) so concurrent writes are already serialised.  The prior
+    # temp-file + rename approach caused data loss on Azure Files SMB because
+    # Path.replace() on CIFS mounts can delete the destination before the
+    # rename completes; if the rename then fails, the original file is gone.
     try:
-        with os.fdopen(fd, "w") as f:
+        with open(path, "w") as f:
             f.write(content)
-        try:
-            tmp.replace(path)
-        except OSError:
-            # SMB rename failed — clean up temp and write directly.
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
-            with open(path, "w") as f:
-                f.write(content)
     except OSError as exc:
         logger.error("Failed to write %s: %s", path, exc)
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
         raise
 
 
@@ -308,7 +297,18 @@ def _tenants_lock_path() -> Path:
 
 
 def _load_tenants() -> list[Tenant]:
-    raw = _read_json(_tenants_path()) or []
+    tenants_path = _tenants_path()
+    bak_path = _data_dir() / "tenants.json.bak"
+    # Runtime auto-restore: if tenants.json disappears but a backup exists,
+    # restore silently so the hub keeps serving tenant data without a restart.
+    if not tenants_path.exists() and bak_path.exists():
+        try:
+            import shutil as _shutil
+            _shutil.copy2(str(bak_path), str(tenants_path))
+            logger.warning("_load_tenants: tenants.json missing — auto-restored from backup")
+        except OSError as exc:
+            logger.error("_load_tenants: could not restore tenants.json from backup: %s", exc)
+    raw = _read_json(tenants_path) or []
     tenants: list[Tenant] = []
     for t in raw:
         try:
