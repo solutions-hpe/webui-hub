@@ -737,6 +737,210 @@ class QARunner:
                 self._ok("No unexpected recovery commands queued", "background")
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 15 — VM Teardown
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def phase_teardown(self) -> None:
+        _section("Phase 15 — VM Teardown (⚠ Destructive)")
+
+        # Step 1: trigger teardown
+        r = self.post(f"/api/{self.tenant_id}/qa/teardown-all-vms")
+        res = self._check(
+            "Queue teardown of all sim VMs",
+            "teardown",
+            r,
+            assert_keys=["ok", "total_vms_queued", "spokes"],
+        )
+        if not res.passed:
+            return
+
+        td = r.json()
+        total_queued: int = td.get("total_vms_queued", 0)
+        if total_queued == 0:
+            self._skip(
+                "VMs queued for deletion",
+                "teardown",
+                "No sim VMs found in telemetry (vmid > 9000) — nothing to tear down",
+            )
+            return
+
+        self._ok(
+            "VMs queued for deletion",
+            "teardown",
+            f"Queued delete_vm for {total_queued} VM(s) across {len(td.get('spokes', []))} spoke(s)",
+        )
+
+        # Step 2: poll teardown-status until complete (5 min timeout)
+        timeout_s = 300
+        poll_interval_s = 10
+        deadline = time.monotonic() + timeout_s
+
+        while time.monotonic() < deadline:
+            r = self.get(f"/api/{self.tenant_id}/qa/teardown-status")
+            if r.status_code != 200:
+                self._warn(
+                    "Teardown status poll",
+                    "teardown",
+                    f"HTTP {r.status_code} during poll",
+                )
+                break
+
+            status = r.json()
+            remaining = status.get("total_remaining", 0)
+            if status.get("complete"):
+                self._ok(
+                    "All sim VMs deleted",
+                    "teardown",
+                    "total_remaining=0 across all spokes",
+                )
+                return
+
+            elapsed_s = int(timeout_s - (deadline - time.monotonic()))
+            print(f"    ⏳  {remaining} VM(s) still present — waiting... ({elapsed_s}s elapsed)")
+            time.sleep(poll_interval_s)
+
+        # Timed out — report what's left
+        r = self.get(f"/api/{self.tenant_id}/qa/teardown-status")
+        if r.status_code == 200:
+            status = r.json()
+            remaining = status.get("total_remaining", 0)
+            spokes_detail = ", ".join(
+                f"{s.get('spoke_name', s.get('spoke_id', '?'))}={s.get('sim_vms_remaining', '?')}"
+                for s in status.get("spokes", [])
+                if s.get("sim_vms_remaining", 0) > 0
+            )
+            self._fail(
+                "All sim VMs deleted",
+                "teardown",
+                f"Timed out after {timeout_s}s — {remaining} VM(s) still present: {spokes_detail}",
+            )
+        else:
+            self._fail("All sim VMs deleted", "teardown", f"Timeout + status poll failed (HTTP {r.status_code})")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 16 — Auto-Provisioning End-to-End
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def phase_autoprov_e2e(self) -> None:
+        _section("Phase 16 — Auto-Provisioning End-to-End (⚠ Long-running)")
+
+        # Step 1: verify dongles are present before enabling
+        r = self.get(f"/api/{self.tenant_id}/aggregate/usb-provisioning-status")
+        if r.status_code != 200:
+            self._fail("Dongles present before autoprov test", "autoprov_e2e", f"HTTP {r.status_code}")
+            return
+
+        prov = r.json()
+        total_dongles: int = prov.get("total_dongles", 0)
+        if total_dongles == 0:
+            self._skip(
+                "Auto-provisioning E2E",
+                "autoprov_e2e",
+                "No USB dongles detected — cannot run E2E provisioning test",
+            )
+            return
+
+        self._ok(
+            "Dongles present",
+            "autoprov_e2e",
+            f"total_dongles={total_dongles} — proceeding to enable auto-provisioning",
+        )
+
+        # Step 2: enable auto-provisioning fleet-wide
+        r = self.post(f"/api/{self.tenant_id}/qa/enable-autoprov")
+        res = self._check(
+            "Enable Auto-Provisioning on all spokes",
+            "autoprov_e2e",
+            r,
+            assert_keys=["ok", "expected_clients", "updated_spokes"],
+        )
+        if not res.passed:
+            return
+
+        ap = r.json()
+        expected: int = ap.get("expected_clients", 0)
+        self._ok(
+            "Auto-Provisioning enabled",
+            "autoprov_e2e",
+            f"expected_clients={expected} ({ap.get('updated_spokes', 0)} spoke(s) updated)",
+        )
+
+        if expected == 0:
+            self._skip(
+                "Wait for clients online",
+                "autoprov_e2e",
+                "expected_clients=0 — no dongles to provision",
+            )
+            return
+
+        # Step 3: poll provisioning-check until all clients are online (10 min)
+        timeout_s = 600
+        poll_interval_s = 15
+        deadline = time.monotonic() + timeout_s
+
+        while time.monotonic() < deadline:
+            r = self.get(f"/api/{self.tenant_id}/qa/provisioning-check")
+            if r.status_code != 200:
+                self._warn("Client online poll", "autoprov_e2e", f"HTTP {r.status_code} during poll")
+                break
+
+            qa = r.json()
+            actual = qa.get("actual_clients", 0)
+            overall_pass = qa.get("overall_pass", False)
+
+            if overall_pass and actual >= expected:
+                self._ok(
+                    f"All {expected} clients online",
+                    "autoprov_e2e",
+                    f"actual={actual}, expected={expected}, delta={qa.get('delta', 0)}",
+                )
+                # Per-spoke breakdown
+                for spoke in qa.get("spokes", []):
+                    name = spoke.get("spoke_name", spoke.get("spoke_id", "?"))
+                    if spoke.get("pass"):
+                        self._ok(
+                            f"Spoke '{name}' fully provisioned",
+                            "autoprov_e2e",
+                            f"dongles={spoke['dongle_count']}, vms={spoke['vm_count']}, "
+                            f"clients={spoke['reporting_clients']}",
+                        )
+                    else:
+                        for issue in spoke.get("issues", ["unknown issue"]):
+                            self._warn(f"Spoke '{name}' provisioning", "autoprov_e2e", issue)
+                return
+
+            elapsed_s = int(timeout_s - (deadline - time.monotonic()))
+            print(f"    ⏳  {actual}/{expected} clients online — waiting... ({elapsed_s}s elapsed)")
+            time.sleep(poll_interval_s)
+
+        # Timed out
+        r = self.get(f"/api/{self.tenant_id}/qa/provisioning-check")
+        if r.status_code == 200:
+            qa = r.json()
+            actual = qa.get("actual_clients", 0)
+            delta = qa.get("delta", 0)
+            spoke_details = []
+            for s in qa.get("spokes", []):
+                if not s.get("pass"):
+                    name = s.get("spoke_name", s.get("spoke_id", "?"))
+                    spoke_details.append(
+                        f"{name}: dongles={s['dongle_count']}, vms={s['vm_count']}, "
+                        f"clients={s['reporting_clients']}"
+                    )
+            self._fail(
+                f"All {expected} clients online",
+                "autoprov_e2e",
+                f"Timed out after {timeout_s}s — actual={actual}/{expected}. " +
+                " | ".join(spoke_details),
+            )
+        else:
+            self._fail(
+                f"All {expected} clients online",
+                "autoprov_e2e",
+                f"Timeout + final poll failed (HTTP {r.status_code})",
+            )
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # Run all phases
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -756,6 +960,8 @@ class QARunner:
             "t3":           self.phase_t3,
             "health":       self.phase_health,
             "background":   self.phase_background,
+            "teardown":     self.phase_teardown,
+            "autoprov_e2e": self.phase_autoprov_e2e,
         }
 
         selected = phases if phases else list(all_phases.keys())

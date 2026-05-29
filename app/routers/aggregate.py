@@ -2636,3 +2636,156 @@ def get_qa_system_health(
         "issues": issues,
         "all_ok": len(issues) == 0,
     }
+
+
+@router.post("/{tenant_id}/qa/teardown-all-vms")
+def qa_teardown_all_vms(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """QA: Queue deletion of every auto-provisioned sim VM (vmid > 9000) across all spokes.
+
+    Each VM found in spoke telemetry is queued as a `proxmox_agent_command` so the
+    spoke forwards a `delete_vm` action to its local Proxmox agent.
+
+    Returns the number of VMs queued per spoke so the caller can poll
+    `GET /{tenant_id}/qa/teardown-status` until complete.
+    """
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    spokes_out: list[dict[str, Any]] = []
+    total_queued = 0
+
+    for spoke in _approved_spokes(resolved_tenant_id):
+        proxmox_vms = _telemetry_list(spoke, "proxmox_vms")
+        proxmox = _telemetry_dict(spoke, "proxmox")
+        if not proxmox_vms and isinstance(proxmox.get("vms"), list):
+            proxmox_vms = proxmox["vms"]
+
+        sim_vms = [
+            vm for vm in proxmox_vms
+            if vm.get("vmid") is not None and int(vm.get("vmid", 0)) > 9000
+            and not vm.get("is_template", False)
+        ]
+
+        for vm in sim_vms:
+            vmid = int(vm["vmid"])
+            vm_type = str(vm.get("type") or "qemu").strip().lower()
+            if vm_type not in {"qemu", "lxc"}:
+                vm_type = "qemu"
+            store.enqueue_command(Command(
+                spoke_id=spoke.id,
+                tenant_id=resolved_tenant_id,
+                type="proxmox_agent_command",
+                payload={"action": "delete_vm", "args": {"vmid": vmid, "vm_type": vm_type}},
+                expires_at=expires_at,
+            ))
+
+        queued = len(sim_vms)
+        total_queued += queued
+        spokes_out.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "vms_found": queued,
+            "vms_queued": queued,
+        })
+
+    return {
+        "ok": True,
+        "tenant_id": resolved_tenant_id,
+        "total_vms_queued": total_queued,
+        "spokes": spokes_out,
+    }
+
+
+@router.get("/{tenant_id}/qa/teardown-status")
+def qa_teardown_status(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """QA: Check whether all auto-provisioned VMs have been deleted across all spokes.
+
+    Reads the current proxmox telemetry from each spoke and counts VMs with vmid > 9000.
+    Returns complete=true when every spoke reports zero sim VMs remaining.
+    """
+    resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    spokes_out: list[dict[str, Any]] = []
+    total_remaining = 0
+
+    for spoke in _approved_spokes(resolved_tenant_id):
+        proxmox_vms = _telemetry_list(spoke, "proxmox_vms")
+        proxmox = _telemetry_dict(spoke, "proxmox")
+        if not proxmox_vms and isinstance(proxmox.get("vms"), list):
+            proxmox_vms = proxmox["vms"]
+
+        sim_vms_remaining = [
+            vm for vm in proxmox_vms
+            if vm.get("vmid") is not None and int(vm.get("vmid", 0)) > 9000
+            and not vm.get("is_template", False)
+        ]
+        remaining = len(sim_vms_remaining)
+        total_remaining += remaining
+        spokes_out.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "spoke_online": _is_online(spoke),
+            "proxmox_connected": bool(proxmox.get("connected", False)),
+            "sim_vms_remaining": remaining,
+            "complete": remaining == 0,
+        })
+
+    return {
+        "tenant_id": resolved_tenant_id,
+        "complete": total_remaining == 0,
+        "total_remaining": total_remaining,
+        "spokes": spokes_out,
+    }
+
+
+@router.post("/{tenant_id}/qa/enable-autoprov")
+def qa_enable_autoprov(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """QA: Enable Auto-Provisioning on all approved spokes and return expected client count.
+
+    Pushes `usb_auto_provision=on` to every spoke via config_update command.
+    Returns the expected number of clients (= total dongle count across all spokes)
+    so the caller can poll `GET /{tenant_id}/qa/provisioning-check` until
+    actual_clients matches expected_clients.
+    """
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    expected_clients = 0
+    updated_spokes: list[dict[str, Any]] = []
+
+    for spoke in _approved_spokes(resolved_tenant_id):
+        _used, _total, dongle_count, _auto = _spoke_usb_capacity(spoke)
+        expected_clients += dongle_count
+
+        next_config = dict(spoke.config or {})
+        next_config["usb_auto_provision"] = "on"
+        spoke.config = next_config
+        spoke.config_version = (spoke.config_version or 0) + 1
+        store.save_spoke(spoke)
+        store.enqueue_command(Command(
+            spoke_id=spoke.id,
+            tenant_id=resolved_tenant_id,
+            type="config_update",
+            payload={**next_config, "__config_version": spoke.config_version},
+            expires_at=expires_at,
+        ))
+        updated_spokes.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "dongle_count": dongle_count,
+        })
+
+    return {
+        "ok": True,
+        "tenant_id": resolved_tenant_id,
+        "auto_provision": "on",
+        "expected_clients": expected_clients,
+        "updated_spokes": len(updated_spokes),
+        "spokes": updated_spokes,
+    }
