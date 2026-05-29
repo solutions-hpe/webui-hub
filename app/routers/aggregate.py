@@ -709,10 +709,18 @@ async def get_simulation_conf(
     tenant = _get_tenant(resolved_tenant_id)
     cfg = _github_repo_settings(tenant)
     if not cfg.get("github_token"):
-        # No GitHub API key — serve hub-managed override content (persistent local mode).
-        # Content is empty string if no override has been saved yet.
+        # No GitHub API key — serve hub-managed override content.
+        # If no override has been saved yet, fall back to sim_conf_content
+        # from the first online spoke that includes it in telemetry.
+        content = tenant.sim_conf_override or ""
+        if not content:
+            for spoke in _approved_spokes(resolved_tenant_id):
+                spoke_content = (spoke.telemetry or {}).get("sim_conf_content", "")
+                if spoke_content:
+                    content = spoke_content
+                    break
         return {
-            "content": tenant.sim_conf_override or "",
+            "content": content,
             "sha": "",
             "branch": "",
             "fetched_at": datetime.now(timezone.utc).isoformat(),
