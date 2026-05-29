@@ -737,6 +737,109 @@ async def save_simulation_conf(
     return {"ok": True, "commit_sha": commit_sha, "synced_spokes": synced_spokes}
 
 
+# ── Hub-managed conf overrides ────────────────────────────────────────────────
+# These allow a tenant admin to override configs/simulation.conf and
+# configs/user-overrides.conf without needing GitHub write access.
+# Overrides are stored on the hub and pushed to connected spokes via
+# config_update.  When the spoke is standalone (no hub), GitHub files apply.
+
+class ConfOverrideRequest(BaseModel):
+    content: str  # Raw INI text in the same format as the .conf file
+
+
+def _push_conf_overrides_to_spokes(tenant_id: str, current_user: User) -> int:
+    """Bump config_version on all approved spokes to push updated overrides."""
+    count = 0
+    for spoke in store.get_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version = (spoke.config_version or 0) + 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
+        count += 1
+    return count
+
+
+@router.get("/{tenant_id}/config/sim-conf-override")
+def get_sim_conf_override(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return the hub-managed simulation.conf override (INI text), or null if unset."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    return {"content": tenant.sim_conf_override, "active": tenant.sim_conf_override is not None}
+
+
+@router.put("/{tenant_id}/config/sim-conf-override")
+def save_sim_conf_override(
+    tenant_id: str,
+    payload: ConfOverrideRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Save hub-managed simulation.conf override and push to all approved spokes."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    tenant.sim_conf_override = payload.content
+    store.save_tenant(tenant)
+    pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+    return {"ok": True, "pushed_to_spokes": pushed}
+
+
+@router.delete("/{tenant_id}/config/sim-conf-override")
+def clear_sim_conf_override(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Clear hub-managed simulation.conf override — spokes revert to GitHub file."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    tenant.sim_conf_override = None
+    store.save_tenant(tenant)
+    pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+    return {"ok": True, "cleared": True, "pushed_to_spokes": pushed}
+
+
+@router.get("/{tenant_id}/config/user-conf-override")
+def get_user_conf_override(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return the hub-managed user-overrides.conf override (INI text), or null if unset."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    return {"content": tenant.user_conf_override, "active": tenant.user_conf_override is not None}
+
+
+@router.put("/{tenant_id}/config/user-conf-override")
+def save_user_conf_override(
+    tenant_id: str,
+    payload: ConfOverrideRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Save hub-managed user-overrides.conf override and push to all approved spokes."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    tenant.user_conf_override = payload.content
+    store.save_tenant(tenant)
+    pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+    return {"ok": True, "pushed_to_spokes": pushed}
+
+
+@router.delete("/{tenant_id}/config/user-conf-override")
+def clear_user_conf_override(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Clear hub-managed user-overrides.conf override — spokes revert to GitHub file."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    tenant.user_conf_override = None
+    store.save_tenant(tenant)
+    pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+    return {"ok": True, "cleared": True, "pushed_to_spokes": pushed}
+
+
 class UsbVidpidEntry(BaseModel):
     vidpid: str
     type: str = ""

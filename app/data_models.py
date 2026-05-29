@@ -72,6 +72,10 @@ class Tenant(BaseModel):
     })
     hub_config_enabled: bool = False
     hub_config: dict[str, Any] = Field(default_factory=dict)
+    # Hub-managed conf overrides: INI text distributed to spokes via config_update.
+    # Takes precedence over the GitHub-pulled version when the spoke is hub-connected.
+    sim_conf_override: Optional[str] = None     # overrides configs/simulation.conf
+    user_conf_override: Optional[str] = None    # overrides configs/user-overrides.conf
     central_sites_config: dict[str, Any] = Field(default_factory=dict)
     central_browse_interval_minutes: int = 5  # How often the hub polls Central API (1–60 min)
     usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)

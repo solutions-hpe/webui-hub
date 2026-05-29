@@ -1024,6 +1024,21 @@ def _hub_github_config(tenant: Tenant | None) -> dict[str, Any]:
     }
 
 
+def _hub_conf_overrides(tenant: Tenant | None) -> dict[str, Any]:
+    """Return hub-managed simulation.conf and user-overrides.conf override text.
+
+    Both values are included in every config_update payload so the spoke always
+    has the current state.  None means 'no override — use GitHub file as-is'.
+    An empty string means 'override is cleared'.
+    """
+    if not tenant:
+        return {"sim_conf_override": None, "user_conf_override": None}
+    return {
+        "sim_conf_override": tenant.sim_conf_override,
+        "user_conf_override": tenant.user_conf_override,
+    }
+
+
 
 def tenant_has_spoke_config_payload(tenant: Tenant | None) -> bool:
     return any(value is not None for value in _build_spoke_config_payload(tenant).values())
@@ -1104,6 +1119,7 @@ def _hub_notification_config(tenant: Tenant | None) -> dict[str, Any]:
 def _build_spoke_config_payload(tenant: Tenant | None) -> dict[str, Any]:
     payload = _hub_core_config(tenant)
     payload.update(_hub_github_config(tenant))
+    payload.update(_hub_conf_overrides(tenant))
     modes = _tenant_processing_modes(tenant)
     central_api, central_config = _hub_central_config(tenant)
     notifications = _hub_notification_config(tenant)
