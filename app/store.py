@@ -1604,6 +1604,36 @@ def init_store() -> None:
         except OSError as exc:
             logger.warning("init_store: could not back up/restore spokes.json for %s: %s", tenant_dir.name, exc)
 
+    # Migrate spokes.json to config-only format (strip telemetry & last_seen).
+    # After the telemetry-split refactor, spokes.json must only contain config
+    # fields so it stays tiny and is never written by frequent telemetry updates.
+    # This runs once at startup and is safe: _load_spokes merges in per-spoke
+    # state files, and _save_spokes now strips telemetry before writing.
+    for tenant_dir in base.iterdir():
+        if not tenant_dir.is_dir() or tenant_dir.name in ("pending", "tls"):
+            continue
+        spokes_path = tenant_dir / "spokes.json"
+        if not spokes_path.exists():
+            continue
+        try:
+            raw = _read_json(spokes_path) or []
+            if not isinstance(raw, list) or not raw:
+                continue
+            # Check if any entry still has telemetry or last_seen (old format)
+            if any("telemetry" in entry or "last_seen" in entry for entry in raw):
+                spokes = [Spoke(**entry) for entry in raw]
+                # Save state to per-spoke files before stripping from spokes.json
+                for spoke in spokes:
+                    if spoke.last_seen or spoke.telemetry:
+                        _save_spoke_state(tenant_dir.name, spoke.id, spoke.last_seen, spoke.telemetry)
+                _save_spokes(tenant_dir.name, spokes)
+                logger.info(
+                    "init_store: migrated %s to config-only format (%d spokes, %d bytes)",
+                    spokes_path, len(spokes), spokes_path.stat().st_size,
+                )
+        except Exception as exc:
+            logger.warning("init_store: could not migrate spokes.json for %s: %s", tenant_dir.name, exc)
+
 
 # ── T3 MAC Profile store ──────────────────────────────────────────────────────
 
