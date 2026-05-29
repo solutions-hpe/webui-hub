@@ -1517,13 +1517,16 @@ def init_store() -> None:
         spokes_path = tenant_dir / "spokes.json"
         spokes_bak = tenant_dir / "spokes.json.bak"
         try:
-            if spokes_path.exists() and spokes_path.stat().st_size > 2:
+            spokes_ok = spokes_path.exists() and spokes_path.stat().st_size > 2
+            bak_ok = spokes_bak.exists() and spokes_bak.stat().st_size > 2
+            if spokes_ok:
                 shutil.copy2(str(spokes_path), str(spokes_bak))
                 logger.info("init_store: backed up %s → %s", spokes_path, spokes_bak)
-            elif not spokes_path.exists() and spokes_bak.exists() and spokes_bak.stat().st_size > 2:
+            elif bak_ok:
+                # Restore if missing OR effectively empty (≤2 bytes = "[]" or "")
                 shutil.copy2(str(spokes_bak), str(spokes_path))
                 logger.warning(
-                    "init_store: spokes.json missing — restored from backup %s", spokes_bak
+                    "init_store: spokes.json missing/empty — restored from backup %s", spokes_bak
                 )
         except OSError as exc:
             logger.warning("init_store: could not back up/restore spokes.json for %s: %s", tenant_dir.name, exc)
