@@ -982,6 +982,7 @@ def get_aggregate_proxmox(
         proxmox = _telemetry_dict(spoke, "proxmox")
         vms = _telemetry_list(spoke, "proxmox_vms") or (proxmox.get("vms") if isinstance(proxmox.get("vms"), list) else [])
         usb_devices = _telemetry_list(spoke, "usb_devices") or (proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else [])
+        _used_slots, _total_slots, _dongle_count, auto_provision = _spoke_usb_capacity(spoke)
         hosts.append({
             "tenant_id": resolved_tenant_id,
             "spoke_id": spoke.id,
@@ -1000,9 +1001,9 @@ def get_aggregate_proxmox(
                 "vmid_start": int((spoke.config or {}).get("vmid_start", 0) or 0),
                 "usb_vidpids": (spoke.config or {}).get("usb_vidpids", "[]"),
                 "hostname": spoke.hostname or "",
-                # USB auto-provisioning settings — exposed so the hub VM-server
-                # USB tab can display and edit them per-spoke.
-                "usb_auto_provision": (spoke.config or {}).get("usb_auto_provision", "off"),
+                # Read auto_provision from telemetry via _spoke_usb_capacity so the
+                # hub reflects the spoke's actual runtime state, not just hub DB config.
+                "usb_auto_provision": "on" if auto_provision else "off",
                 "usb_missing_timeout": str((spoke.config or {}).get("usb_missing_timeout", "60")),
                 "usb_sim_phy": (spoke.config or {}).get("usb_sim_phy", "wireless"),
                 "usb_ignored_vidpids": (spoke.config or {}).get("usb_ignored_vidpids", "[]"),
