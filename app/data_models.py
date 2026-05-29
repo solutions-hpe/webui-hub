@@ -227,3 +227,19 @@ class OuiPoolEntry(BaseModel):
     vendor: str
     oui: str          # e.g. "3c:15:c2"
     device_type: str  # e.g. "iPhone 11 Pro"
+
+
+class QAApiKey(BaseModel):
+    """A tenant-scoped API key used exclusively by the QA runner.
+
+    Only the SHA-256 hash of the raw key is persisted.  The plaintext key is
+    returned exactly once at creation time and cannot be recovered afterwards.
+    """
+
+    id: str = Field(default_factory=_uuid)
+    tenant_id: str
+    description: str = ""
+    key_hash: str          # SHA-256 hex digest of the raw key
+    created_by: str        # username of the superadmin who generated it
+    created_at: datetime = Field(default_factory=_now)
+    last_used_at: Optional[datetime] = None

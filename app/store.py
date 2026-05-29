@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from .config import get_settings
 from .crypto import decrypt_dict, decrypt_str, encrypt_str, generate_api_key
-from .data_models import AuditEntry, BackupConfig, Command, HubAuthConfig, MacProfile, MacProfileEntry, OuiPoolEntry, Spoke, PendingSpoke, Tenant, User
+from .data_models import AuditEntry, BackupConfig, Command, HubAuthConfig, MacProfile, MacProfileEntry, OuiPoolEntry, QAApiKey, Spoke, PendingSpoke, Tenant, User
 
 _lock = threading.RLock()
 
@@ -1725,3 +1725,65 @@ def get_oui_pool_raw() -> list[dict]:
 def save_oui_pool_raw(entries: list[dict]) -> None:
     with _lock:
         _write_json(_oui_pool_path(), entries)
+
+
+# ── QA API Keys ────────────────────────────────────────────────────────────────
+
+def _qa_api_keys_path() -> Path:
+    return _data_dir() / "qa_api_keys.json"
+
+
+def list_qa_api_keys(tenant_id: str | None = None) -> list[QAApiKey]:
+    """Return all QA API keys, optionally filtered to a single tenant."""
+    with _lock:
+        raw: list[dict] = _read_json(_qa_api_keys_path()) or []
+    result = []
+    for item in raw:
+        try:
+            key = QAApiKey(**item)
+            if tenant_id is None or key.tenant_id == tenant_id:
+                result.append(key)
+        except Exception:
+            logger.warning("Skipping malformed QA API key entry: %s", item)
+    return result
+
+
+def save_qa_api_key(key: QAApiKey) -> None:
+    with _lock:
+        raw: list[dict] = _read_json(_qa_api_keys_path()) or []
+        raw = [r for r in raw if r.get("id") != key.id]
+        raw.append(key.model_dump(mode="json"))
+        _write_json(_qa_api_keys_path(), raw)
+
+
+def delete_qa_api_key(key_id: str) -> bool:
+    """Remove a QA API key by ID.  Returns True if a key was removed."""
+    with _lock:
+        raw: list[dict] = _read_json(_qa_api_keys_path()) or []
+        new_raw = [r for r in raw if r.get("id") != key_id]
+        if len(new_raw) == len(raw):
+            return False
+        _write_json(_qa_api_keys_path(), new_raw)
+    return True
+
+
+def validate_qa_api_key(raw_key: str) -> QAApiKey | None:
+    """Return the matching QAApiKey if the raw key is valid, else None.
+
+    Also updates last_used_at on a successful match.
+    """
+    import hashlib as _hashlib
+    key_hash = _hashlib.sha256(raw_key.encode()).hexdigest()
+    with _lock:
+        raw: list[dict] = _read_json(_qa_api_keys_path()) or []
+        for i, item in enumerate(raw):
+            if item.get("key_hash") == key_hash:
+                from datetime import datetime, timezone
+                item["last_used_at"] = datetime.now(timezone.utc).isoformat()
+                raw[i] = item
+                _write_json(_qa_api_keys_path(), raw)
+                try:
+                    return QAApiKey(**item)
+                except Exception:
+                    return None
+    return None

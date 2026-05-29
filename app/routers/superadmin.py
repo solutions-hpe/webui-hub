@@ -918,3 +918,85 @@ def remove_tenant_role(user_id: str, tenant_id: str, _: User = Depends(auth.requ
     user.tenant_roles = updated_roles
     store.save_user(user)
     return _user_response(user)
+
+
+# ── QA API Key management (superadmin only) ───────────────────────────────────
+
+class _QAKeyCreateRequest(BaseModel):
+    tenant_id: str
+    description: str = ""
+
+
+@router.post("/superadmin/qa-api-keys", status_code=201)
+def create_qa_api_key(
+    body: _QAKeyCreateRequest,
+    current_user: User = Depends(auth.require_superadmin),
+):
+    """Generate a new QA API key scoped to *tenant_id*.
+
+    The raw key is returned **once** in this response and cannot be retrieved
+    again.  Store it securely — it is the only credential the QA runner needs.
+    """
+    import hashlib
+    from ..data_models import QAApiKey
+    from ..crypto import generate_api_key
+
+    tenant = store.get_tenant(body.tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    raw_key = generate_api_key()
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    qa_key = QAApiKey(
+        tenant_id=body.tenant_id,
+        description=body.description,
+        key_hash=key_hash,
+        created_by=current_user.username,
+    )
+    store.save_qa_api_key(qa_key)
+
+    return {
+        "id": qa_key.id,
+        "tenant_id": qa_key.tenant_id,
+        "description": qa_key.description,
+        "created_by": qa_key.created_by,
+        "created_at": qa_key.created_at,
+        # Raw key shown exactly once — not stored, cannot be recovered.
+        "api_key": raw_key,
+        "warning": "Save this key now — it will not be shown again.",
+    }
+
+
+@router.get("/superadmin/qa-api-keys")
+def list_qa_api_keys(
+    tenant_id: Optional[str] = None,
+    _: User = Depends(auth.require_superadmin),
+):
+    """List QA API keys (metadata only — raw keys are never returned)."""
+    keys = store.list_qa_api_keys(tenant_id=tenant_id)
+    return {
+        "keys": [
+            {
+                "id": k.id,
+                "tenant_id": k.tenant_id,
+                "description": k.description,
+                "created_by": k.created_by,
+                "created_at": k.created_at,
+                "last_used_at": k.last_used_at,
+            }
+            for k in keys
+        ]
+    }
+
+
+@router.delete("/superadmin/qa-api-keys/{key_id}", status_code=200)
+def delete_qa_api_key(
+    key_id: str,
+    _: User = Depends(auth.require_superadmin),
+):
+    """Revoke a QA API key by ID."""
+    deleted = store.delete_qa_api_key(key_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="QA API key not found")
+    return {"ok": True, "deleted_id": key_id}

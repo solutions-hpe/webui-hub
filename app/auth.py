@@ -84,6 +84,24 @@ def authenticate_user(username: str, password: str) -> Optional[User]:
     return user
 
 
+# ── QA runner token ────────────────────────────────────────────────────────────
+# QA API keys are tenant-scoped and superadmin-generated.  Exchanging a valid
+# key via POST /api/qa/auth returns a short-lived JWT that grants read-only
+# access to exactly one tenant.  The JWT sub is "__qa_runner__" so _decode_token
+# constructs a synthetic User without a database lookup.
+
+_QA_RUNNER_SUB = "__qa_runner__"
+_QA_TOKEN_EXPIRE_MINUTES = 120  # 2 hours — long enough for a full QA run
+
+
+def create_qa_runner_token(tenant_id: str, key_id: str) -> str:
+    """Issue a short-lived JWT scoped to a single tenant for the QA runner."""
+    return create_access_token(
+        {"sub": _QA_RUNNER_SUB, "qa_tenant": tenant_id, "qa_key_id": key_id},
+        expires_delta=timedelta(minutes=_QA_TOKEN_EXPIRE_MINUTES),
+    )
+
+
 def _decode_token(token: str) -> User:
     settings = get_settings()
     exc = HTTPException(
@@ -107,6 +125,20 @@ def _decode_token(token: str) -> User:
             )
     except JWTError:
         raise exc
+
+    # Synthetic QA runner user — tenant-scoped, read-only, no DB lookup needed.
+    if username == _QA_RUNNER_SUB:
+        qa_tenant = payload.get("qa_tenant", "")
+        if not qa_tenant:
+            raise exc
+        return User(
+            id="__qa_runner__",
+            username="__qa_runner__",
+            is_superadmin=False,
+            hashed_password="",
+            roles={qa_tenant: "viewer"},
+        )
+
     user = store.get_user(username)
     if not user:
         raise exc
