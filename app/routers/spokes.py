@@ -1143,8 +1143,10 @@ async def spoke_websocket(
                 msg_type = str(data.get("type") or "telemetry").strip().lower()
                 if msg_type == "telemetry":
                     payload = data.get("payload") if isinstance(data.get("payload"), dict) else data
+                    t0 = time.monotonic()
                     await _apply_spoke_telemetry(tenant_id, spoke_id, spoke, payload)
-                    await websocket.send_json({"type": "telemetry_ack", "ts": _now().isoformat()})
+                    processing_ms = round((time.monotonic() - t0) * 1000)
+                    await websocket.send_json({"type": "telemetry_ack", "ts": _now().isoformat(), "processing_ms": processing_ms})
                     await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
                     await push_spoke_commands(tenant_id, spoke_id)
                 elif msg_type == "ack":
