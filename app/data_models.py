@@ -76,6 +76,10 @@ class Tenant(BaseModel):
     # Takes precedence over the GitHub-pulled version when the spoke is hub-connected.
     sim_conf_override: Optional[str] = None     # overrides configs/simulation.conf
     user_conf_override: Optional[str] = None    # overrides configs/user-overrides.conf
+    # Per-client permanent simulation enables set by admin via the hub UI.
+    # hostname → list of simulation names that should always appear active.
+    # Merged into active_simulations on the hub; no GitHub key required.
+    client_sim_overrides: dict[str, list[str]] = Field(default_factory=dict)
     central_sites_config: dict[str, Any] = Field(default_factory=dict)
     central_browse_interval_minutes: int = 5  # How often the hub polls Central API (1–60 min)
     usb_vidpids: list[dict[str, Any]] = Field(default_factory=list)

@@ -908,6 +908,11 @@ class DemoScenarioRequest(BaseModel):
     scenario: str  # e.g. "dns_fail", "dhcp_fail", "normal"
 
 
+class ClientSimOverrideRequest(BaseModel):
+    simulation: str  # e.g. "dns_fail", "ping_test"
+    enabled: bool
+
+
 async def _relay_demo_command(tenant_id: str, spoke_id: str, message: dict) -> bool:
     """Send a demo command to a spoke via WebSocket relay. Returns True if sent."""
     from ..ws import relay_ws
@@ -955,6 +960,47 @@ async def hub_demo_clear_scenario(
     if not sent:
         raise HTTPException(status_code=502, detail="Spoke relay is offline")
     return {"ok": True, "hostname": hostname, "cleared": True}
+
+
+@router.get("/{tenant_id}/clients/sim-overrides")
+def get_client_sim_overrides(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Return all hub-managed permanent sim overrides for a tenant (hostname → [sim, ...])."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    return {"client_sim_overrides": tenant.client_sim_overrides or {}}
+
+
+@router.put("/{tenant_id}/clients/{hostname}/sim-override")
+def set_client_sim_override(
+    tenant_id: str,
+    hostname: str,
+    payload: ClientSimOverrideRequest,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Enable or disable a simulation permanently for a specific client.
+
+    Stored as a hub-managed local override — no GitHub key required.
+    Merged into active_simulations when serving aggregate client data so the
+    dashboard reflects the admin-selected state immediately.
+    """
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    tenant = _get_tenant(resolved_tenant_id)
+    overrides: dict[str, list[str]] = dict(tenant.client_sim_overrides or {})
+    current = list(overrides.get(hostname, []))
+    sim = payload.simulation
+    if payload.enabled:
+        if sim not in current:
+            current.append(sim)
+    else:
+        current = [s for s in current if s != sim]
+    overrides[hostname] = current
+    tenant.client_sim_overrides = overrides
+    store.save_tenant(tenant)
+    return {"ok": True, "hostname": hostname, "simulation": sim, "enabled": payload.enabled,
+            "active_overrides": current}
 
 
 class UsbVidpidEntry(BaseModel):
@@ -1089,6 +1135,9 @@ def get_aggregate_clients(
     current_user: User = Depends(auth.get_current_user),
 ):
     resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
+    # Load hub-managed per-client sim overrides once (no GitHub needed).
+    tenant = _get_tenant(resolved_tenant_id)
+    admin_sim_overrides: dict[str, list[str]] = dict(tenant.client_sim_overrides or {})
     # Collect all candidate rows keyed by MAC (or hostname fallback) so we can
     # deduplicate VMs that appear on multiple spokes due to client_history.json
     # retention.  A client with active simulations beats a stale historical one.
@@ -1104,6 +1153,13 @@ def get_aggregate_clients(
         t3_pci_count = int(proxmox_tel.get("t3_pci_count") or len(t3_pci_devices))
         for client in _telemetry_clients(spoke):
             row = dict(client)
+            # Merge hub-managed permanent sim overrides into active_simulations.
+            # These are set by admins via the UI and stored locally — no GitHub key needed.
+            hostname = str(row.get("hostname") or "")
+            extra_sims = admin_sim_overrides.get(hostname, [])
+            if extra_sims:
+                merged = list(set(list(row.get("active_simulations") or []) + list(extra_sims)))
+                row["active_simulations"] = merged
             row.update({
                 "tenant_id": resolved_tenant_id,
                 "spoke_id": spoke.id,
