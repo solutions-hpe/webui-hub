@@ -1266,6 +1266,20 @@ def get_aggregate_proxmox(
         proxmox = _telemetry_dict(spoke, "proxmox")
         vms = _telemetry_list(spoke, "proxmox_vms") or (proxmox.get("vms") if isinstance(proxmox.get("vms"), list) else [])
         usb_devices = _telemetry_list(spoke, "usb_devices") or (proxmox.get("usb_state") if isinstance(proxmox.get("usb_state"), list) else [])
+        # Join prov_status from usb_state into each VM — the agent reports them separately.
+        # usb_state entries have vmid + prov_status (active/provisioning/tearing_down/missing).
+        _usb_prov_by_vmid: dict[int, str] = {
+            int(u["vmid"]): u["prov_status"]
+            for u in usb_devices
+            if isinstance(u, dict) and u.get("vmid") is not None and u.get("prov_status")
+        }
+        if _usb_prov_by_vmid:
+            vms = [
+                {**vm, "prov_status": _usb_prov_by_vmid.get(int(vm["vmid"]), vm.get("prov_status"))}
+                if isinstance(vm, dict) and vm.get("vmid") is not None
+                else vm
+                for vm in vms
+            ]
         _used_slots, _total_slots, _dongle_count, auto_provision = _spoke_usb_capacity(spoke)
         tel = spoke.telemetry or {}
         hosts.append({
