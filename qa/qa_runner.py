@@ -33,6 +33,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -384,6 +385,222 @@ class QARunner:
                     f"(vmids: {[v.get('vmid') for v in tearing_down]}) — "
                     "expected only during active teardown",
                 )
+
+        # ── Agent approval check ──────────────────────────────────────────────
+        # After reinstall the Proxmox agent requires manual approval in the hub UI
+        # before it will connect. connected=false + last_seen=null = never approved.
+        # (This was the root cause of svr-02 missing during the teardown test.)
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            proxmox = h.get("proxmox", {})
+            px_connected = proxmox.get("connected", False)
+            px_last_seen = proxmox.get("last_seen")
+            if not px_connected and not px_last_seen:
+                self._warn(
+                    f"Spoke '{name}' proxmox agent approval",
+                    "proxmox",
+                    "connected=false and last_seen=null — agent has never connected. "
+                    "If recently reinstalled, approve it in the hub UI via "
+                    "POST /{tenant_id}/aggregate/proxmox-approve-agent",
+                )
+
+        # ── Proxmox agent last_seen freshness ─────────────────────────────────
+        # collect_telemetry has a 25s timeout on pvesh; when pvesh blocks during
+        # delete/clone the agent falls back to a bare ping which does NOT update
+        # last_seen. The hub UI then shows the agent as silent even though the WS
+        # connection is fine. Threshold mirrors the live monitor alert (120s warn,
+        # 300s fail matching the hub heartbeat_monitor offline threshold).
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            proxmox = h.get("proxmox", {})
+            px_connected = proxmox.get("connected", False)
+            px_last_seen = proxmox.get("last_seen")
+            if not px_connected:
+                continue  # disconnected already reported above
+            if not px_last_seen:
+                self._warn(
+                    f"Spoke '{name}' proxmox agent last_seen",
+                    "proxmox",
+                    "connected=true but last_seen is null — agent has not sent full telemetry yet",
+                )
+                continue
+            try:
+                ls = datetime.datetime.fromisoformat(px_last_seen.replace("Z", "+00:00"))
+                age_s = int((datetime.datetime.now(datetime.timezone.utc) - ls).total_seconds())
+                if age_s > 300:
+                    self._fail(
+                        f"Spoke '{name}' proxmox agent freshness",
+                        "proxmox",
+                        f"last_seen {age_s}s ago (>5 min) — agent may be crashed or pvesh "
+                        "permanently blocked; spoke WS may still be connected",
+                    )
+                elif age_s > 120:
+                    self._warn(
+                        f"Spoke '{name}' proxmox agent freshness",
+                        "proxmox",
+                        f"last_seen {age_s}s ago — pvesh likely blocking during active Proxmox "
+                        "operation (delete/clone); collect_telemetry times out and agent falls "
+                        "back to bare pings which do not update last_seen",
+                    )
+                else:
+                    self._ok(
+                        f"Spoke '{name}' proxmox agent freshness",
+                        "proxmox",
+                        f"last_seen {age_s}s ago",
+                    )
+            except Exception:
+                self._warn(
+                    f"Spoke '{name}' proxmox agent freshness",
+                    "proxmox",
+                    f"Could not parse last_seen={px_last_seen!r}",
+                )
+
+        # ── Event-loop & WS diagnostic telemetry ─────────────────────────────
+        # Fields added in spoke commit 2e06d66 / hub commit 9580b96.
+        # All three being None on a connected spoke means old code is running
+        # without the synchronous-I/O fixes — reinstall is required.
+        #
+        # Thresholds are based on observed production values:
+        #   hub_loop_lag_ms  0–10ms = healthy; >200ms = sluggish; >500ms = blocked
+        #   telemetry_build_ms  0ms = healthy (background cache); >100ms = warn; >500ms = blocking
+        #   ws_reconnect_count  1 = clean (initial connect only); >1 = drops occurred
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            if not h.get("spoke_online"):
+                continue  # offline spoke — telemetry fields meaningless
+
+            hub_lag_ms = h.get("hub_loop_lag_ms")
+            build_ms   = h.get("telemetry_build_ms")
+            reconnects = h.get("ws_reconnect_count")
+            ws_err     = h.get("ws_last_error")
+            sc_err     = h.get("sim_conf_read_error")
+
+            # Detect old spoke code — all three diagnostic fields absent
+            if hub_lag_ms is None and build_ms is None and reconnects is None:
+                self._fail(
+                    f"Spoke '{name}' event-loop fix telemetry present",
+                    "proxmox",
+                    "hub_loop_lag_ms / telemetry_build_ms / ws_reconnect_count all null on an "
+                    "online spoke — spoke is running old code without the synchronous I/O fixes "
+                    "(pre-commit 2e06d66). Reinstall via install-lxc.sh to resolve.",
+                )
+                continue  # individual field checks are meaningless without the fields
+
+            self._ok(f"Spoke '{name}' event-loop fix telemetry present", "proxmox")
+
+            # Hub event-loop lag (measured by spoke from telemetry_ack roundtrip).
+            # High values mean store.get_tenant() or store.save_spoke() is blocking
+            # the hub asyncio event loop — root cause of the all-spokes-offline incident.
+            if hub_lag_ms is None:
+                self._skip(
+                    f"Spoke '{name}' hub event-loop lag",
+                    "proxmox",
+                    "field not in telemetry (old spoke code on this spoke)",
+                )
+            elif hub_lag_ms > 500:
+                self._fail(
+                    f"Spoke '{name}' hub event-loop lag",
+                    "proxmox",
+                    f"{hub_lag_ms:.0f}ms — hub asyncio loop severely blocked; "
+                    "root cause: synchronous disk I/O in _apply_spoke_telemetry "
+                    "or store.get_tenant() on the hot WS path",
+                )
+            elif hub_lag_ms > 200:
+                self._warn(
+                    f"Spoke '{name}' hub event-loop lag",
+                    "proxmox",
+                    f"{hub_lag_ms:.0f}ms (warn ≥200ms, fail ≥500ms)",
+                )
+            else:
+                self._ok(
+                    f"Spoke '{name}' hub event-loop lag",
+                    "proxmox",
+                    f"{hub_lag_ms:.0f}ms",
+                )
+
+            # Spoke telemetry build time.
+            # High values mean _build_relay_telemetry_payload is blocking on CIFS
+            # (synchronous read_text() on the asyncio event loop).
+            # With the background sim_conf refresher this should be ~0ms.
+            if build_ms is None:
+                self._skip(
+                    f"Spoke '{name}' telemetry build time",
+                    "proxmox",
+                    "field not in telemetry (old spoke code on this spoke)",
+                )
+            elif build_ms > 500:
+                self._fail(
+                    f"Spoke '{name}' telemetry build time",
+                    "proxmox",
+                    f"{build_ms:.0f}ms — CIFS stall or blocking I/O in "
+                    "_build_relay_telemetry_payload; root cause: synchronous "
+                    "Path.read_text() in async hot path (should be ~0ms with cache fix)",
+                )
+            elif build_ms > 100:
+                self._warn(
+                    f"Spoke '{name}' telemetry build time",
+                    "proxmox",
+                    f"{build_ms:.0f}ms (warn ≥100ms, fail ≥500ms)",
+                )
+            else:
+                self._ok(
+                    f"Spoke '{name}' telemetry build time",
+                    "proxmox",
+                    f"{build_ms:.0f}ms",
+                )
+
+            # WS reconnect count — should be exactly 1 (initial connect at startup).
+            # Values >1 indicate the WS connection dropped and was re-established.
+            # Values >5 are concerning and likely correlated with hub event-loop blocks.
+            if reconnects is None:
+                self._skip(
+                    f"Spoke '{name}' WS reconnect count",
+                    "proxmox",
+                    "field not in telemetry (old spoke code on this spoke)",
+                )
+            elif reconnects > 5:
+                self._fail(
+                    f"Spoke '{name}' WS reconnect count",
+                    "proxmox",
+                    f"reconnects={reconnects} — spoke WS is repeatedly dropping; "
+                    "check ws_last_error and hub connectivity",
+                )
+            elif reconnects > 1:
+                self._warn(
+                    f"Spoke '{name}' WS reconnect count",
+                    "proxmox",
+                    f"reconnects={reconnects} — at least one WS drop since last spoke restart",
+                )
+            else:
+                self._ok(
+                    f"Spoke '{name}' WS reconnect count",
+                    "proxmox",
+                    f"reconnects={reconnects} (clean)",
+                )
+
+            # Last WS error — any non-null value means the WS dropped at some point.
+            if ws_err:
+                self._warn(
+                    f"Spoke '{name}' WS last error",
+                    "proxmox",
+                    f"{ws_err!r} — a WS connection error was recorded; "
+                    "hub may have been unreachable or event-loop timed out a ping",
+                )
+            elif reconnects is not None:
+                self._ok(f"Spoke '{name}' WS last error", "proxmox", "none")
+
+            # sim_conf CIFS background refresh errors.
+            # Non-null means the background refresher caught an exception reading
+            # the sim_conf from the Azure Files CIFS mount.
+            if sc_err:
+                self._warn(
+                    f"Spoke '{name}' sim_conf refresh",
+                    "proxmox",
+                    f"sim_conf_read_error={sc_err!r} — CIFS mount stalled during "
+                    "background sim_conf refresh; spoke fell back to last cached value",
+                )
+            elif build_ms is not None:
+                self._ok(f"Spoke '{name}' sim_conf refresh", "proxmox", "no errors")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PHASE 5 — USB / Dongle Configuration
@@ -758,8 +975,6 @@ class QARunner:
                 last_seen_str = spoke.get("last_seen")
                 if last_seen_str:
                     try:
-                        # Parse ISO 8601 timestamp
-                        import datetime
                         ls = datetime.datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
                         age = (datetime.datetime.now(datetime.timezone.utc) - ls).total_seconds()
                         if age > stale_threshold:
@@ -790,6 +1005,44 @@ class QARunner:
                 )
             else:
                 self._ok("No unexpected recovery commands queued", "background")
+
+        # ── Simultaneous-offline pattern detector ─────────────────────────────
+        # When ALL spokes drop offline at the same time it is almost always a
+        # hub-level problem (asyncio event loop blocked by synchronous CIFS I/O
+        # or store.get_tenant) rather than individual spoke failures.  This was
+        # the root cause of the 12-minute all-spokes-offline incident.
+        # Re-uses the same spoke list fetched above when possible.
+        r2 = self.get(f"/api/{self.tenant_id}/spokes")
+        if r2.status_code == 200:
+            all_spokes = r2.json().get("spokes", [])
+            total_sp = len(all_spokes)
+            offline_sp = [
+                s for s in all_spokes
+                if not (s.get("online") or s.get("status") == "online")
+            ]
+            if total_sp >= 2 and len(offline_sp) == total_sp:
+                self._fail(
+                    "All-spokes-simultaneous-offline",
+                    "background",
+                    f"All {total_sp} spokes offline at the same time — this pattern "
+                    "indicates a hub-level event-loop block or CIFS stall, not individual "
+                    "spoke failures. Check hub_loop_lag_ms in phase_proxmox results and "
+                    "confirm store.get_tenant / store.save_spoke are running in executor.",
+                )
+            elif total_sp >= 2 and len(offline_sp) > total_sp // 2:
+                self._warn(
+                    "Majority-spokes-simultaneous-offline",
+                    "background",
+                    f"{len(offline_sp)}/{total_sp} spokes offline at once — majority offline "
+                    "suggests a hub-level issue rather than independent spoke failures; "
+                    "check hub_loop_lag_ms",
+                )
+            elif total_sp >= 2:
+                self._ok(
+                    "All-spokes-simultaneous-offline",
+                    "background",
+                    f"Pattern not triggered — {total_sp - len(offline_sp)}/{total_sp} spokes online",
+                )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # PHASE 15 — VM Teardown
