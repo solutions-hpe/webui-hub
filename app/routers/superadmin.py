@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -42,6 +43,22 @@ def _hub_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+def _find_git() -> str:
+    """Return the full path to the git binary.
+    Tries shutil.which first, then common install locations.
+    Raises FileNotFoundError with a helpful message if git is not found."""
+    git = shutil.which("git")
+    if git:
+        return git
+    for candidate in ("/usr/bin/git", "/usr/local/bin/git", "/bin/git"):
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(
+        "git is not installed or not in PATH. "
+        "Install git (e.g. 'apt-get install -y git') to enable hub self-update."
+    )
+
+
 def _run_hub_self_update_bg() -> None:
     """Run git pull + pip install in a background thread, then restart via systemd."""
     global _hub_update_state
@@ -57,8 +74,10 @@ def _run_hub_self_update_bg() -> None:
 
         # ── Step 1: git pull ──────────────────────────────────────────────────
         _log(f"Working dir: {base}")
+        git_bin = _find_git()
+        _log(f"git binary: {git_bin}")
         result = subprocess.run(
-            ["git", "pull", "--ff-only"],
+            [git_bin, "pull", "--ff-only"],
             capture_output=True, text=True, cwd=str(base), timeout=120
         )
         for l in (result.stdout + result.stderr).splitlines():
@@ -1097,15 +1116,16 @@ def get_hub_update_status(current_user: User = Depends(auth.require_superadmin))
     # Git info (non-fatal)
     git_info: dict[str, Any] = {}
     try:
+        git_bin = _find_git()
         # Local HEAD
-        r = subprocess.run(["git", "log", "-1", "--format=%H %s %ai"], capture_output=True, text=True, cwd=str(base), timeout=10)
+        r = subprocess.run([git_bin, "log", "-1", "--format=%H %s %ai"], capture_output=True, text=True, cwd=str(base), timeout=10)
         if r.returncode == 0 and r.stdout.strip():
             parts = r.stdout.strip().split(" ", 2)
             git_info["local_commit"] = parts[0] if parts else ""
             git_info["local_subject"] = " ".join(parts[1:]) if len(parts) > 1 else ""
         # Remote HEAD (fetch first)
-        subprocess.run(["git", "fetch", "--quiet", "origin"], capture_output=True, cwd=str(base), timeout=15)
-        r2 = subprocess.run(["git", "log", "HEAD..origin/HEAD", "--oneline"], capture_output=True, text=True, cwd=str(base), timeout=10)
+        subprocess.run([git_bin, "fetch", "--quiet", "origin"], capture_output=True, cwd=str(base), timeout=15)
+        r2 = subprocess.run([git_bin, "log", "HEAD..origin/HEAD", "--oneline"], capture_output=True, text=True, cwd=str(base), timeout=10)
         ahead_lines = [l for l in r2.stdout.splitlines() if l.strip()]
         git_info["commits_behind"] = len(ahead_lines)
         git_info["pending_commits"] = ahead_lines[:10]
