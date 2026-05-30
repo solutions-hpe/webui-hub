@@ -21,8 +21,10 @@ Hub is designed for operators who need to manage many spoke environments from on
 - JSON file store under `/data/` instead of PostgreSQL, SQLite, or SQLAlchemy
 - HTTPS by default on port **8443** with self-signed certificate generation at startup
 - Local JWT authentication plus hub-side LDAP/AD, RADIUS, and TACACS+ provider support; OIDC remains stubbed for future work
+- GitHub-first tenant config editors for `simulation.conf` and `user-overrides.conf`, with hub override mode pushed to spokes
 - Deployment options for Docker, Azure Container Instance, and BYOD Linux hosts
 - Per-spoke command queue, inbox/ack relay, and 7-day rolling audit history
+- Sites monitoring that compares current wireless clients against a sticky 7-day rolling baseline alarm
 
 ## Architecture
 
@@ -65,6 +67,14 @@ Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webu
 - Branch alignment matters: `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
 - For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
 
+
+## Tenant config editors
+
+Hub exposes two tenant config editors that stay aligned with the shared frontend in `cs-webui`.
+
+- **`simulation.conf`** uses one unified collapsible-card layout for `[simulation]`, `[server]`, `[address]`, and `s0`–`s9`. Text/select fields render in a responsive grid, boolean flags render inline, and slot sections always show the full standard key set.
+- **`user-overrides.conf`** uses per-user cards with an **Add User** modal, delete actions, hostname search, and a **↗ Override** shortcut from the Simulation Clients table to prefill from the client's current bucket.
+- `GET /api/{tenant_id}/config/user-overrides-conf` now mirrors the dual-mode behavior of `simulation.conf`: Hub reads from GitHub when a repo token is configured, but a saved hub override takes precedence until it is cleared.
 
 ## Backup & Azure Storage
 
@@ -479,6 +489,8 @@ Hub heartbeat monitoring treats a spoke as offline after 300 seconds without tel
 | Onboarding PSK generate | `POST` | `/api/tenant/{tenant_id}/onboarding-psk` | superadmin, admin |
 | Onboarding PSK revoke | `DELETE` | `/api/tenant/{tenant_id}/onboarding-psk` | superadmin, admin |
 | Settings | `GET` | `/api/{tenant_id}/settings` | superadmin, admin |
+| User overrides config | `GET` | `/api/{tenant_id}/config/user-overrides-conf` | superadmin, admin |
+| User overrides config | `PUT` | `/api/{tenant_id}/config/user-overrides-conf` | superadmin, admin |
 | Aruba settings | `POST` | `/api/{tenant_id}/settings/aruba` | superadmin, admin |
 | Notification settings | `POST` | `/api/{tenant_id}/settings/notifications` | superadmin, admin |
 | Processing mode | `GET` | `/api/{tenant_id}/settings/processing-mode` | superadmin, admin |
@@ -654,13 +666,15 @@ grant_type=client_credentials
 
 The **Setup → Central API** browse tab in the Hub UI provides five subtabs fed by the live endpoints above:
 
-- **Sites** — health score, wireless client count, Monitor button per site
+- **Sites** — health score, wireless client count, 7-day baseline alarm state, wrapped spoke list, and Monitor button per site
 - **Alerts** — filterable by category (All / Clients / LAN / WLAN / WAN / System / Security), severity badge, device type
 - **Insights** — AI-generated insight with description, impacted device + client count
 - **Clients** — per-site totals with wired/wireless breakdown
 - **Devices** — full device list with name, serial, type, model, status, IP, firmware
 
 **Monitor button state:** Each row shows a **Monitor** button to add the item to the Monitored Items list. If the item is already being monitored, the button is replaced with a **✓ Monitored** badge — visible without re-adding the same item.
+
+**Client-count alarm behavior:** The Sites page now compares each site's current hourly wireless-client average against a persisted 7-day rolling baseline. A site enters **DEGRADED** when the current value falls more than 25% below baseline, and the alarm stays active until the count recovers. During the first day of operation, Hub falls back to the 1-hour average until enough 7-day history exists.
 
 ### Centralized vs distributed mode
 

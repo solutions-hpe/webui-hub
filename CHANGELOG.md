@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.31] — 2026-05-30
+
+### Added
+- **GitHub-backed `user-overrides.conf` reads** — `GET /{tenant_id}/config/user-overrides-conf` now uses the same dual-mode behavior as `simulation.conf`: read from GitHub when configured, but return the hub-managed override when one is set.
+- **7-day site baseline alarm UI** — the Sites view now compares current wireless-client counts against a persisted 7-day rolling baseline, with a 1-hour fallback during the first day of operation.
+
+### Changed
+- **Unified `simulation.conf` editor layout** — all section types now render with the same collapsible card layout, responsive text/select grid, inline boolean strip, and full standard key set for `s0`–`s9`.
+- **User Overrides UI redesign** — `user-overrides.conf` now uses per-user cards with Add User modal, delete actions, hostname search, and a `↗ Override` shortcut from the Simulation Clients row to prefill from the client's current bucket.
+- **Sites spoke list wrapping** — spoke lists in the Sites section now wrap to full width instead of truncating.
+
+### Fixed
+- **QA logout regression** — `_qaFetch` no longer logs users out when a QA check returns an expected `401` response.
+
 ## [2.30] — 2026-05-25
 
 ### Added
