@@ -559,14 +559,16 @@ class ArubaClient:
                     return [
                         {
                             "mac": item.get("macAddress") or item.get("mac") or "—",
-                            "ip": item.get("ipv4") or item.get("ip") or "—",
+                            "ip": item.get("ipv4") or item.get("ipv4Address") or item.get("ip") or "—",
                             "hostname": item.get("name") or item.get("hostname") or "—",
+                            "username": item.get("userName") or item.get("username") or "",
                             "site": item.get("siteName") or item.get("site_name") or "—",
-                            "ap": item.get("associatedDevice") or item.get("ap_name") or "—",
-                            "ssid": item.get("ssid") or "—",
+                            "ap": item.get("associatedDeviceName") or item.get("associatedDevice") or item.get("ap_name") or "—",
+                            "ssid": item.get("ssid") or item.get("essid") or "—",
                             "status": item.get("status") or "—",
-                            "os": item.get("os_type") or "—",
+                            "os": item.get("osType") or item.get("os_type") or "—",
                             "vlan": str(item.get("vlan") or "—"),
+                            "connection_type": item.get("clientConnectionType") or "",
                         }
                         for item in (data.get("items") or [])
                     ]
@@ -957,14 +959,16 @@ class ArubaClient:
                     entry["wireless"] += 1
                 normalized_clients.append({
                     "mac": cli.get("macAddress") or cli.get("mac") or "—",
-                    "ip": cli.get("ipv4") or cli.get("ip") or "—",
+                    "ip": cli.get("ipv4") or cli.get("ipv4Address") or cli.get("ip") or "—",
                     "hostname": cli.get("name") or cli.get("hostname") or "—",
+                    "username": cli.get("userName") or cli.get("username") or "",
                     "site": sn,
-                    "ap": cli.get("associatedDevice") or cli.get("ap_name") or "—",
-                    "ssid": cli.get("ssid") or "—",
+                    "ap": cli.get("associatedDeviceName") or cli.get("associatedDevice") or cli.get("ap_name") or "—",
+                    "ssid": cli.get("ssid") or cli.get("essid") or "—",
                     "status": cli.get("status") or "—",
-                    "os": cli.get("os_type") or "—",
+                    "os": cli.get("osType") or cli.get("os_type") or "—",
                     "vlan": str(cli.get("vlan") or "—"),
+                    "connection_type": cli.get("clientConnectionType") or "",
                 })
 
             return {
