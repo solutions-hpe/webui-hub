@@ -1177,12 +1177,11 @@ async def set_client_sim_override(
     overrides[hostname] = current
     tenant.client_sim_overrides = overrides
 
-    # ── 2. Update hub-managed user_conf_override (pushes as hub-user-overrides.conf) ──
-    hub_content = tenant.user_conf_override or ""
-    hub_content = _modify_ini_content(hub_content, hostname, sim, payload.enabled)
-    tenant.user_conf_override = hub_content if hub_content.strip() else None
-
-    # ── 3. Best-effort push to GitHub if configured ───────────────────────────
+    # ── 2. Persist the change ─────────────────────────────────────────────────
+    # If GitHub is configured: GitHub is the source of truth. Write the change
+    # there and leave user_conf_override alone (None = hub serves GitHub content).
+    # If no GitHub: store in user_conf_override, which the hub pushes to spokes as
+    # hub-user-overrides.conf and which is merged on top of the spoke's local file.
     github_pushed = False
     cfg = _github_repo_settings(tenant)
     if cfg.get("github_token"):
@@ -1206,6 +1205,16 @@ async def set_client_sim_override(
                 github_pushed = resp.status_code < 400
         except Exception as exc:
             logger.warning("sim-override: GitHub push failed for %s/%s: %s", hostname, sim, exc)
+
+        if not github_pushed:
+            # GitHub failed — fall back to hub-managed override so the change isn't lost
+            hub_content = _modify_ini_content(tenant.user_conf_override or "", hostname, sim, payload.enabled)
+            tenant.user_conf_override = hub_content if hub_content.strip() else None
+        # On success, leave user_conf_override as-is (None means "use GitHub")
+    else:
+        # No GitHub — hub override is the only store; pushed to spokes as hub-user-overrides.conf
+        hub_content = _modify_ini_content(tenant.user_conf_override or "", hostname, sim, payload.enabled)
+        tenant.user_conf_override = hub_content if hub_content.strip() else None
 
     store.save_tenant(tenant)
     pushed_spokes = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
