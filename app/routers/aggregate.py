@@ -568,6 +568,25 @@ async def _fetch_simulation_conf_from_github(tenant: Tenant) -> tuple[str, str, 
     return content, str(payload.get("sha") or ""), branch
 
 
+async def _fetch_user_overrides_conf_from_github(tenant: Tenant) -> tuple[str, str, str]:
+    github_token, owner, repo, branch = _require_sim_repo_config(tenant)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents/configs/user-overrides.conf"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url, headers=_github_api_headers(github_token), params={"ref": branch})
+    if response.status_code == 404:
+        # File missing is non-fatal — return empty content
+        return "", "", branch
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=_github_error_detail(response))
+    payload = response.json()
+    encoded = str(payload.get("content") or "").replace("\n", "")
+    try:
+        content = base64.b64decode(encoded).decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub returned unreadable user-overrides.conf content: {exc}") from exc
+    return content, str(payload.get("sha") or ""), branch
+
+
 
 def _validated_cluster_url_or_400(cluster_url: str) -> str:
     try:
@@ -931,18 +950,40 @@ def clear_user_conf_override(
 # These are always in "override" mode (no GitHub path needed).
 
 @router.get("/{tenant_id}/config/user-overrides-conf")
-def get_user_overrides_conf(
+async def get_user_overrides_conf(
     tenant_id: str,
     current_user: User = Depends(auth.get_current_user),
 ):
-    """Return the hub-managed user-overrides.conf content (INI text).
-    Always served from the hub override store — no GitHub dependency."""
+    """Return user-overrides.conf content.
+    If a GitHub token is configured, fetches configs/user-overrides.conf from the repo.
+    Otherwise serves the hub-managed override (tenant.user_conf_override)."""
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
     tenant = _get_tenant(resolved_tenant_id)
+    cfg = _github_repo_settings(tenant)
+    if not cfg.get("github_token"):
+        # No GitHub API key — serve hub-managed override content only.
+        return {
+            "content": tenant.user_conf_override or "",
+            "sha": "",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "override",
+        }
+    # GitHub token available — read the file from the repo.
+    # If the hub-managed override is set, it takes precedence (admin explicitly set it).
+    if tenant.user_conf_override is not None:
+        return {
+            "content": tenant.user_conf_override,
+            "sha": "",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "override",
+        }
+    content, sha, branch = await _fetch_user_overrides_conf_from_github(tenant)
     return {
-        "content": tenant.user_conf_override or "",
+        "content": content,
+        "sha": sha,
+        "branch": branch,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "mode": "override",
+        "mode": "github",
     }
 
 
