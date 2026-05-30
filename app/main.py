@@ -88,6 +88,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(tasks.maintenance_loop()),
         asyncio.create_task(tasks.acme_renewal_check()),
         asyncio.create_task(tasks.central_browse_poller()),
+        asyncio.create_task(tasks.loop_lag_monitor()),
     ]
     try:
         yield

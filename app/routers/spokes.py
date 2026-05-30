@@ -309,7 +309,8 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
 
 
 async def _apply_spoke_telemetry(tenant_id: str, spoke_id: str, spoke, payload: dict[str, Any]) -> None:
-    tenant = store.get_tenant(tenant_id)
+    loop = asyncio.get_running_loop()
+    tenant = await loop.run_in_executor(None, store.get_tenant, tenant_id)
     changed = False
     previous_config_version = spoke.config_version
     hostname = str(payload.get("hostname") or "").strip()
@@ -332,8 +333,7 @@ async def _apply_spoke_telemetry(tenant_id: str, spoke_id: str, spoke, payload: 
         store.ensure_config_clear_command(tenant_id, spoke_id)
         changed = True
     if changed:
-        store.save_spoke(spoke)
-    loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, store.save_spoke, spoke)
     await loop.run_in_executor(None, store.update_spoke_telemetry, tenant_id, spoke_id, payload)
     # Drift detection: if the hub's authoritative config has changed since the
     # last push, bump config_version so the next inbox fetch queues a correction.
@@ -1147,7 +1147,13 @@ async def spoke_websocket(
                     t0 = time.monotonic()
                     await _apply_spoke_telemetry(tenant_id, spoke_id, spoke, payload)
                     processing_ms = round((time.monotonic() - t0) * 1000)
-                    await websocket.send_json({"type": "telemetry_ack", "ts": _now().isoformat(), "processing_ms": processing_ms})
+                    from .. import tasks as _tasks
+                    await websocket.send_json({
+                        "type": "telemetry_ack",
+                        "ts": _now().isoformat(),
+                        "processing_ms": processing_ms,
+                        "loop_lag_ms": _tasks.hub_loop_lag_ms,
+                    })
                     await websocket.send_json({"type": "central_feed", "payload": _build_spoke_central_feed(tenant_id, spoke_id)})
                     await push_spoke_commands(tenant_id, spoke_id)
                 elif msg_type == "ack":

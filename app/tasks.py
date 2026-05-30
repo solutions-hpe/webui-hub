@@ -52,6 +52,30 @@ HUB_CLIENT_COUNT_MIN_SAMPLES = 3
 HUB_CLIENT_COUNT_DROP_PCT = 25.0
 HUB_CLIENT_WINDOW_SECS = 3600
 
+# Event-loop lag measured by loop_lag_monitor (updated every 100ms).
+# Exposed in telemetry_ack so spokes echo it back in their next payload,
+# letting the hub store and surface it via the aggregate API.
+hub_loop_lag_ms: float = 0.0
+_LAG_MONITOR_INTERVAL = 0.1  # 100 ms reference sleep
+
+
+async def loop_lag_monitor() -> None:
+    """Measure hub asyncio event-loop responsiveness continuously.
+
+    Schedules a 100 ms sleep and records how much longer than 100 ms it actually
+    waited.  Any excess is time the event loop spent in synchronous blocking work.
+    A healthy hub idles near 0 ms; sustained values above 200 ms indicate
+    blocking calls on the hot path (synchronous disk I/O, CPU-bound work, etc.).
+    """
+    global hub_loop_lag_ms
+    while True:
+        t0 = time.monotonic()
+        await asyncio.sleep(_LAG_MONITOR_INTERVAL)
+        excess = (time.monotonic() - t0 - _LAG_MONITOR_INTERVAL) * 1000
+        hub_loop_lag_ms = round(max(excess, 0.0), 1)
+        if hub_loop_lag_ms > 200:
+            logger.warning("hub event-loop lag: %.0f ms — synchronous blocking detected", hub_loop_lag_ms)
+
 
 def _set_hub_central_status(tenant_id: str, payload: dict[str, Any]) -> None:
     _hub_central_status[tenant_id] = payload
