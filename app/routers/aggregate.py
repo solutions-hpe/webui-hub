@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import base64
+import re
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
@@ -1094,8 +1095,60 @@ def get_client_sim_overrides(
     return {"client_sim_overrides": tenant.client_sim_overrides or {}}
 
 
+def _modify_ini_content(content: str, section: str, key: str, enabled: bool) -> str:
+    """Add or remove a key=on entry in an INI section without disrupting surrounding content.
+
+    - enabled=True  → sets [section]\nkey=on  (adds section if missing)
+    - enabled=False → removes key from section (leaves section header if other keys exist)
+    """
+    newline = "\r\n" if "\r\n" in content else "\n"
+    lines = content.splitlines()
+    updated: list[str] = []
+    section_found = False
+    in_target = False
+    key_handled = False
+
+    for line in lines:
+        m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
+        if m:
+            if in_target and enabled and not key_handled:
+                updated.append(f"{key}=on")
+                key_handled = True
+            in_target = (m.group(1) == section)
+            section_found = section_found or in_target
+            updated.append(line)
+            continue
+
+        if in_target:
+            km = re.match(r"^(\s*)([^=\s#;][^=]*?)\s*=.*$", line)
+            if km and km.group(2).strip() == key:
+                key_handled = True
+                if enabled:
+                    updated.append(f"{km.group(1)}{key}=on")
+                # else: skip (remove the key)
+                continue
+
+        updated.append(line)
+
+    # End of file: still in target section and key not yet written
+    if in_target and enabled and not key_handled:
+        updated.append(f"{key}=on")
+
+    # Section didn't exist — create it at end of file
+    if not section_found and enabled:
+        if updated and updated[-1].strip():
+            updated.append("")
+        updated.append(f"[{section}]")
+        updated.append(f"{key}=on")
+
+    result = newline.join(updated)
+    if not result.endswith(newline) and (not content or content.endswith("\n") or content.endswith("\r\n")):
+        result += newline
+    return result
+
+
 @router.put("/{tenant_id}/clients/{hostname}/sim-override")
-def set_client_sim_override(
+async def set_client_sim_override(
     tenant_id: str,
     hostname: str,
     payload: ClientSimOverrideRequest,
@@ -1103,15 +1156,19 @@ def set_client_sim_override(
 ):
     """Enable or disable a simulation permanently for a specific client.
 
-    Stored as a hub-managed local override — no GitHub key required.
-    Merged into active_simulations when serving aggregate client data so the
-    dashboard reflects the admin-selected state immediately.
+    Updates both:
+    - client_sim_overrides (hub store) for instant dashboard display
+    - user_conf_override (hub-managed user-overrides.conf) so the spoke actually
+      applies the flag to the client's config on next relay cycle
+    Also attempts a best-effort push to GitHub if the tenant has it configured.
     """
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
     tenant = _get_tenant(resolved_tenant_id)
+    sim = payload.simulation
+
+    # ── 1. Update client_sim_overrides for instant dashboard display ──────────
     overrides: dict[str, list[str]] = dict(tenant.client_sim_overrides or {})
     current = list(overrides.get(hostname, []))
-    sim = payload.simulation
     if payload.enabled:
         if sim not in current:
             current.append(sim)
@@ -1119,9 +1176,49 @@ def set_client_sim_override(
         current = [s for s in current if s != sim]
     overrides[hostname] = current
     tenant.client_sim_overrides = overrides
+
+    # ── 2. Update hub-managed user_conf_override (pushes as hub-user-overrides.conf) ──
+    hub_content = tenant.user_conf_override or ""
+    hub_content = _modify_ini_content(hub_content, hostname, sim, payload.enabled)
+    tenant.user_conf_override = hub_content if hub_content.strip() else None
+
+    # ── 3. Best-effort push to GitHub if configured ───────────────────────────
+    github_pushed = False
+    cfg = _github_repo_settings(tenant)
+    if cfg.get("github_token"):
+        try:
+            gh_content, gh_sha, gh_branch = await _fetch_user_overrides_conf_from_github(tenant)
+            modified_gh = _modify_ini_content(gh_content, hostname, sim, payload.enabled)
+            m = re.search(r"github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?$", cfg.get("sim_repo_url", ""))
+            if m:
+                owner, repo = m.group(1), m.group(2)
+                branch = gh_branch or cfg.get("sim_repo_branch", "main")
+                url = f"https://api.github.com/repos/{owner}/{repo}/contents/configs/user-overrides.conf"
+                body: dict[str, Any] = {
+                    "message": f"{'Enable' if payload.enabled else 'Disable'} {sim} for {hostname} via hub",
+                    "content": base64.b64encode(modified_gh.encode("utf-8")).decode("ascii"),
+                    "branch": branch,
+                }
+                if gh_sha:
+                    body["sha"] = gh_sha
+                async with httpx.AsyncClient(timeout=30.0) as hc:
+                    resp = await hc.put(url, headers=_github_api_headers(cfg["github_token"]), json=body)
+                github_pushed = resp.status_code < 400
+        except Exception as exc:
+            logger.warning("sim-override: GitHub push failed for %s/%s: %s", hostname, sim, exc)
+
     store.save_tenant(tenant)
-    return {"ok": True, "hostname": hostname, "simulation": sim, "enabled": payload.enabled,
-            "active_overrides": current}
+    pushed_spokes = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
+    return {
+        "ok": True,
+        "hostname": hostname,
+        "simulation": sim,
+        "enabled": payload.enabled,
+        "active_overrides": current,
+        "user_overrides_updated": True,
+        "github_pushed": github_pushed,
+        "pushed_to_spokes": pushed_spokes,
+    }
 
 
 class UsbVidpidEntry(BaseModel):
