@@ -66,12 +66,72 @@ def _run_key_health_check() -> None:
         logger.warning("Key health check skipped (mount not ready?): %s", exc)
 
 
+_VERSION_FILE = BASE_DIR / "VERSION"
+_LAST_HUB_VERSION_FILE = Path(get_settings().data_dir) / ".last_hub_version"
+
+
+def _trigger_spoke_updates_on_hub_upgrade() -> None:
+    """If the hub VERSION changed since last startup, queue spoke + proxmox
+    agent self-updates for all approved spokes across all tenants."""
+    current = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "unknown"
+    try:
+        _LAST_HUB_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        last = _LAST_HUB_VERSION_FILE.read_text().strip() if _LAST_HUB_VERSION_FILE.exists() else None
+    except Exception:
+        last = None
+
+    if last == current:
+        logger.info("Hub version unchanged (%s) — no automatic spoke updates queued", current)
+        return
+
+    logger.info(
+        "Hub upgraded %s → %s — queuing spoke and agent updates for all tenants",
+        last or "(first run)",
+        current,
+    )
+    _LAST_HUB_VERSION_FILE.write_text(current)
+
+    if last is None:
+        # First run — record version but don't push updates; spokes are fresh
+        return
+
+    from .data_models import Command
+    from datetime import timedelta, timezone
+    from datetime import datetime
+    import uuid
+
+    now = datetime.now(timezone.utc)
+    tenants = store.list_tenants()
+    queued = 0
+    for tenant in tenants:
+        spokes = [s for s in store.list_spokes(tenant.id) if s.status == "approved"]
+        for spoke in spokes:
+            expires = now + timedelta(hours=24)
+            store.enqueue_command(Command(
+                spoke_id=spoke.id,
+                tenant_id=tenant.id,
+                type="proxmox_agent_update",
+                payload={},
+                expires_at=expires,
+            ))
+            store.enqueue_command(Command(
+                spoke_id=spoke.id,
+                tenant_id=tenant.id,
+                type="self_update",
+                payload={},
+                expires_at=expires,
+            ))
+            queued += 2
+    logger.info("Hub upgrade: queued %d update commands across %d tenants", queued, len(tenants))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     store.init_store()
     ensure_admin()
     _run_key_health_check()
+    _trigger_spoke_updates_on_hub_upgrade()
     set_main_loop(asyncio.get_running_loop())
     logger.info(f"Hub starting — data dir: {settings.data_dir}")
 
