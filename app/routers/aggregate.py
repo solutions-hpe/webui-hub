@@ -1362,7 +1362,7 @@ def resync_tenant_usb_vidpids(
     return {"status": "resynced", "pushed_to_spokes": pushed_count}
 
 
-
+@router.get("/aggregate/dashboard")
 def get_aggregate_dashboard(
     tenant_id: Optional[str] = Query(default=None),
     current_user: User = Depends(auth.get_current_user),
