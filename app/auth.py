@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Annotated, Optional
 from uuid import uuid4
@@ -8,6 +9,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+
+logger = logging.getLogger(__name__)
 
 from . import store
 from .config import get_settings
@@ -136,7 +139,7 @@ def _decode_token(token: str) -> User:
             username="__qa_runner__",
             is_superadmin=False,
             hashed_password="",
-            roles={qa_tenant: "viewer"},
+            tenant_roles=[{"tenant_id": qa_tenant, "role": "viewer"}],
         )
 
     user = store.get_user(username)
@@ -189,16 +192,27 @@ def require_tenant_admin(tenant_id: str, user: User = Depends(get_current_user))
 
 
 def require_tenant_member(tenant_id: str, user: User) -> User:
-    """Like require_tenant_access but explicitly blocks superadmin.
+    """Like require_tenant_access but requires explicit tenant membership.
 
     Use this for remote-control endpoints (proxmox-command, console, spoke shell)
-    where only an explicit tenant member should be allowed — even superadmin cannot
-    remote-control a tenant's infrastructure they are not a member of.
+    where only an explicit tenant member should normally be allowed.  Superadmins
+    are permitted but their actions are audit-logged as a warning.
     """
+    if user.is_superadmin:
+        logger.warning(
+            "Superadmin '%s' remote-controlling tenant %s infrastructure "
+            "(not an explicit tenant member — add them as a tenant member to suppress this)",
+            user.username,
+            tenant_id,
+        )
+        return user
     if tenant_id not in user.tenant_ids():
         raise HTTPException(
             status_code=403,
-            detail="Remote control is restricted to tenant members only",
+            detail=(
+                "Remote control is restricted to explicit tenant members. "
+                "Ask a superadmin to add your account to this tenant with admin role."
+            ),
         )
     return user
 

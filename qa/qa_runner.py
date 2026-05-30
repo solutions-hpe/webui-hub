@@ -602,6 +602,109 @@ class QARunner:
             elif build_ms is not None:
                 self._ok(f"Spoke '{name}' sim_conf refresh", "proxmox", "no errors")
 
+        # ── VM RAM/CPU data quality (balloon driver detection) ─────────────────
+        # Without the VirtIO balloon driver installed in guest VMs, Proxmox (pvesh)
+        # cannot see inside the guest and reports mem = maxmem for every running VM
+        # (full allocation shown as "used"). The UI now renders this as "1.0 GB (alloc)"
+        # to distinguish from real usage data.
+        # If ALL running VMs on a spoke have mem ≥ maxmem×0.99, balloon is not active.
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            vms: list[dict] = h.get("proxmox_vms", [])
+            running = [v for v in vms if v.get("status") == "running"]
+            if not running:
+                continue
+
+            def _lt_maxmem(v: dict) -> bool:
+                try:
+                    return float(v.get("mem", 0)) < float(v.get("maxmem", 1)) * 0.99
+                except (TypeError, ValueError):
+                    return False
+
+            mem_with_data = [v for v in running if _lt_maxmem(v)]
+            all_at_alloc = len(mem_with_data) == 0 and all(
+                v.get("mem") and v.get("maxmem") for v in running
+            )
+            if all_at_alloc:
+                self._warn(
+                    f"Spoke '{name}' VM RAM stats (balloon driver)",
+                    "proxmox",
+                    f"All {len(running)} running VM(s) report mem=maxmem — VirtIO balloon "
+                    "driver is not active in guest VMs. Proxmox cannot report actual RAM usage; "
+                    "UI shows '(alloc)' instead of used/total. Install virtio-balloon in VM guests "
+                    "to get real RAM utilisation.",
+                )
+            elif running:
+                self._ok(
+                    f"Spoke '{name}' VM RAM stats (balloon driver)",
+                    "proxmox",
+                    f"{len(mem_with_data)}/{len(running)} running VMs report sub-maxmem RAM usage",
+                )
+
+        # ── All-zero CPU detection ─────────────────────────────────────────────
+        # cpu=0.0 is legitimate for idle VMs (pvesh measures QEMU process CPU time at the
+        # hypervisor level). But if EVERY running VM has exactly 0.0% CPU this is worth
+        # flagging in case pvesh is returning stale or zeroed data.
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            vms = h.get("proxmox_vms", [])
+            running = [v for v in vms if v.get("status") == "running"]
+            if len(running) < 2:
+                continue  # too few VMs to be meaningful
+            zero_cpu = [v for v in running if v.get("cpu") is not None and float(v.get("cpu", 1)) == 0.0]
+            if len(zero_cpu) == len(running):
+                self._warn(
+                    f"Spoke '{name}' VM CPU stats",
+                    "proxmox",
+                    f"All {len(running)} running VM(s) report cpu=0.0% — VMs may be genuinely "
+                    "idle (normal after reclone before simulation traffic starts) or pvesh may be "
+                    "returning stale data. Recheck after simulation traffic begins.",
+                )
+            else:
+                self._ok(
+                    f"Spoke '{name}' VM CPU stats",
+                    "proxmox",
+                    f"Non-zero CPU on {len(running) - len(zero_cpu)}/{len(running)} running VMs",
+                )
+
+        # ── proxmox-command endpoint auth check ───────────────────────────────
+        # Verifies that the current user can reach the proxmox-command relay endpoint.
+        # Uses an intentionally-empty body → hub should return 200 (queued) or 422
+        # (validation failure for missing fields) — but NOT 403 (auth/member check).
+        # A 403 means either the QA API key holder or the logged-in user is not an
+        # explicit tenant member (fixed: superadmin is now allowed through with a log).
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            spoke_id = h.get("spoke_id")
+            if not spoke_id:
+                continue
+            r = self.post(
+                f"/api/{self.tenant_id}/spokes/{spoke_id}/proxmox-command",
+                json={"action": "__qa_probe__", "target": "spoke", "args": []},
+            )
+            if r.status_code == 403:
+                self._fail(
+                    f"Spoke '{name}' proxmox-command auth",
+                    "proxmox",
+                    "HTTP 403 — the current user is not an explicit tenant member. "
+                    "A superadmin must add themselves as a tenant member, or the "
+                    "require_tenant_member fix must be deployed (allows superadmin through).",
+                )
+            elif r.status_code in (200, 422):
+                # 422 = auth passed, validation failed (probe action not a real action) — that's fine
+                self._ok(
+                    f"Spoke '{name}' proxmox-command auth",
+                    "proxmox",
+                    f"HTTP {r.status_code} — endpoint reachable and auth accepted",
+                )
+            else:
+                self._warn(
+                    f"Spoke '{name}' proxmox-command auth",
+                    "proxmox",
+                    f"HTTP {r.status_code} — unexpected status (not 200/403/422): {r.text[:120]}",
+                )
+            break  # one spoke is enough to validate auth; all use the same policy
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PHASE 5 — USB / Dongle Configuration
     # ═══════════════════════════════════════════════════════════════════════════
