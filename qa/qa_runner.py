@@ -70,6 +70,7 @@ class TestResult:
     detail: str = ""
     skipped: bool = False
     warning: bool = False
+    raw_data: dict | None = None  # raw API payload captured at failure/warn time for diagnosis
 
 
 @dataclass
@@ -81,6 +82,7 @@ class QARunner:
     timeout: float = 15.0
     results: list[TestResult] = field(default_factory=list)
     token: str = ""
+    dump_on_fail: bool = False  # print raw_data under each FAIL/WARN in the text report
     _client: httpx.Client | None = None
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -114,8 +116,8 @@ class QARunner:
         self.results.append(r)
         return r
 
-    def _fail(self, name: str, phase: str, detail: str = "") -> TestResult:
-        r = TestResult(name=name, phase=phase, passed=False, detail=detail)
+    def _fail(self, name: str, phase: str, detail: str = "", raw_data: dict | None = None) -> TestResult:
+        r = TestResult(name=name, phase=phase, passed=False, detail=detail, raw_data=raw_data)
         self.results.append(r)
         return r
 
@@ -124,10 +126,36 @@ class QARunner:
         self.results.append(r)
         return r
 
-    def _warn(self, name: str, phase: str, detail: str = "") -> TestResult:
-        r = TestResult(name=name, phase=phase, passed=True, warning=True, detail=detail)
+    def _warn(self, name: str, phase: str, detail: str = "", raw_data: dict | None = None) -> TestResult:
+        r = TestResult(name=name, phase=phase, passed=True, warning=True, detail=detail, raw_data=raw_data)
         self.results.append(r)
         return r
+
+    @staticmethod
+    def _spoke_diag(h: dict) -> dict:
+        """Build a compact diagnostic snapshot from a proxmox aggregate host entry.
+
+        Attached as raw_data to per-spoke FAIL/WARN results so Copilot can identify
+        the root cause from the QA output alone.
+        """
+        vms = h.get("proxmox_vms") or []
+        return {
+            "spoke_id":              h.get("spoke_id"),
+            "spoke_name":            h.get("spoke_name"),
+            "spoke_online":          h.get("spoke_online"),
+            "proxmox":               h.get("proxmox", {}),          # connected, last_seen, agent_id
+            "hub_loop_lag_ms":       h.get("hub_loop_lag_ms"),
+            "telemetry_build_ms":    h.get("telemetry_build_ms"),
+            "ws_reconnect_count":    h.get("ws_reconnect_count"),
+            "ws_last_reconnect_at":  h.get("ws_last_reconnect_at"),
+            "ws_last_error":         h.get("ws_last_error"),
+            "sim_conf_read_error":   h.get("sim_conf_read_error"),
+            "vm_count":              h.get("vm_count", 0),
+            "proxmox_vms_summary":   [
+                {k: v.get(k) for k in ("vmid", "name", "status", "prov_status", "cpu", "mem", "maxmem")}
+                for v in vms[:20]  # cap at 20 VMs to keep output manageable
+            ],
+        }
 
     def _check(
         self,
@@ -402,6 +430,7 @@ class QARunner:
                     "connected=false and last_seen=null — agent has never connected. "
                     "If recently reinstalled, approve it in the hub UI via "
                     "POST /{tenant_id}/aggregate/proxmox-approve-agent",
+                    raw_data=self._spoke_diag(h),
                 )
 
         # ── Proxmox agent last_seen freshness ─────────────────────────────────
@@ -422,6 +451,7 @@ class QARunner:
                     f"Spoke '{name}' proxmox agent last_seen",
                     "proxmox",
                     "connected=true but last_seen is null — agent has not sent full telemetry yet",
+                    raw_data=self._spoke_diag(h),
                 )
                 continue
             try:
@@ -433,6 +463,7 @@ class QARunner:
                         "proxmox",
                         f"last_seen {age_s}s ago (>5 min) — agent may be crashed or pvesh "
                         "permanently blocked; spoke WS may still be connected",
+                        raw_data=self._spoke_diag(h),
                     )
                 elif age_s > 120:
                     self._warn(
@@ -441,6 +472,7 @@ class QARunner:
                         f"last_seen {age_s}s ago — pvesh likely blocking during active Proxmox "
                         "operation (delete/clone); collect_telemetry times out and agent falls "
                         "back to bare pings which do not update last_seen",
+                        raw_data=self._spoke_diag(h),
                     )
                 else:
                     self._ok(
@@ -483,6 +515,7 @@ class QARunner:
                     "hub_loop_lag_ms / telemetry_build_ms / ws_reconnect_count all null on an "
                     "online spoke — spoke is running old code without the synchronous I/O fixes "
                     "(pre-commit 2e06d66). Reinstall via install-lxc.sh to resolve.",
+                    raw_data=self._spoke_diag(h),
                 )
                 continue  # individual field checks are meaningless without the fields
 
@@ -504,12 +537,14 @@ class QARunner:
                     f"{hub_lag_ms:.0f}ms — hub asyncio loop severely blocked; "
                     "root cause: synchronous disk I/O in _apply_spoke_telemetry "
                     "or store.get_tenant() on the hot WS path",
+                    raw_data=self._spoke_diag(h),
                 )
             elif hub_lag_ms > 200:
                 self._warn(
                     f"Spoke '{name}' hub event-loop lag",
                     "proxmox",
                     f"{hub_lag_ms:.0f}ms (warn ≥200ms, fail ≥500ms)",
+                    raw_data=self._spoke_diag(h),
                 )
             else:
                 self._ok(
@@ -535,12 +570,14 @@ class QARunner:
                     f"{build_ms:.0f}ms — CIFS stall or blocking I/O in "
                     "_build_relay_telemetry_payload; root cause: synchronous "
                     "Path.read_text() in async hot path (should be ~0ms with cache fix)",
+                    raw_data=self._spoke_diag(h),
                 )
             elif build_ms > 100:
                 self._warn(
                     f"Spoke '{name}' telemetry build time",
                     "proxmox",
                     f"{build_ms:.0f}ms (warn ≥100ms, fail ≥500ms)",
+                    raw_data=self._spoke_diag(h),
                 )
             else:
                 self._ok(
@@ -564,12 +601,14 @@ class QARunner:
                     "proxmox",
                     f"reconnects={reconnects} — spoke WS is repeatedly dropping; "
                     "check ws_last_error and hub connectivity",
+                    raw_data=self._spoke_diag(h),
                 )
             elif reconnects > 1:
                 self._warn(
                     f"Spoke '{name}' WS reconnect count",
                     "proxmox",
                     f"reconnects={reconnects} — at least one WS drop since last spoke restart",
+                    raw_data=self._spoke_diag(h),
                 )
             else:
                 self._ok(
@@ -585,6 +624,7 @@ class QARunner:
                     "proxmox",
                     f"{ws_err!r} — a WS connection error was recorded; "
                     "hub may have been unreachable or event-loop timed out a ping",
+                    raw_data=self._spoke_diag(h),
                 )
             elif reconnects is not None:
                 self._ok(f"Spoke '{name}' WS last error", "proxmox", "none")
@@ -893,7 +933,63 @@ class QARunner:
         _section("Phase 8 — Commands & Control")
 
         r = self.get(f"/api/{self.tenant_id}/commands")
-        self._check("Command queue readable", "commands", r)
+        res = self._check("Command queue readable", "commands", r)
+
+        # Inspect the command queue for stuck or expired commands
+        if res.passed:
+            cmds = r.json() if isinstance(r.json(), list) else r.json().get("commands", [])
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            pending = [c for c in cmds if c.get("status") == "queued"]
+            expired = []
+            old_pending = []
+            for c in pending:
+                exp = c.get("expires_at")
+                cre = c.get("created_at")
+                if exp:
+                    try:
+                        exp_dt = datetime.datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                        if exp_dt < now_utc:
+                            expired.append(c)
+                    except Exception:
+                        pass
+                if cre:
+                    try:
+                        cre_dt = datetime.datetime.fromisoformat(cre.replace("Z", "+00:00"))
+                        age_s = (now_utc - cre_dt).total_seconds()
+                        if age_s > 300:  # >5 min in queue = likely stuck
+                            old_pending.append((c, int(age_s)))
+                    except Exception:
+                        pass
+            if expired:
+                self._warn(
+                    "Command queue — expired commands",
+                    "commands",
+                    f"{len(expired)} expired command(s) still in queue "
+                    f"(types: {list({c.get('type','?') for c in expired})}) — "
+                    "spoke may have been offline when commands were issued",
+                    raw_data={"expired_commands": [
+                        {k: c.get(k) for k in ("id", "type", "spoke_id", "status", "created_at", "expires_at")}
+                        for c in expired[:10]
+                    ]},
+                )
+            elif pending:
+                self._ok("Command queue — expired commands", "commands",
+                         f"{len(pending)} pending command(s), none expired")
+            else:
+                self._ok("Command queue — expired commands", "commands", "queue empty or all executed")
+
+            if old_pending:
+                self._warn(
+                    "Command queue — stuck pending commands",
+                    "commands",
+                    f"{len(old_pending)} command(s) pending >5 min "
+                    f"(oldest: {old_pending[0][1]}s) — spoke may not be polling",
+                    raw_data={"stuck_commands": [
+                        {**{k: c.get(k) for k in ("id", "type", "spoke_id", "status", "created_at")},
+                         "age_s": age_s}
+                        for c, age_s in old_pending[:10]
+                    ]},
+                )
 
         r = self.get("/api/aggregate/api-server", params={"tenant_id": self.tenant_id})
         self._check("Aggregate API server status", "commands", r)
@@ -1421,6 +1517,8 @@ class QARunner:
             if r.detail:
                 line += DIM(f"  ({r.detail})")
             print(line)
+            if self.dump_on_fail and r.raw_data and (not r.passed or r.warning):
+                print(DIM("      raw_data: " + json.dumps(r.raw_data, indent=6, default=str)))
 
         print()
         print(BOLD("━" * 70))
@@ -1441,6 +1539,8 @@ class QARunner:
                 print(f"    {RED('✗')} [{r.phase}] {r.name}")
                 if r.detail:
                     print(f"      {DIM(r.detail)}")
+                if self.dump_on_fail and r.raw_data:
+                    print(DIM("      raw_data: " + json.dumps(r.raw_data, indent=6, default=str)))
 
         return 1 if failed else 0
 
@@ -1461,6 +1561,8 @@ class QARunner:
                     "skipped": r.skipped,
                     "warning": r.warning,
                     "detail": r.detail,
+                    # raw_data only included for FAIL/WARN to keep JSON compact
+                    **({"raw_data": r.raw_data} if r.raw_data and (not r.passed or r.warning) else {}),
                 }
                 for r in self.results
             ],
@@ -1497,6 +1599,9 @@ def _parse_args() -> argparse.Namespace:
                         "commands,settings,central,backup,t3,health,background)")
     p.add_argument("--timeout", type=float, default=15.0,
                    help="HTTP request timeout in seconds (default: 15)")
+    p.add_argument("--dump-on-fail", action="store_true",
+                   help="Print raw API response data under each FAIL/WARN result "
+                        "(useful for sharing with Copilot for root-cause diagnosis)")
     return p.parse_args()
 
 
@@ -1522,6 +1627,7 @@ def main() -> None:
         qa_key=args.qa_key,
         verify_ssl=not args.no_verify,
         timeout=args.timeout,
+        dump_on_fail=args.dump_on_fail,
     )
 
     start = time.monotonic()
