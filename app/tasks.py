@@ -575,6 +575,7 @@ async def aruba_poller() -> None:
                         dist_client_macs: set[str] = set()
                         dist_alert_ts: dict[str, str] = {}
                         dist_insight_ts: dict[str, str] = {}
+                        dist_device_names: dict[str, str] = {}
                         for spoke in distributed_spokes:
                             central_tel = spoke.telemetry.get("central", {}) if isinstance(spoke.telemetry, dict) else {}
                             for wsite, csite in (central_tel.get("site_mappings") or {}).items():
@@ -605,7 +606,13 @@ async def aruba_poller() -> None:
                             for client_entry in (central_tel.get("clients") or []):
                                 if isinstance(client_entry, dict) and client_entry.get("mac"):
                                     dist_client_macs.add(str(client_entry["mac"]).strip().lower())
-                        await _check_monitored_items(tenant.id, "distributed", dist_site_names, dist_alert_names, dist_insight_names, dist_client_macs, dist_alert_ts, dist_insight_ts)
+                            # Collect gateway device names from browse data sent by distributed spokes
+                            for devs in (central_tel.get("devices_by_site") or {}).values():
+                                for dev in (devs or []):
+                                    dev_key = str(dev.get("name") or dev.get("serial") or "").strip().lower()
+                                    if dev_key and dev_key not in dist_device_names:
+                                        dist_device_names[dev_key] = str(dev.get("last_seen") or "")
+                        await _check_monitored_items(tenant.id, "distributed", dist_site_names, dist_alert_names, dist_insight_names, dist_client_macs, dist_alert_ts, dist_insight_ts, dist_device_names)
                     except Exception as exc:
                         logger.warning("Distributed monitored items check failed for tenant %s: %s", tenant.id, exc)
 
@@ -844,6 +851,7 @@ async def aruba_poller() -> None:
                             browse = await client.browse_all()
                             alert_ts: dict[str, str] = {}
                             insight_ts: dict[str, str] = {}
+                            device_names_lower: dict[str, str] = {}
                             for ins in (browse.get("insights") or []):
                                 n = str(ins.get("name") or "").strip().lower()
                                 if n:
@@ -856,9 +864,15 @@ async def aruba_poller() -> None:
                                     alert_names_lower.add(n)
                                     if alt.get("ts"):
                                         alert_ts[n] = str(alt["ts"])
+                            for devs in (browse.get("devices_by_site") or {}).values():
+                                for dev in (devs or []):
+                                    dev_key = str(dev.get("name") or dev.get("serial") or "").strip().lower()
+                                    if dev_key:
+                                        device_names_lower[dev_key] = str(dev.get("last_seen") or "")
                         except Exception as browse_exc:
                             alert_ts = {}
                             insight_ts = {}
+                            device_names_lower = {}
                             logger.debug("browse_all() augment for monitored check failed: %s", browse_exc)
                         # Fetch clients only if there are client-type monitored items
                         cfg_snap = store.get_tenant_central_sites_config(tenant.id)
@@ -870,7 +884,7 @@ async def aruba_poller() -> None:
                                 client_macs_lower = {str(c.get("mac") or "").strip().lower() for c in cl_list if c.get("mac")}
                             except Exception:
                                 pass
-                        await _check_monitored_items(tenant.id, "centralized", site_names_lower, alert_names_lower, insight_names_lower, client_macs_lower, alert_ts, insight_ts)
+                        await _check_monitored_items(tenant.id, "centralized", site_names_lower, alert_names_lower, insight_names_lower, client_macs_lower, alert_ts, insight_ts, device_names_lower)
                     except Exception as exc:
                         logger.warning("Monitored items check failed for tenant %s: %s", tenant.id, exc)
                 except Exception as exc:
@@ -995,8 +1009,13 @@ async def _check_monitored_items(
     client_macs: set[str],
     alert_ts: dict[str, str] | None = None,
     insight_ts: dict[str, str] | None = None,
+    device_names: dict[str, str] | None = None,
 ) -> None:
-    """Check each monitored item against current Central data; fire notification at 30 minutes absent."""
+    """Check each monitored item against current Central data; fire notification at 30 minutes absent.
+
+    device_names maps lowercase device name/serial → lastSeenAt ISO string (or empty string).
+    Used to resolve 'gateway' type monitored items.
+    """
     cfg = store.get_tenant_central_sites_config(tenant_id)
     items: list[dict[str, Any]] = list(cfg.get("monitored_items") or [])
     if not items:
@@ -1008,6 +1027,7 @@ async def _check_monitored_items(
     NOTIFY_SECS = 30 * 60  # notify once when crossing 30-minute threshold
     alert_ts = alert_ts or {}
     insight_ts = insight_ts or {}
+    device_names = device_names or {}
     changed = False
 
     for item in items:
@@ -1028,6 +1048,9 @@ async def _check_monitored_items(
         elif item_type == "client":
             found = identifier in client_macs
             central_ts = None
+        elif item_type == "gateway":
+            found = identifier in device_names
+            central_ts = device_names.get(identifier) or None
         else:
             continue
 
@@ -1036,11 +1059,14 @@ async def _check_monitored_items(
             item["last_seen"] = now
             item["missing_since"] = None
             item["status"] = "ok"
-            # Store the actual Central API timestamp when the alert/insight last fired.
+            # Store the actual Central API timestamp when the alert/insight/device last fired/checked in.
             if central_ts:
                 item["central_last_seen"] = str(central_ts)
                 if not item.get("central_first_seen"):
                     item["central_first_seen"] = str(central_ts)
+            # Migrate old items that have central_last_seen but no central_first_seen.
+            elif item.get("central_last_seen") and not item.get("central_first_seen"):
+                item["central_first_seen"] = item["central_last_seen"]
             changed = True
         else:
             # Record when the item first went missing so we can show time-based status.
