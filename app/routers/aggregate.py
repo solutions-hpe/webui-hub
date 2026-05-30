@@ -1415,6 +1415,59 @@ async def unlock_template(
     return {"tenant_id": resolved_tenant_id, "queued": queued, "spoke_id": requested_spoke_id or None}
 
 
+@router.post("/{tenant_id}/aggregate/proxmox-approve-agent")
+async def hub_proxmox_approve_agent(
+    tenant_id: str,
+    body: dict[str, Any] = Body(...),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a proxmox_approve_agent command to a specific spoke so the hub can approve a
+    Proxmox agent from the VM Server screen without logging into the spoke directly."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke_id = str(body.get("spoke_id") or "").strip()
+    hostname = str(body.get("hostname") or "").strip()
+    if not spoke_id or not hostname:
+        raise HTTPException(status_code=400, detail="spoke_id and hostname are required")
+    approved_spokes = list(_approved_spokes(resolved_tenant_id))
+    spoke = next((s for s in approved_spokes if s.id == spoke_id), None)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Approved spoke not found")
+    store.enqueue_command(Command(
+        spoke_id=spoke.id,
+        tenant_id=resolved_tenant_id,
+        type="proxmox_approve_agent",
+        payload={"hostname": hostname},
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    ))
+    return {"tenant_id": resolved_tenant_id, "spoke_id": spoke_id, "hostname": hostname, "queued": 1}
+
+
+@router.post("/{tenant_id}/aggregate/proxmox-revoke-agent")
+async def hub_proxmox_revoke_agent(
+    tenant_id: str,
+    body: dict[str, Any] = Body(...),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a proxmox_revoke_agent command to a specific spoke to revoke an approved agent key."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke_id = str(body.get("spoke_id") or "").strip()
+    hostname = str(body.get("hostname") or "").strip()
+    if not spoke_id or not hostname:
+        raise HTTPException(status_code=400, detail="spoke_id and hostname are required")
+    approved_spokes = list(_approved_spokes(resolved_tenant_id))
+    spoke = next((s for s in approved_spokes if s.id == spoke_id), None)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Approved spoke not found")
+    store.enqueue_command(Command(
+        spoke_id=spoke.id,
+        tenant_id=resolved_tenant_id,
+        type="proxmox_revoke_agent",
+        payload={"hostname": hostname},
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    ))
+    return {"tenant_id": resolved_tenant_id, "spoke_id": spoke_id, "hostname": hostname, "queued": 1}
+
+
 @router.get("/{tenant_id}/aggregate/fleet-reclone-status")
 def get_fleet_reclone_status(
     tenant_id: str,
