@@ -969,8 +969,8 @@ async def get_user_overrides_conf(
             "mode": "override",
         }
     # GitHub token available — read the file from the repo.
-    # If the hub-managed override is set, it takes precedence (admin explicitly set it).
-    if tenant.user_conf_override is not None:
+    # If the hub-managed override is set (non-empty), it takes precedence (admin explicitly set it).
+    if tenant.user_conf_override:
         return {
             "content": tenant.user_conf_override,
             "sha": "",
@@ -993,10 +993,12 @@ def save_user_overrides_conf(
     payload: ConfOverrideRequest,
     current_user: User = Depends(auth.get_current_user),
 ):
-    """Save hub-managed user-overrides.conf and push to all approved spokes."""
+    """Save hub-managed user-overrides.conf and push to all approved spokes.
+    Saving empty content clears the hub-managed override so GitHub is used instead."""
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
     tenant = _get_tenant(resolved_tenant_id)
-    tenant.user_conf_override = payload.content
+    # Empty content → clear the override so the GitHub file is served again.
+    tenant.user_conf_override = payload.content if payload.content and payload.content.strip() else None
     store.save_tenant(tenant)
     pushed = _push_conf_overrides_to_spokes(resolved_tenant_id, current_user)
     return {"ok": True, "pushed_to_spokes": pushed, "mode": "override"}
