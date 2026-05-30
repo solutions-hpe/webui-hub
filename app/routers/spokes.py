@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .. import auth, store, ws as relay_ws
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, Command, PendingSpoke, User
-from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, route_vnc_message, register_log_fetch, unregister_log_fetch, route_log_fetch_message, unregister_spoke, ws_broadcast
+from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, route_vnc_message, register_log_fetch, unregister_log_fetch, route_log_fetch_message, unregister_spoke, ws_broadcast, register_provision_session, unregister_provision_session, route_provision_message
 
 # In-memory update job store: job_id -> job dict
 _update_jobs: dict[str, dict[str, Any]] = {}
@@ -767,6 +767,50 @@ def set_spoke_proxmox_credentials(
     }
 
 
+@router.post("/{tenant_id}/spokes/{spoke_id}/provision-proxmox-token")
+async def provision_proxmox_token(
+    tenant_id: str,
+    spoke_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Auto-provision a Proxmox API token on the spoke via pvesh and store it on the hub."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    if spoke.status != "approved":
+        raise HTTPException(status_code=409, detail="Spoke is not approved")
+
+    request_id = str(uuid.uuid4())
+    queue = register_provision_session(request_id)
+    try:
+        sent = await relay_ws.send_to_spoke(resolved_tenant_id, spoke_id, {
+            "type": "provision_proxmox_token",
+            "request_id": request_id,
+        })
+        if not sent:
+            raise HTTPException(status_code=502, detail="Spoke relay is offline")
+        try:
+            response = await asyncio.wait_for(queue.get(), timeout=30.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Spoke did not respond in time")
+        if response.get("type") == "proxmox_token_provision_error":
+            raise HTTPException(status_code=502, detail=response.get("error", "Token provisioning failed on spoke"))
+    finally:
+        unregister_provision_session(request_id)
+
+    token = str(response.get("token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=502, detail="Spoke returned an empty token")
+
+    # Store encrypted on the hub
+    spoke.proxmox_token_enc = encrypt_str(token)
+    store.save_spoke(spoke)
+    # Spoke already saved the token locally — no config_update push needed
+
+    return {"ok": True, "proxmox_token_configured": True}
+
+
 @router.get("/{tenant_id}/usb-config")
 def get_tenant_usb_config(tenant_id: str, current_user: User = Depends(auth.get_current_user)):
     resolved_tenant_id = _require_tenant_access(tenant_id, current_user)
@@ -1187,6 +1231,8 @@ async def spoke_websocket(
                     route_shell_message(data)
                 elif msg_type.startswith("vnc_"):
                     route_vnc_message(data)
+                elif msg_type in {"proxmox_token_provisioned", "proxmox_token_provision_error"}:
+                    route_provision_message(data)
                 elif msg_type == "log_fetch_response":
                     route_log_fetch_message(data)
             except WebSocketDisconnect:

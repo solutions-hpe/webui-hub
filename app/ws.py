@@ -175,6 +175,29 @@ def route_vnc_message(message: dict) -> None:
         queue.put_nowait(message)
 
 
+# ── Proxmox token provisioning session queues ─────────────────────
+_provision_queues: dict[str, asyncio.Queue] = {}
+
+
+def register_provision_session(request_id: str) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue()
+    _provision_queues[request_id] = queue
+    return queue
+
+
+def unregister_provision_session(request_id: str) -> None:
+    _provision_queues.pop(request_id, None)
+
+
+def route_provision_message(message: dict) -> None:
+    request_id = str(message.get("request_id") or "").strip()
+    if not request_id:
+        return
+    queue = _provision_queues.get(request_id)
+    if queue is not None:
+        queue.put_nowait(message)
+
+
 async def send_to_spoke(tenant_id: str, spoke_id: str, message: dict) -> bool:
     key = (tenant_id, spoke_id)
     websocket = spoke_connections.get(key)
