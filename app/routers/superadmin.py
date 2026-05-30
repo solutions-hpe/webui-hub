@@ -43,6 +43,11 @@ def _hub_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent.parent
 
 
+def _is_container() -> bool:
+    """Return True when running inside a Docker/container environment."""
+    return Path("/.dockerenv").exists() or os.environ.get("CONTAINER", "") == "1"
+
+
 def _find_git() -> str:
     """Return the full path to the git binary.
     Tries shutil.which first, then common install locations.
@@ -1109,21 +1114,43 @@ def delete_qa_api_key(
 def get_hub_update_status(current_user: User = Depends(auth.require_superadmin)):
     """Return current hub version, latest git commit info, and update state."""
     base = _hub_base_dir()
-    # Read current version
-    version_file = base / "VERSION"
-    current_version = version_file.read_text().strip() if version_file.exists() else "unknown"
+    containerized = _is_container()
 
-    # Git info (non-fatal)
+    # Read current version from VERSION file or APP_VERSION env (set by Docker build)
+    version_file = base / "VERSION"
+    current_version = (
+        version_file.read_text().strip()
+        if version_file.exists()
+        else os.environ.get("APP_VERSION", "unknown")
+    )
+    app_branch = os.environ.get("APP_BRANCH", "")
+
+    if containerized:
+        return {
+            "current_version": current_version,
+            "app_branch": app_branch,
+            "containerized": True,
+            "update_available": False,
+            "update_in_progress": False,
+            "update_log": [],
+            "update_error": None,
+            "started_at": None,
+            "finished_at": None,
+            "info": (
+                "Hub is running as a container. Self-update via git is not supported. "
+                "Deploy a new image using redeploy-prod.sh to update the hub."
+            ),
+        }
+
+    # Git info (non-fatal) — native/systemd installs only
     git_info: dict[str, Any] = {}
     try:
         git_bin = _find_git()
-        # Local HEAD
         r = subprocess.run([git_bin, "log", "-1", "--format=%H %s %ai"], capture_output=True, text=True, cwd=str(base), timeout=10)
         if r.returncode == 0 and r.stdout.strip():
             parts = r.stdout.strip().split(" ", 2)
             git_info["local_commit"] = parts[0] if parts else ""
             git_info["local_subject"] = " ".join(parts[1:]) if len(parts) > 1 else ""
-        # Remote HEAD (fetch first)
         subprocess.run([git_bin, "fetch", "--quiet", "origin"], capture_output=True, cwd=str(base), timeout=15)
         r2 = subprocess.run([git_bin, "log", "HEAD..origin/HEAD", "--oneline"], capture_output=True, text=True, cwd=str(base), timeout=10)
         ahead_lines = [l for l in r2.stdout.splitlines() if l.strip()]
@@ -1135,6 +1162,8 @@ def get_hub_update_status(current_user: User = Depends(auth.require_superadmin))
 
     return {
         "current_version": current_version,
+        "app_branch": app_branch,
+        "containerized": False,
         "update_in_progress": _hub_update_state["in_progress"],
         "update_log": list(_hub_update_state["log"]),
         "update_error": _hub_update_state["error"],
@@ -1150,7 +1179,16 @@ def trigger_hub_self_update(current_user: User = Depends(auth.require_superadmin
 
     Returns immediately. Poll GET /superadmin/hub-update-status for progress.
     The hub will restart ~3 seconds after the pip step completes.
+    Not available when the hub is running as a container.
     """
+    if _is_container():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Hub is running as a container and cannot self-update via git. "
+                "Run redeploy-prod.sh to build and deploy a new container image."
+            ),
+        )
     if _hub_update_state["in_progress"]:
         raise HTTPException(status_code=409, detail="Update already in progress")
     t = threading.Thread(target=_run_hub_self_update_bg, daemon=True)
