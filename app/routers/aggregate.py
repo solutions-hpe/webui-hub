@@ -1213,7 +1213,32 @@ def delete_tenant_usb_vidpid(
     return {"status": "deleted", "pushed_to_spokes": pushed_count}
 
 
-@router.get("/aggregate/dashboard")
+@router.post("/{tenant_id}/usb-vidpids/resync")
+def resync_tenant_usb_vidpids(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Force-push the current USB certified list to all approved spokes in this tenant.
+
+    No change is made to the list itself — the current effective list (global + tenant)
+    is simply re-queued for delivery.  Useful when a spoke missed a previous push due
+    to being offline, in isolation mode, or running outdated software.
+
+    Requires tenant admin role.
+    """
+    _require_tenant_admin(tenant_id, current_user)
+    pushed_count = 0
+    for spoke in store.list_spokes(tenant_id):
+        if spoke.status != "approved":
+            continue
+        spoke.config_version += 1
+        store.save_spoke(spoke)
+        store.ensure_config_update_command(tenant_id, spoke.id)
+        pushed_count += 1
+    return {"status": "resynced", "pushed_to_spokes": pushed_count}
+
+
+
 def get_aggregate_dashboard(
     tenant_id: Optional[str] = Query(default=None),
     current_user: User = Depends(auth.get_current_user),
