@@ -330,6 +330,61 @@ class QARunner:
             elif usb_count > 0:
                 self._ok(f"Spoke '{name}' VM count", "proxmox", f"vms={vm_count}, dongles={usb_count}")
 
+        # Check prov_status is populated on proxmox_vms (validates the usb_state join)
+        # prov_status is joined from usb_state by vmid; absence means the join never ran or
+        # the proxmox agent hasn't sent usb_state yet.
+        for h in hosts:
+            name = h.get("spoke_name", h.get("spoke_id", "?"))
+            vms: list[dict] = h.get("proxmox_vms", [])
+            if not vms:
+                continue  # already reported by vm_count check above
+
+            missing_status = [v for v in vms if not v.get("prov_status")]
+            provisioning  = [v for v in vms if v.get("prov_status") == "provisioning"]
+            tearing_down  = [v for v in vms if v.get("prov_status") == "tearing_down"]
+            active        = [v for v in vms if v.get("prov_status") == "active"]
+
+            if len(missing_status) == len(vms):
+                # All VMs lack prov_status — join didn't work or usb_state not yet received
+                self._fail(
+                    f"Spoke '{name}' VM prov_status",
+                    "proxmox",
+                    f"prov_status missing on all {len(vms)} VM(s) — "
+                    "usb_state may not have arrived yet or agent is not sending it",
+                )
+            elif missing_status:
+                self._warn(
+                    f"Spoke '{name}' VM prov_status",
+                    "proxmox",
+                    f"{len(missing_status)}/{len(vms)} VM(s) have no prov_status "
+                    f"(vmids: {[v.get('vmid') for v in missing_status]})",
+                )
+            else:
+                self._ok(
+                    f"Spoke '{name}' VM prov_status",
+                    "proxmox",
+                    f"active={len(active)}, provisioning={len(provisioning)}, "
+                    f"tearing_down={len(tearing_down)}",
+                )
+
+            # Warn on transitional states — normal during reclone/delete but a red flag at rest
+            if provisioning:
+                self._warn(
+                    f"Spoke '{name}' VMs provisioning",
+                    "proxmox",
+                    f"{len(provisioning)} VM(s) still in 'provisioning' state "
+                    f"(vmids: {[v.get('vmid') for v in provisioning]}) — "
+                    "expected only during active reclone",
+                )
+            if tearing_down:
+                self._warn(
+                    f"Spoke '{name}' VMs tearing_down",
+                    "proxmox",
+                    f"{len(tearing_down)} VM(s) still in 'tearing_down' state "
+                    f"(vmids: {[v.get('vmid') for v in tearing_down]}) — "
+                    "expected only during active teardown",
+                )
+
     # ═══════════════════════════════════════════════════════════════════════════
     # PHASE 5 — USB / Dongle Configuration
     # ═══════════════════════════════════════════════════════════════════════════
