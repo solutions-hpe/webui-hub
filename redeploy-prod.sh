@@ -51,19 +51,7 @@ echo ""
 echo "▶ Checking for unpushed commits..."
 cd "$SCRIPT_DIR"
 
-# Check main repo
-MAIN_UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l | xargs)
-if [ "$MAIN_UNPUSHED" -gt 0 ]; then
-    echo "  ⚠  Main repo has $MAIN_UNPUSHED unpushed commit(s)"
-    echo "  ▶  Pushing main repo to origin..."
-    git push origin main || {
-        echo "❌ Failed to push main repo"
-        exit 1
-    }
-    echo "  ✓  Main repo pushed"
-fi
-
-# Check frontend submodule
+# Check frontend submodule first — push any uncommitted local work
 if [ -d "$SCRIPT_DIR/frontend" ]; then
     cd "$SCRIPT_DIR/frontend"
     # Submodule may be in detached HEAD with no upstream — only check if upstream exists
@@ -79,25 +67,40 @@ if [ -d "$SCRIPT_DIR/frontend" ]; then
             exit 1
         }
         echo "  ✓  Frontend submodule pushed"
-        
-        # Update parent repo's submodule pointer and push
-        cd "$SCRIPT_DIR"
-        if git diff --quiet HEAD -- frontend; then
-            echo "  ℹ  Parent repo submodule pointer already up to date"
-        else
-            echo "  ▶  Updating parent repo submodule pointer..."
-            git add frontend
-            git commit -m "Update frontend submodule pointer
-
-Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>" || true
-            git push origin main || {
-                echo "❌ Failed to push parent repo after submodule update"
-                exit 1
-            }
-            echo "  ✓  Parent repo submodule pointer updated and pushed"
-        fi
     fi
     cd "$SCRIPT_DIR"
+
+    # Detect submodule drift: cs-webui may have been pushed externally without
+    # updating the webui-hub submodule pointer (recorded SHA ≠ actual SHA).
+    RECORDED_SHA=$(git rev-parse HEAD:frontend 2>/dev/null || echo "")
+    ACTUAL_SHA=$(git -C "$SCRIPT_DIR/frontend" rev-parse HEAD 2>/dev/null || echo "")
+    if [ -n "$RECORDED_SHA" ] && [ -n "$ACTUAL_SHA" ] && [ "$RECORDED_SHA" != "$ACTUAL_SHA" ]; then
+        echo "  ⚠  Submodule drift detected:"
+        echo "     recorded in webui-hub HEAD : ${RECORDED_SHA:0:10}"
+        echo "     actual cs-webui HEAD       : ${ACTUAL_SHA:0:10}"
+        echo "  ▶  Updating submodule pointer and pushing..."
+        git add frontend
+        git commit -m "chore: sync frontend submodule pointer to HEAD
+
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>" || true
+        git push origin main || {
+            echo "❌ Failed to push updated submodule pointer"
+            exit 1
+        }
+        echo "  ✓  Submodule pointer updated and pushed"
+    fi
+fi
+
+# Check main repo (after any submodule fix above)
+MAIN_UNPUSHED=$(git log @{u}.. --oneline 2>/dev/null | wc -l | xargs)
+if [ "$MAIN_UNPUSHED" -gt 0 ]; then
+    echo "  ⚠  Main repo has $MAIN_UNPUSHED unpushed commit(s)"
+    echo "  ▶  Pushing main repo to origin..."
+    git push origin main || {
+        echo "❌ Failed to push main repo"
+        exit 1
+    }
+    echo "  ✓  Main repo pushed"
 fi
 
 echo "  ✓  All commits pushed"
@@ -166,58 +169,62 @@ if [ -z "${GHCR_TOKEN:-}" ]; then
 fi
 
 echo "▶ Waiting for GitHub Actions build to complete..."
-# Poll GHA workflow runs until the latest push to main has a completed run
+# Poll GHA workflow runs until the build for the exact current HEAD SHA completes.
+# We require an exact SHA match — no fallback to "most recent run" — to guarantee
+# the deployed image matches what we just pushed.
 REPO="solutions-hpe/webui-hub"
 COMMIT_SHA=$(git -C "$SCRIPT_DIR" rev-parse HEAD)
-for i in $(seq 1 30); do
+echo "  ⧖  Expecting build for webui-hub@${COMMIT_SHA:0:10}"
+GHA_BUILD_OK=false
+for i in $(seq 1 60); do
     STATUS=$(curl -s \
         -H "Authorization: token $GHCR_TOKEN" \
         -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/$REPO/actions/runs?branch=main&per_page=5" \
+        "https://api.github.com/repos/$REPO/actions/runs?branch=main&per_page=10" \
         | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 runs = data.get('workflow_runs', [])
 commit = '$COMMIT_SHA'
 for r in runs:
-    if r.get('head_sha', '').startswith(commit[:8]):
+    if r.get('head_sha') == commit:
         print(r.get('conclusion') or r.get('status'))
         break
 else:
-    # No matching run found yet; check most recent
-    if runs:
-        r = runs[0]
-        print(r.get('conclusion') or r.get('status'))
-    else:
-        print('pending')
+    print('pending')
 " 2>/dev/null || echo "pending")
     if [ "$STATUS" = "success" ]; then
-        echo "  ✓ GitHub Actions build completed"
+        echo "  ✓ GitHub Actions build completed for ${COMMIT_SHA:0:10}"
         GHA_BUILD_OK=true
         break
     elif [ "$STATUS" = "failure" ] || [ "$STATUS" = "cancelled" ]; then
-        echo "  ⚠ GitHub Actions build status: $STATUS — skipping ghcr.io import, using existing ACR image"
-        GHA_BUILD_OK=false
-        break
+        echo "  ❌ GitHub Actions build $STATUS for ${COMMIT_SHA:0:10} — aborting"
+        echo "     Check: https://github.com/$REPO/actions"
+        exit 1
     fi
-    echo "  ⏳ Build status: $STATUS (attempt $i/30)..."
+    if [ "$i" -eq 1 ] && [ "$STATUS" = "pending" ]; then
+        echo "  ℹ  No matching run yet — CI may still be queuing (SHA: ${COMMIT_SHA:0:10})"
+    fi
+    echo "  ⏳ Build status: $STATUS (attempt $i/60)..."
     sleep 10
 done
 
-if [ "${GHA_BUILD_OK:-false}" = "true" ]; then
-    echo "▶ Importing image from ghcr.io into ACR..."
-    az acr import \
-        --name "$ACR_NAME" \
-        --source "$GHCR_IMAGE" \
-        --image "$IMAGE" \
-        --username "$GHCR_USER" \
-        --password "$GHCR_TOKEN" \
-        --force \
-        --output none
-    echo "  ✓ Image imported: $ACR_SERVER/$IMAGE"
-else
-    echo "▶ Using existing ACR image (ghcr.io import skipped due to build failure)"
+if [ "$GHA_BUILD_OK" != "true" ]; then
+    echo "❌ Timed out waiting for GitHub Actions build of ${COMMIT_SHA:0:10}"
+    echo "   Check: https://github.com/$REPO/actions"
+    exit 1
 fi
+
+echo "▶ Importing image from ghcr.io into ACR..."
+az acr import \
+    --name "$ACR_NAME" \
+    --source "$GHCR_IMAGE" \
+    --image "$IMAGE" \
+    --username "$GHCR_USER" \
+    --password "$GHCR_TOKEN" \
+    --force \
+    --output none
+echo "  ✓ Image imported: $ACR_SERVER/$IMAGE"
 
 # ── Remove existing container (clean slate) ───────────────────────
 EXISTING=$(az container show --name "$CONTAINER_NAME" --resource-group "$RG" \
