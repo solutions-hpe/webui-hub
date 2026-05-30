@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import os
+import re
+import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Literal, Optional, Union
 import uuid
 
@@ -16,6 +25,81 @@ from ..crypto import encrypt_dict, encrypt_str, decrypt_str, generate_api_key
 from ..data_models import Command, Spoke, Tenant, User
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# Hub self-update state (in-memory, single-process)
+_hub_update_lock = threading.Lock()
+_hub_update_state: dict[str, Any] = {
+    "in_progress": False,
+    "log": [],
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
+
+def _hub_base_dir() -> Path:
+    """Return the hub's repo root (parent of the app/ package)."""
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _run_hub_self_update_bg() -> None:
+    """Run git pull + pip install in a background thread, then restart via systemd."""
+    global _hub_update_state
+    base = _hub_base_dir()
+    venv_pip = base / "venv" / "bin" / "pip"
+
+    def _log(line: str) -> None:
+        _hub_update_state["log"].append(line)
+        logger.info("hub-self-update: %s", line)
+
+    try:
+        _hub_update_state.update({"in_progress": True, "log": [], "error": None, "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None})
+
+        # ── Step 1: git pull ──────────────────────────────────────────────────
+        _log(f"Working dir: {base}")
+        result = subprocess.run(
+            ["git", "pull", "--ff-only"],
+            capture_output=True, text=True, cwd=str(base), timeout=120
+        )
+        for l in (result.stdout + result.stderr).splitlines():
+            _log(l)
+        if result.returncode != 0:
+            _hub_update_state.update({"error": f"git pull failed (rc={result.returncode})", "in_progress": False, "finished_at": datetime.now(timezone.utc).isoformat()})
+            return
+
+        # ── Step 2: pip install -r requirements.txt ───────────────────────────
+        if venv_pip.exists():
+            _log("Running pip install -r requirements.txt …")
+            result = subprocess.run(
+                [str(venv_pip), "install", "--quiet", "-r", str(base / "requirements.txt")],
+                capture_output=True, text=True, cwd=str(base), timeout=300
+            )
+            for l in (result.stdout + result.stderr).splitlines():
+                _log(l)
+            if result.returncode != 0:
+                _hub_update_state.update({"error": f"pip install failed (rc={result.returncode})", "in_progress": False, "finished_at": datetime.now(timezone.utc).isoformat()})
+                return
+        else:
+            _log("No venv found — skipping pip install")
+
+        _log("Update complete. Scheduling service restart in 3 seconds…")
+        _hub_update_state.update({"in_progress": False, "error": None, "finished_at": datetime.now(timezone.utc).isoformat()})
+
+        # ── Step 3: deferred restart so the response can reach the client ─────
+        def _restart():
+            time.sleep(3)
+            is_root = os.geteuid() == 0
+            cmd = ["systemctl", "restart", "hub"]
+            if not is_root:
+                cmd = ["sudo", "-n"] + cmd
+            subprocess.run(cmd, check=False)
+        threading.Thread(target=_restart, daemon=True).start()
+
+    except subprocess.TimeoutExpired as exc:
+        _hub_update_state.update({"error": f"Command timed out: {exc}", "in_progress": False, "finished_at": datetime.now(timezone.utc).isoformat()})
+    except Exception as exc:
+        logger.exception("hub-self-update failed")
+        _hub_update_state.update({"error": str(exc), "in_progress": False, "finished_at": datetime.now(timezone.utc).isoformat()})
 
 
 class TenantCreateRequest(BaseModel):
@@ -1000,3 +1084,55 @@ def delete_qa_api_key(
     if not deleted:
         raise HTTPException(status_code=404, detail="QA API key not found")
     return {"ok": True, "deleted_id": key_id}
+
+
+@router.get("/superadmin/hub-update-status")
+def get_hub_update_status(current_user: User = Depends(auth.require_superadmin)):
+    """Return current hub version, latest git commit info, and update state."""
+    base = _hub_base_dir()
+    # Read current version
+    version_file = base / "VERSION"
+    current_version = version_file.read_text().strip() if version_file.exists() else "unknown"
+
+    # Git info (non-fatal)
+    git_info: dict[str, Any] = {}
+    try:
+        # Local HEAD
+        r = subprocess.run(["git", "log", "-1", "--format=%H %s %ai"], capture_output=True, text=True, cwd=str(base), timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            parts = r.stdout.strip().split(" ", 2)
+            git_info["local_commit"] = parts[0] if parts else ""
+            git_info["local_subject"] = " ".join(parts[1:]) if len(parts) > 1 else ""
+        # Remote HEAD (fetch first)
+        subprocess.run(["git", "fetch", "--quiet", "origin"], capture_output=True, cwd=str(base), timeout=15)
+        r2 = subprocess.run(["git", "log", "HEAD..origin/HEAD", "--oneline"], capture_output=True, text=True, cwd=str(base), timeout=10)
+        ahead_lines = [l for l in r2.stdout.splitlines() if l.strip()]
+        git_info["commits_behind"] = len(ahead_lines)
+        git_info["pending_commits"] = ahead_lines[:10]
+        git_info["update_available"] = len(ahead_lines) > 0
+    except Exception as exc:
+        git_info["error"] = str(exc)
+
+    return {
+        "current_version": current_version,
+        "update_in_progress": _hub_update_state["in_progress"],
+        "update_log": list(_hub_update_state["log"]),
+        "update_error": _hub_update_state["error"],
+        "started_at": _hub_update_state["started_at"],
+        "finished_at": _hub_update_state["finished_at"],
+        **git_info,
+    }
+
+
+@router.post("/superadmin/hub-self-update")
+def trigger_hub_self_update(current_user: User = Depends(auth.require_superadmin)):
+    """Trigger a hub self-update: git pull, pip install, systemctl restart hub.
+
+    Returns immediately. Poll GET /superadmin/hub-update-status for progress.
+    The hub will restart ~3 seconds after the pip step completes.
+    """
+    if _hub_update_state["in_progress"]:
+        raise HTTPException(status_code=409, detail="Update already in progress")
+    t = threading.Thread(target=_run_hub_self_update_bg, daemon=True)
+    t.start()
+    return {"ok": True, "detail": "Hub self-update started. Poll /superadmin/hub-update-status for progress. The hub will restart when complete."}

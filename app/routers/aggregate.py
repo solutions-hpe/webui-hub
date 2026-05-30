@@ -962,8 +962,16 @@ async def get_user_overrides_conf(
     cfg = _github_repo_settings(tenant)
     if not cfg.get("github_token"):
         # No GitHub API key — serve hub-managed override content only.
+        # Fall back to user_overrides_conf_content from spoke telemetry if no override set.
+        content = tenant.user_conf_override or ""
+        if not content:
+            for spoke in _approved_spokes(resolved_tenant_id):
+                spoke_content = (spoke.telemetry or {}).get("user_overrides_conf_content", "")
+                if spoke_content:
+                    content = spoke_content
+                    break
         return {
-            "content": tenant.user_conf_override or "",
+            "content": content,
             "sha": "",
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "mode": "override",
@@ -978,6 +986,14 @@ async def get_user_overrides_conf(
             "mode": "override",
         }
     content, sha, branch = await _fetch_user_overrides_conf_from_github(tenant)
+    # If GitHub returned nothing, fall back to spoke telemetry so users aren't left with an empty view.
+    if not content:
+        for spoke in _approved_spokes(resolved_tenant_id):
+            spoke_content = (spoke.telemetry or {}).get("user_overrides_conf_content", "")
+            if spoke_content:
+                content = spoke_content
+                sha = ""
+                break
     return {
         "content": content,
         "sha": sha,
