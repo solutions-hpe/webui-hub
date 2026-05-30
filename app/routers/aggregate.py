@@ -2826,6 +2826,12 @@ def qa_teardown_all_vms(
             "vms_queued": queued,
         })
 
+    # Push commands immediately rather than waiting for the next spoke telemetry cycle.
+    from ..ws import notify_spoke_command
+    for sp in spokes_out:
+        if sp["vms_queued"] > 0:
+            notify_spoke_command(resolved_tenant_id, sp["spoke_id"])
+
     return {
         "ok": True,
         "tenant_id": resolved_tenant_id,
