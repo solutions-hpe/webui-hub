@@ -1316,6 +1316,9 @@ def get_aggregate_proxmox(
 ):
     resolved_tenant_id = _resolve_tenant_id(tenant_id, current_user)
     hosts: list[dict[str, Any]] = []
+    # Fetch effective USB list (global + tenant) once — same for all spokes.
+    effective_usb_vidpids = [{k: v for k, v in d.items() if k != "source"}
+                              for d in store.get_effective_usb_vidpids(resolved_tenant_id)]
     for spoke in _approved_spokes(resolved_tenant_id):
         proxmox = _telemetry_dict(spoke, "proxmox")
         vms = _telemetry_list(spoke, "proxmox_vms") or (proxmox.get("vms") if isinstance(proxmox.get("vms"), list) else [])
@@ -1359,7 +1362,7 @@ def get_aggregate_proxmox(
             "spoke_config": {
                 "usb_max_slots": str((spoke.config or {}).get("usb_max_slots", "24")),
                 "vmid_start": int((spoke.config or {}).get("vmid_start", 0) or 0),
-                "usb_vidpids": (spoke.config or {}).get("usb_vidpids", "[]"),
+                "usb_vidpids": effective_usb_vidpids,
                 "hostname": spoke.hostname or "",
                 # Read auto_provision from telemetry via _spoke_usb_capacity so the
                 # hub reflects the spoke's actual runtime state, not just hub DB config.
