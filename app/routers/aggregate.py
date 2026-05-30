@@ -636,23 +636,77 @@ def _normalize_central_sites_config(config: dict[str, Any] | None) -> dict[str, 
 
 
 def _aggregate_central_payload(tenant_id: str) -> dict[str, Any]:
+    from ..tasks import _cache_updated_at, _hub_central_status
+
     tenant = _get_tenant(tenant_id)
     spokes = _approved_spokes(tenant_id)
+    mode = _central_mode(tenant)
+    central_sites_config = _normalize_central_sites_config(store.get_tenant_central_sites_config(tenant_id))
+
+    # Pull live client_count_status and per-spoke data from hub's in-memory cache (centralized mode).
+    agg_client_count_status: dict[str, Any] = {}
+    hub_spokes_data: dict[str, Any] = {}
+    if mode == "centralized":
+        is_stale = time.time() - _cache_updated_at.get(tenant_id, 0) > 300
+        if not is_stale:
+            tenant_data = _hub_central_status.get(tenant_id, {})
+            ccs = tenant_data.get("client_count_status")
+            if isinstance(ccs, dict):
+                agg_client_count_status = ccs
+            spokes_cache = tenant_data.get("spokes")
+            if isinstance(spokes_cache, dict):
+                hub_spokes_data = spokes_cache
+
+    spokes_out = []
+    for spoke in spokes:
+        central = _central_telemetry(spoke)
+        spoke_ccs: dict[str, Any] = {}
+        if mode == "distributed":
+            ccs = central.get("client_count_status")
+            if isinstance(ccs, dict):
+                spoke_ccs = ccs
+                for wsite, info in spoke_ccs.items():
+                    if wsite not in agg_client_count_status and isinstance(info, dict):
+                        agg_client_count_status[wsite] = info
+        else:
+            # Centralized: spoke shares the tenant-level client count status
+            spoke_ccs = agg_client_count_status
+
+        # Build sites list from hub cache (centralized) or spoke telemetry (distributed)
+        spoke_hub_data = hub_spokes_data.get(spoke.id, {}) if isinstance(hub_spokes_data.get(spoke.id), dict) else {}
+        site_mappings = spoke_hub_data.get("site_mappings", {}) if isinstance(spoke_hub_data.get("site_mappings"), dict) else {}
+        if not site_mappings:
+            site_mappings = dict(central_sites_config.get("site_mappings") or {}) if isinstance(central_sites_config.get("site_mappings"), dict) else {}
+        spoke_status = spoke_hub_data.get("status", {}) if isinstance(spoke_hub_data.get("status"), dict) else {}
+        spoke_wireless = spoke_hub_data.get("wireless_clients", {}) if isinstance(spoke_hub_data.get("wireless_clients"), dict) else {}
+        sites = [
+            {
+                "wsite": wsite,
+                "central_site": central_site,
+                "wireless_clients": spoke_wireless.get(wsite),
+                "status_map": spoke_status.get(wsite, {}) if isinstance(spoke_status.get(wsite), dict) else {},
+            }
+            for wsite, central_site in site_mappings.items()
+        ]
+
+        spokes_out.append({
+            "spoke_id": spoke.id,
+            "spoke_name": spoke.spoke_name or spoke.hostname,
+            "spoke_online": _is_online(spoke),
+            "last_seen": spoke.last_seen,
+            "assigned_sites": spoke.assigned_sites or [],
+            "client_count_status": spoke_ccs,
+            "sites": sites,
+            "central_status": central,
+        })
+
     return {
         "tenant_id": tenant_id,
         "hub_central_config": _serialize_hub_central_config(tenant),
-        "central_sites_config": _normalize_central_sites_config(store.get_tenant_central_sites_config(tenant_id)),
-        "mode": _central_mode(tenant),
-        "spokes": [
-            {
-                "spoke_id": spoke.id,
-                "spoke_name": spoke.spoke_name or spoke.hostname,
-                "spoke_online": _is_online(spoke),
-                "last_seen": spoke.last_seen,
-                "central_status": _central_telemetry(spoke),
-            }
-            for spoke in spokes
-        ],
+        "central_sites_config": central_sites_config,
+        "mode": mode,
+        "client_count_status": agg_client_count_status,
+        "spokes": spokes_out,
     }
 
 
