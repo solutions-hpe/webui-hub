@@ -1242,6 +1242,80 @@ def check_and_fix_config_drift(tenant_id: str, spoke_id: str) -> bool:
 
 
 
+def get_spoke_config_diag(tenant_id: str, spoke_id: str) -> dict[str, Any]:
+    """Return a diagnostic snapshot for a spoke's hub-managed config state.
+
+    Includes the config payload preview (what would be sent on the next push),
+    the current command queue for this spoke, version accounting, and hash
+    comparison so operators can see exactly why a spoke may not have received
+    its USB cert list or other hub-managed settings.
+    """
+    with _lock:
+        spoke = get_spoke(tenant_id, spoke_id)
+        if not spoke:
+            return {"error": "Spoke not found"}
+        tenant = get_tenant(tenant_id)
+
+        # Build the config payload preview (strip secrets)
+        _SECRET_KEYS = {
+            "relay_api_key", "client_secret", "access_token", "refresh_token",
+            "smtp_password", "teams_webhook_url", "proxmox_token",
+        }
+        payload = _build_spoke_config_payload(tenant)
+        safe_payload: dict[str, Any] = {}
+        for k, v in payload.items():
+            if k in _SECRET_KEYS:
+                safe_payload[k] = "***"
+            elif isinstance(v, dict):
+                safe_payload[k] = {dk: ("***" if dk in _SECRET_KEYS else dv) for dk, dv in v.items()}
+            else:
+                safe_payload[k] = v
+
+        # USB cert details
+        global_devices = _load_global_config().get("usb_vidpids", [])
+        effective = _effective_usb_vidpids_from(global_devices, tenant)
+
+        # Command queue
+        commands = _load_queue(tenant_id, spoke_id)
+        now = _now()
+        active_cmds = [c for c in commands if c.expires_at > now]
+        pending_config_cmds = [
+            {
+                "id": c.id,
+                "type": c.type,
+                "status": c.status,
+                "config_version": int((c.payload or {}).get("config_version") or (c.payload or {}).get("__config_version") or 0),
+                "usb_vidpids_in_payload": (c.payload or {}).get("config", {}).get("usb_vidpids") is not None
+                    if isinstance((c.payload or {}).get("config"), dict) else False,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+                "expires_at": c.expires_at.isoformat() if c.expires_at else None,
+            }
+            for c in active_cmds if c.type in {"config_update", "config_clear"}
+        ]
+
+        # Hash comparison
+        current_hash = _authoritative_config_hash(tenant, payload)
+        in_sync = spoke.last_pushed_config_hash == current_hash
+
+        return {
+            "spoke_id": spoke.id,
+            "spoke_hostname": spoke.hostname,
+            "status": spoke.status,
+            "config_version": spoke.config_version,
+            "applied_config_version": spoke.applied_config_version,
+            "push_pending": spoke.config_version > spoke.applied_config_version,
+            "last_pushed_config_hash": spoke.last_pushed_config_hash,
+            "current_authoritative_hash": current_hash,
+            "config_in_sync": in_sync,
+            "global_usb_cert_count": len(global_devices),
+            "effective_usb_cert_count": len(effective),
+            "effective_usb_certs": effective,
+            "usb_vidpids_in_next_payload": "usb_vidpids" in payload,
+            "pending_config_commands": pending_config_cmds,
+            "config_payload_preview": safe_payload,
+        }
+
+
 def ensure_config_clear_command(tenant_id: str, spoke_id: str) -> None:
     with _lock:
         spoke = get_spoke(tenant_id, spoke_id)

@@ -665,6 +665,21 @@ def get_spoke_config(tenant_id: str, spoke_id: str, current_user: User = Depends
     return {"config": spoke.config or {}, "telemetry": spoke.telemetry or {}}
 
 
+@router.get("/{tenant_id}/spokes/{spoke_id}/config-diag")
+def get_spoke_config_diag(tenant_id: str, spoke_id: str, current_user: User = Depends(auth.get_current_user)):
+    """Return hub-side config diagnostic for a spoke.
+
+    Shows the config payload preview, USB cert list, command queue state,
+    version accounting, and hash comparison — useful for diagnosing why a
+    spoke may not have received its USB allowlist or other hub-managed config.
+    """
+    resolved_tenant_id = _require_tenant_access(tenant_id, current_user)
+    result = store.get_spoke_config_diag(resolved_tenant_id, spoke_id)
+    if result.get("error") == "Spoke not found":
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    return result
+
+
 @router.get("/{tenant_id}/spokes/{spoke_id}/remote-logs")
 async def get_spoke_remote_logs(
     tenant_id: str,
