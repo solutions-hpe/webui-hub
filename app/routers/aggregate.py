@@ -1547,7 +1547,13 @@ def get_aggregate_proxmox(
             "proxmox_vms": vms,
             "usb_devices": usb_devices,
             "vm_count": int(proxmox.get("vm_count") or len(vms)),
-            "usb_count": int(proxmox.get("usb_count") or len(usb_devices)),
+            "usb_count": int(proxmox.get("usb_count") or len(usb_devices)) or sum(
+                1 for vm in (proxmox.get("vms") or [])
+                if isinstance(vm, dict)
+                and (vm.get("has_usb_config") or vm.get("reclone_bus_path"))
+                and not vm.get("is_template")
+                and vm.get("prov_status") not in ("tearing_down", "provisioning")
+            ),
             "reclone_state": _telemetry_dict(spoke, "reclone_state"),
             "spoke_config": {
                 "usb_max_slots": str((spoke.config or {}).get("usb_max_slots", "24")),
