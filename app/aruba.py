@@ -558,10 +558,10 @@ class ArubaClient:
                     data = await self._get(client, "/network-monitoring/v1alpha1/clients", params={"limit": limit})
                     return [
                         {
-                            "mac": item.get("macAddress") or item.get("mac") or "—",
-                            "ip": item.get("ipv4") or item.get("ipv4Address") or item.get("ip") or "—",
-                            "hostname": item.get("name") or item.get("hostname") or "—",
-                            "username": item.get("userName") or item.get("username") or "",
+                            "mac": item.get("macAddress") or item.get("mac_address") or item.get("mac") or "—",
+                            "ip": item.get("ipv4") or item.get("ipv4Address") or item.get("ip_address") or item.get("ip") or "—",
+                            "hostname": item.get("name") or item.get("clientName") or item.get("deviceName") or item.get("hostname") or "—",
+                            "username": item.get("userName") or item.get("username") or item.get("associatedUser") or item.get("auth_username") or "",
                             "site": item.get("siteName") or item.get("site_name") or "—",
                             "ap": item.get("associatedDeviceName") or item.get("associatedDevice") or item.get("ap_name") or "—",
                             "ssid": item.get("ssid") or item.get("essid") or "—",
@@ -580,9 +580,10 @@ class ArubaClient:
                     data = await self._get(client, path, params={"limit": limit})
                     return [
                         {
-                            "mac": item.get("macaddr") or item.get("mac") or "—",
+                            "mac": item.get("macaddr") or item.get("mac_address") or item.get("mac") or "—",
                             "ip": item.get("ip_address") or item.get("ip") or "—",
                             "hostname": item.get("name") or item.get("hostname") or "—",
+                            "username": item.get("username") or item.get("userName") or "",
                             "site": item.get("site") or item.get("site_name") or "—",
                             "ap": item.get("associated_device_name") or item.get("ap_name") or "—",
                             "ssid": item.get("ssid") or "—",
@@ -691,6 +692,8 @@ class ArubaClient:
                     params["next"] = nxt
         except Exception as exc:
             logger.warning("new_central clients cache fetch [%s]: %s", self._config_hash, exc)
+        if result:
+            logger.info("new_central client fields sample [%s]: %s", self._config_hash, list(result[0].keys()))
         _nc_clients_cache[self._config_hash] = (time.time(), result)
         return result
 
@@ -958,10 +961,10 @@ class ArubaClient:
                 elif conn_type == "wireless":
                     entry["wireless"] += 1
                 normalized_clients.append({
-                    "mac": cli.get("macAddress") or cli.get("mac") or "—",
-                    "ip": cli.get("ipv4") or cli.get("ipv4Address") or cli.get("ip") or "—",
-                    "hostname": cli.get("name") or cli.get("hostname") or "—",
-                    "username": cli.get("userName") or cli.get("username") or "",
+                    "mac": cli.get("macAddress") or cli.get("mac_address") or cli.get("mac") or "—",
+                    "ip": cli.get("ipv4") or cli.get("ipv4Address") or cli.get("ip_address") or cli.get("ip") or "—",
+                    "hostname": cli.get("name") or cli.get("clientName") or cli.get("deviceName") or cli.get("hostname") or "—",
+                    "username": cli.get("userName") or cli.get("username") or cli.get("associatedUser") or cli.get("auth_username") or "",
                     "site": sn,
                     "ap": cli.get("associatedDeviceName") or cli.get("associatedDevice") or cli.get("ap_name") or "—",
                     "ssid": cli.get("ssid") or cli.get("essid") or "—",
