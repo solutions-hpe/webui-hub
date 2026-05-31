@@ -24,6 +24,7 @@ Hub is designed for operators who need to manage many spoke environments from on
 - GitHub-first tenant config editors for `simulation.conf` and `user-overrides.conf`, with hub override mode pushed to spokes
 - Deployment options for Docker, Azure Container Instance, and BYOD Linux hosts
 - Per-spoke command queue, inbox/ack relay, and 7-day rolling audit history
+- Relayed Proxmox VM Server details including warmup/1-hour CPU and memory averages, cached agent/PVE version metadata, and VM recovery/watchdog state surfaced through the shared frontend
 - Sites monitoring that compares current wireless clients against a sticky 7-day rolling baseline alarm
 
 ## Architecture
@@ -60,9 +61,11 @@ Hub sits in the center of the platform, serving the shared `cs-webui` frontend i
 
 Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webui` for the shared browser assets used by both hub and spoke deployments.
 
-- `app/main.py` serves `static/index.html` and replaces `{{WEBUI_MODE}}` with `hub` before returning the page.
-- `static/index.html`, `static/app.js`, and `static/style.css` are sourced from `cs-webui`.
-- Each hub deploy stamps `VERSION` with the git SHA and serves `app.js` / `style.css` as `...?v=<sha>` so browsers do not keep stale assets.
+- `frontend/` is a git submodule that tracks `https://github.com/solutions-hpe/cs-webui.git` on `main` for local development and bump commits.
+- `app/main.py` serves the shared `templates/index.html` and injects `WEBUI_MODE=hub` before returning the page.
+- `static/js/*`, the legacy `static/app.js` compatibility bundle, and `static/style.css` are sourced from `cs-webui`.
+- The shared VM Server Details view renders relayed `agent_version`, `pve_version`, `cpu_1h_avg`, `mem_1h_avg`, `cpu_est_avg`, `mem_est_avg`, `resource_samples_started`, and per-VM recovery states from spoke telemetry.
+- Each hub deploy stamps `VERSION` with the git SHA and serves frontend assets as `...?v=<sha>` so browsers do not keep stale files.
 - The footer version pills are populated from `frontend/SEMVER` (`CS-WebUI v…`) and `CLIENT_SIM_VERSION` (`GitHub Repo v…`).
 - Branch alignment matters: `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
 - For automated image builds, `.github/workflows/build-push.yml` clones `cs-webui` from the matching branch before the Docker build begins.
@@ -85,7 +88,7 @@ Key pieces of the flow:
 - `GET /api/backup/installer/sas-token` returns a **2-hour read-only container SAS URL** after the caller supplies `X-Installer-Key` matching `INSTALLER_API_KEY`.
 - Hub-triggered Proxmox backup jobs use the stored Azure account key to enqueue spoke backup work and upload VM snapshots into Azure Blob Storage.
 - The Proxmox installer and reseed flows use the SAS URL so they can download private blobs without ever receiving the raw storage account key.
-- Hub mode in `cs-webui` exposes VM backup, reseed, and recovery controls through the VM Server workflows.
+- Hub mode in `cs-webui` exposes VM backup, reseed, recovery controls, relayed resource-average warmup pills, and VM watchdog/retry state through the VM Server workflows.
 
 ## Quick Start (Docker)
 
@@ -466,11 +469,19 @@ Hub returns queued commands, including the one-time registration payload with th
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/api/spokes/register` | None | Register a spoke and create a pending spoke record |
-| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/telemetry` | `X-API-Key` | Push telemetry and heartbeat data |
+| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/telemetry` | `X-API-Key` | Push telemetry and heartbeat data, including relayed Proxmox node/VM details and 1-hour resource-average warmup fields |
 | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/inbox` | `X-API-Key` | Pull queued commands and config updates |
 | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/ack` | `X-API-Key` | Acknowledge command execution and optionally report task results |
 
 Hub heartbeat monitoring treats a spoke as offline after 300 seconds without telemetry.
+
+Hub stores the relayed Proxmox snapshot from each spoke and surfaces it in the shared VM Server UI. The relayed fields include:
+
+- node connectivity plus `agent_version` / `pve_version`
+- per-VM `cpu`, `mem`, `maxmem`, template flags, USB/T3 metadata, and recovery states such as `post_prov_retry`, `agent_rebooting`, and `agent_unresponsive`
+- `cpu_1h_avg`, `mem_1h_avg`, `cpu_est_avg`, `mem_est_avg`, and `resource_samples_started` so Hub can render the same three warmup states as the spoke Details view
+
+The raw sample arrays in `resource_cache.json` stay local on the spoke; Hub only stores the summarized telemetry snapshot.
 
 ### Tenant-scoped management (JWT)
 
@@ -720,7 +731,7 @@ All persistent state lives under `DATA_DIR`.
 | `/data/tenants.json` | Tenant metadata plus encrypted Aruba and notification settings |
 | `/data/oui_pool.json` | Global OUI reference pool used by the T3 MAC profile builder |
 | `/data/pending/*.json` | Spoke registrations waiting for superadmin approval |
-| `/data/{tenant_id}/spokes.json` | Approved spokes, labels, runtime config, processing mode, telemetry, last seen timestamps |
+| `/data/{tenant_id}/spokes.json` | Approved spokes, labels, runtime config, processing mode, telemetry (including relayed Proxmox metrics/version metadata), and last seen timestamps |
 | `/data/{tenant_id}/mac_profiles.json` | T3 MAC profiles keyed by spoke ID |
 | `/data/{tenant_id}/queue/*.json` | Pending, delivered, and executed commands with 24-hour TTL |
 | `/data/{tenant_id}/audit/*.json` | Rolling 7-day task and action history per spoke |
@@ -833,7 +844,7 @@ The `mac_config_hash` is an MD5 of the on-disk `mac_config.json`. Operators can 
 
 ## Spoke Integration Status
 
-The `client-sim/webui-spoke/server.py` integration work for Hub is complete. The five spoke behaviors below have been implemented and are kept here as a reference.
+The `client-sim/webui-spoke/server.py` integration work for Hub is complete. The six spoke behaviors below have been implemented and are kept here as a reference.
 
 1. **Implemented: use the new registration flow**
    - POST `hostname`, `label`, and `config` to `/api/spokes/register`.
@@ -845,6 +856,8 @@ The `client-sim/webui-spoke/server.py` integration work for Hub is complete. The
    - Support `config_update`, `aruba_config_update`, `notification_push`, `gkill_update`, `reclone_schedule`, `repo_sync`, `auto_recovery`, `t3_mac_update`, and `t3_oui_pool_update` as inbox items.
 5. **Implemented: send richer ACK payloads back to Hub**
    - Include `command_id`, `status`, and `result` fields such as `success`, `task_type`, `detail`, `output`, and `timestamp` so Hub can populate audit history.
+6. **Implemented: relay richer Proxmox telemetry snapshots**
+   - Include cached `agent_version` / `pve_version`, per-VM CPU/memory sizing, `cpu_1h_avg` / `mem_1h_avg`, warmup estimates, and `resource_samples_started` so Hub can match the spoke VM Server Details view during the 60-minute sample warmup.
 
 ## Health Check
 
