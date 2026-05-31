@@ -868,6 +868,26 @@ async def push_tenant_usb_config_to_all_spokes(
     return {"ok": True, "pushed_to": pushed_to, "online_spokes": online_spokes, "usb_vidpids": tenant.usb_vidpids}
 
 
+@router.delete("/{tenant_id}/spokes/clients/history")
+async def purge_all_spokes_client_history(
+    tenant_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Fan out a purge_clients relay message to all online approved spokes in the tenant."""
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    sent_to: list[str] = []
+    offline: list[str] = []
+    for spoke in store.list_spokes(resolved_tenant_id):
+        if spoke.status != "approved":
+            continue
+        ok = await relay_ws.send_to_spoke(resolved_tenant_id, spoke.id, {"type": "purge_clients"})
+        if ok:
+            sent_to.append(spoke.id)
+        else:
+            offline.append(spoke.id)
+    return {"ok": True, "sent_to": sent_to, "offline": offline}
+
+
 def _spoke_versions_snapshot(tenant_id: str) -> dict[str, dict[str, Any]]:
     """Capture current agent + spoke versions for all approved spokes."""
     snapshot: dict[str, dict[str, Any]] = {}
