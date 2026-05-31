@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .. import auth, store, ws as relay_ws
 from ..crypto import decrypt_str, encrypt_str, generate_api_key
 from ..data_models import AuditEntry, Command, PendingSpoke, User
-from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, route_vnc_message, register_log_fetch, unregister_log_fetch, route_log_fetch_message, unregister_spoke, ws_broadcast, register_provision_session, unregister_provision_session, route_provision_message
+from ..ws import push_spoke_commands, register_spoke as ws_register_spoke, route_shell_message, route_vnc_message, register_log_fetch, unregister_log_fetch, route_log_fetch_message, unregister_spoke, ws_broadcast, register_provision_session, unregister_provision_session, route_provision_message, register_command_trace, unregister_command_trace, route_command_trace_message
 
 # In-memory update job store: job_id -> job dict
 _update_jobs: dict[str, dict[str, Any]] = {}
@@ -718,6 +718,43 @@ async def get_spoke_remote_logs(
     return {"source": source, "lines": response.get("lines", [])}
 
 
+@router.get("/{tenant_id}/spokes/{spoke_id}/command-trace")
+async def get_spoke_command_trace(
+    tenant_id: str,
+    spoke_id: str,
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Fetch the command relay trace from the spoke for pipeline debugging."""
+    resolved_tenant_id = _require_tenant_access(tenant_id, current_user)
+    spoke = store.get_spoke(resolved_tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+
+    request_id = str(uuid.uuid4())
+    queue = register_command_trace(request_id)
+    try:
+        sent = await relay_ws.send_to_spoke(resolved_tenant_id, spoke_id, {
+            "type": "command_trace_request",
+            "request_id": request_id,
+        })
+        if not sent:
+            raise HTTPException(status_code=502, detail="Spoke relay is offline")
+        try:
+            response = await asyncio.wait_for(queue.get(), timeout=10.0)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Spoke did not respond in time")
+    finally:
+        unregister_command_trace(request_id)
+
+    return {
+        "spoke_id": spoke_id,
+        "agent_connected": response.get("agent_connected"),
+        "agent_hostname": response.get("agent_hostname"),
+        "command_queue": response.get("command_queue", []),
+        "trace": response.get("trace", []),
+    }
+
+
 @router.get("/{tenant_id}/spokes/{spoke_id}/proxmox-credentials")
 def get_spoke_proxmox_credentials(
     tenant_id: str,
@@ -1255,6 +1292,8 @@ async def spoke_websocket(
                     route_provision_message(data)
                 elif msg_type == "log_fetch_response":
                     route_log_fetch_message(data)
+                elif msg_type == "command_trace_response":
+                    route_command_trace_message(data)
             except WebSocketDisconnect:
                 raise
             except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:

@@ -266,3 +266,26 @@ def route_log_fetch_message(message: dict) -> None:
     queue = _log_fetch_queues.get(request_id)
     if queue is not None:
         queue.put_nowait(message)
+
+
+# ── Command trace queues (hub → spoke → hub round-trip for debug) ─────────────
+_command_trace_queues: dict[str, asyncio.Queue] = {}
+
+
+def register_command_trace(request_id: str) -> asyncio.Queue:
+    queue: asyncio.Queue = asyncio.Queue()
+    _command_trace_queues[request_id] = queue
+    return queue
+
+
+def unregister_command_trace(request_id: str) -> None:
+    _command_trace_queues.pop(request_id, None)
+
+
+def route_command_trace_message(message: dict) -> None:
+    request_id = str(message.get("request_id") or "").strip()
+    if not request_id:
+        return
+    queue = _command_trace_queues.get(request_id)
+    if queue is not None:
+        queue.put_nowait(message)
