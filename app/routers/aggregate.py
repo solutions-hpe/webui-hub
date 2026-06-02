@@ -1555,6 +1555,7 @@ def get_aggregate_proxmox(
                 and vm.get("prov_status") not in ("tearing_down", "provisioning")
             ),
             "reclone_state": _telemetry_dict(spoke, "reclone_state"),
+            "api_server": _telemetry_dict(spoke, "api_server"),
             "spoke_config": {
                 "usb_max_slots": str((spoke.config or {}).get("usb_max_slots", "24")),
                 "vmid_start": int((spoke.config or {}).get("vmid_start", 0) or 0),
