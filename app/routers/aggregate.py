@@ -1556,6 +1556,10 @@ def get_aggregate_proxmox(
             ),
             "reclone_state": _telemetry_dict(spoke, "reclone_state"),
             "api_server": _telemetry_dict(spoke, "api_server"),
+            "pending_command_count": sum(
+                1 for c in store.list_commands(resolved_tenant_id, spoke.id)
+                if c.status in ("queued", "delivered")
+            ),
             "spoke_config": {
                 "usb_max_slots": str((spoke.config or {}).get("usb_max_slots", "24")),
                 "vmid_start": int((spoke.config or {}).get("vmid_start", 0) or 0),
