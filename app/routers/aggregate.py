@@ -1829,6 +1829,18 @@ def toggle_auto_provision(
     resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
     enable: bool = bool(body.get("enable", False))
     new_val = "on" if enable else "off"
+
+    # Persist the tenant-level override so that _build_spoke_config_payload always
+    # includes usb_auto_provision.  Without this, a spoke re-registration (reboot /
+    # reconnect) would overwrite spoke.config with the registration payload (which
+    # still says "on"), and the subsequent ensure_config_update_command push would
+    # not carry usb_auto_provision at all — effectively losing the toggle.
+    tenant = _get_tenant(resolved_tenant_id)
+    hub_config = dict(tenant.hub_config or {})
+    hub_config["usb_auto_provision"] = new_val
+    tenant.hub_config = hub_config
+    store.save_tenant(tenant)
+
     updated = 0
     for spoke in _approved_spokes(resolved_tenant_id):
         next_config = dict(spoke.config or {})
