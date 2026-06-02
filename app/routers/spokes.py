@@ -268,6 +268,15 @@ def _require_tenant_admin(tenant_id: str, current_user: User) -> str:
     return tenant_id
 
 
+def _get_approved_spoke(tenant_id: str, spoke_id: str):
+    spoke = store.get_spoke(tenant_id, spoke_id)
+    if not spoke:
+        raise HTTPException(status_code=404, detail="Spoke not found")
+    if spoke.status != "approved":
+        raise HTTPException(status_code=409, detail="Spoke is not approved")
+    return spoke
+
+
 def _require_spoke_admin(spoke_id: str, current_user: User) -> tuple[str, Any]:
     approved = store.get_approved_spoke_by_id(spoke_id)
     if not approved:
