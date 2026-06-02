@@ -1156,7 +1156,33 @@ async def force_update_spoke_servers(
     return {"ok": True, "queued": queued, "spoke_ids": [s.id for s in spokes]}
 
 
-@router.post("/{tenant_id}/spokes/{spoke_id}/config")
+@router.post("/{tenant_id}/spokes/{spoke_id}/proxmox-agent-command")
+def send_proxmox_agent_command(
+    tenant_id: str,
+    spoke_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+    current_user: User = Depends(auth.get_current_user),
+):
+    """Queue a proxmox_agent_command (arbitrary action) for a single spoke's agent.
+
+    Body: {"action": "<action_name>", ...extra_payload}
+    Supported actions include: clear_provision_lock, restart_agent, unlock_template, etc.
+    """
+    resolved_tenant_id = _require_tenant_admin(tenant_id, current_user)
+    spoke = _get_approved_spoke(resolved_tenant_id, spoke_id)
+    action = body.get("action", "")
+    if not action:
+        raise HTTPException(status_code=400, detail="'action' field is required")
+    store.enqueue_command(Command(
+        spoke_id=spoke.id,
+        tenant_id=resolved_tenant_id,
+        type="proxmox_agent_command",
+        payload=dict(body),
+        expires_at=_now() + timedelta(hours=1),
+    ))
+    return {"ok": True, "spoke_id": spoke_id, "action": action}
+
+
 async def push_spoke_config(
     tenant_id: str,
     spoke_id: str,
