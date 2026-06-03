@@ -129,7 +129,9 @@ def _decode_token(token: str) -> User:
     except JWTError:
         raise exc
 
-    # Synthetic QA runner user — tenant-scoped, read-only, no DB lookup needed.
+    # Synthetic QA runner user — tenant-scoped admin, no DB lookup needed.
+    # Role is "admin" (not superadmin) so QA can perform destructive tenant operations
+    # (teardown VMs, toggle auto-prov, clear command queue) without global access.
     if username == _QA_RUNNER_SUB:
         qa_tenant = payload.get("qa_tenant", "")
         if not qa_tenant:
@@ -139,7 +141,7 @@ def _decode_token(token: str) -> User:
             username="__qa_runner__",
             is_superadmin=False,
             hashed_password="",
-            tenant_roles=[{"tenant_id": qa_tenant, "role": "viewer"}],
+            tenant_roles=[{"tenant_id": qa_tenant, "role": "admin"}],
         )
 
     user = store.get_user(username)
