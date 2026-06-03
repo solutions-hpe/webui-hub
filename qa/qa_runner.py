@@ -1769,6 +1769,20 @@ class QARunner:
             print(f"Unknown phases: {unknown}. Valid: {list(all_phases.keys())}", file=sys.stderr)
             return 2
 
+        # Bootstrap auth if we're not running the full auth phase — every phase
+        # needs a valid token + tenant_id (populated by the key exchange).
+        if not self.token and "auth" not in selected:
+            r = self._http().post("/api/qa/auth", json={"qa_api_key": self.qa_key})
+            if r.status_code != 200:
+                print(f"ERROR: QA key exchange failed — HTTP {r.status_code}: {r.text[:200]}", file=sys.stderr)
+                return 2
+            data = r.json()
+            self.token = data.get("access_token", "")
+            self.tenant_id = data.get("tenant_id", "")
+            if not self.token:
+                print(f"ERROR: No access_token in key exchange response: {data}", file=sys.stderr)
+                return 2
+
         start = time.monotonic()
         for phase_name in selected:
             try:
