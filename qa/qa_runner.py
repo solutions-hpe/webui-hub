@@ -1631,52 +1631,95 @@ class QARunner:
                 )
             return
 
-        # Step 8: verify provision_halt limit enforcement
+        # Step 8: verify no over-provisioning (vm_count <= dongle_count per spoke)
         r = self.get(f"/api/aggregate/proxmox?tenant_id={self.tenant_id}")
         if r.status_code != 200:
-            self._warn("Provision limit enforcement", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
+            self._warn("No over-provisioning check", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
         else:
             hosts = r.json().get("hosts", [])
-            with_dongles = [h for h in hosts if (h.get("usb_count") or 0) > 0 or h.get("proxmox", {}).get("provision_halt")]
+            with_dongles = [h for h in hosts if (h.get("usb_count") or 0) > 0]
             if not with_dongles:
-                self._skip("Provision limit enforcement", MODULE, "No spokes with dongles in proxmox aggregate")
+                self._skip("No over-provisioning (vm_count ≤ dongle_count)", MODULE, "No spokes with dongles in proxmox aggregate")
             else:
-                halted = [h for h in with_dongles if h.get("proxmox", {}).get("provision_halt")]
+                over = [h for h in with_dongles if (h.get("vm_count") or 0) > (h.get("usb_count") or 0)]
                 per_spoke = "; ".join(
-                    f"{h.get('spoke_name', h.get('spoke_id', '?'))}: "
-                    f"{'HALTED' if h.get('proxmox', {}).get('provision_halt') else 'ok'} "
-                    f"(vms={h.get('vm_count', '?')}, dongles={h.get('usb_count', '?')})"
+                    f"{h.get('spoke_name', h.get('spoke_id', '?'))}: vms={h.get('vm_count', '?')}/{h.get('usb_count', '?')} dongles"
+                    + (
+                        f" CPU-pacing({h['proxmox']['provision_halt']['cpu_pct']}%≥{h['proxmox']['provision_halt']['cpu_threshold']}%)"
+                        if h.get("proxmox", {}).get("provision_halt", {}).get("halted")
+                        and h["proxmox"]["provision_halt"].get("reason") == "pacing"
+                        else ""
+                    )
                     for h in with_dongles
                 )
-                if halted:
-                    self._ok(
-                        "Provision limit enforced (provision_halt)",
-                        MODULE,
-                        f"provision_halt set on {len(halted)}/{len(with_dongles)} spoke(s) — {per_spoke}",
+                if over:
+                    self._fail(
+                        "No over-provisioning (vm_count ≤ dongle_count)", MODULE,
+                        f"Over-provisioned on {len(over)}/{len(with_dongles)} spoke(s) — {per_spoke}",
                     )
                 else:
-                    self._warn(
-                        "Provision limit enforced (provision_halt)",
-                        MODULE,
-                        f"provision_halt not yet set on any spoke — {per_spoke}",
+                    self._ok(
+                        "No over-provisioning (vm_count ≤ dongle_count)", MODULE,
+                        f"vm_count ≤ dongle_count on all spokes — {per_spoke}",
                     )
 
-        # Step 9: report CPU stats vs delete threshold (informational)
+        # Step 9: verify CPU provisioning throttle (provision_halt.reason='pacing')
         r = self.get(f"/api/aggregate/proxmox?tenant_id={self.tenant_id}")
         if r.status_code != 200:
-            self._warn("CPU delete threshold", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
+            self._warn("CPU provisioning throttle", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
         else:
             hosts = r.json().get("hosts", [])
             online = [h for h in hosts if h.get("spoke_online")]
             if not online:
-                self._skip("CPU delete threshold configured", MODULE, "No online spokes")
+                self._skip("CPU provisioning throttle (provision_halt)", MODULE, "No online spokes")
+            else:
+                pacing = [
+                    h for h in online
+                    if h.get("proxmox", {}).get("provision_halt", {}).get("halted")
+                    and h["proxmox"]["provision_halt"].get("reason") == "pacing"
+                ]
+                per_spoke = "; ".join(
+                    (
+                        f"{h.get('spoke_name', h.get('spoke_id', '?'))}: PACING "
+                        f"cpu_pct={h['proxmox']['provision_halt'].get('cpu_pct', '?')}% "
+                        f"thr={h['proxmox']['provision_halt'].get('cpu_threshold', '?')}% "
+                        f"1h_avg={float(h['proxmox'].get('cpu_1h_avg', 0) or 0):.1f}%"
+                        if h.get("proxmox", {}).get("provision_halt", {}).get("halted")
+                        else f"{h.get('spoke_name', h.get('spoke_id', '?'))}: ok "
+                        f"cpu_1h_avg={float(h.get('proxmox', {}).get('cpu_1h_avg', 0) or 0):.1f}%"
+                    )
+                    for h in online
+                )
+                if pacing:
+                    self._ok(
+                        "CPU provisioning throttle (provision_halt)",
+                        MODULE,
+                        f"CPU pacing active on {len(pacing)}/{len(online)} spoke(s) — {per_spoke}",
+                    )
+                else:
+                    self._warn(
+                        "CPU provisioning throttle (provision_halt)",
+                        MODULE,
+                        f"No CPU pacing active (CPU below provision threshold) — {per_spoke}",
+                    )
+
+        # Step 10: report CPU 1h avg vs delete threshold (VM teardown fires above this)
+        r = self.get(f"/api/aggregate/proxmox?tenant_id={self.tenant_id}")
+        if r.status_code != 200:
+            self._warn("CPU delete-threshold teardown check", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
+        else:
+            hosts = r.json().get("hosts", [])
+            online = [h for h in hosts if h.get("spoke_online")]
+            if not online:
+                self._skip("CPU delete-threshold teardown check", MODULE, "No online spokes")
             else:
                 above_threshold = []
                 lines = []
                 for h in online:
                     name = h.get("spoke_name", h.get("spoke_id", "?"))
-                    cpu_avg = h.get("proxmox", {}).get("cpu_1h_avg")
-                    del_thr = float((h.get("spoke_config") or {}).get("cpu_delete_threshold") or 90)
+                    cpu_avg = (h.get("proxmox") or {}).get("cpu_1h_avg")
+                    ph = (h.get("proxmox") or {}).get("provision_halt") or {}
+                    del_thr = float(ph.get("cpu_threshold") or 90)
                     cpu_str = f"{float(cpu_avg):.1f}%" if cpu_avg is not None else "n/a"
                     lines.append(f"{name}: cpu_1h_avg={cpu_str} (delete_thr={del_thr:.0f}%)")
                     if cpu_avg is not None and float(cpu_avg) >= del_thr:
@@ -1684,15 +1727,15 @@ class QARunner:
                 detail_str = "; ".join(lines)
                 if above_threshold:
                     self._ok(
-                        "CPU teardown triggered",
+                        "CPU delete-threshold teardown check",
                         MODULE,
-                        f"cpu_1h_avg >= delete_threshold on {', '.join(above_threshold)} — {detail_str}",
+                        f"cpu_1h_avg ≥ delete_thr on {', '.join(above_threshold)} — {detail_str}",
                     )
                 else:
                     self._warn(
-                        "CPU delete threshold configured",
+                        "CPU delete-threshold teardown check",
                         MODULE,
-                        f"CPU below delete threshold on all spokes (teardown not triggered) — {detail_str}",
+                        f"cpu_1h_avg below delete threshold on all spokes (teardown not triggered) — {detail_str}",
                     )
 
     # ═══════════════════════════════════════════════════════════════════════════
