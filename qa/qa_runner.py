@@ -109,6 +109,10 @@ class QARunner:
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         return self._http().patch(path, json=json, headers=headers, **kw)
 
+    def delete(self, path: str, **kw: Any) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        return self._http().delete(path, headers=headers, **kw)
+
     # ── Result helpers ────────────────────────────────────────────────────────
 
     def _ok(self, name: str, phase: str, detail: str = "") -> TestResult:
@@ -1448,6 +1452,250 @@ class QARunner:
             )
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # PHASE 17 — Full Simulation Cycle (teardown → disable → enable → verify)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def phase_sim_cycle(self) -> None:
+        _section("Phase 17 — Full Simulation Cycle (⚠ Destructive + Long-running)")
+        MODULE = "sim_cycle"
+
+        # Step 1: verify dongles are present
+        r = self.get(f"/api/{self.tenant_id}/aggregate/usb-provisioning-status")
+        if r.status_code != 200:
+            self._fail("Dongles present", MODULE, f"HTTP {r.status_code}")
+            return
+        prov = r.json()
+        total_dongles: int = prov.get("total_dongles", 0)
+        if total_dongles == 0:
+            self._skip("Simulation cycle", MODULE, "No USB dongles detected — cannot run simulation cycle")
+            return
+        spoke_detail = ", ".join(
+            f"{s.get('spoke_name', s.get('spoke_id', '?'))}: {s.get('dongle_count', 0)} dongle(s)"
+            for s in prov.get("spokes", [])
+            if s.get("dongle_count", 0) > 0
+        )
+        self._ok("Dongles present", MODULE, f"total_dongles={total_dongles} — {spoke_detail}")
+
+        # Step 2: disable auto-provisioning fleet-wide
+        r = self.post(
+            f"/api/{self.tenant_id}/aggregate/toggle-auto-provision",
+            json={"enable": False},
+        )
+        res = self._check("Disable Auto-Provisioning fleet-wide", MODULE, r, assert_keys=["ok"])
+        if not res.passed:
+            return
+        self._ok(
+            "Auto-Provisioning disabled",
+            MODULE,
+            f"updated_spokes={r.json().get('updated_spokes', '?')}",
+        )
+
+        # Step 3: clear the command queue so no stale config_update commands interfere
+        r = self.delete(f"/api/{self.tenant_id}/commands")
+        if r.status_code not in (200, 204):
+            self._warn("Clear command queue", MODULE, f"HTTP {r.status_code} — continuing anyway")
+        else:
+            body = r.json() if r.status_code == 200 else {}
+            cleared = body.get("cleared") or body.get("detail", "queue cleared")
+            self._ok("Command queue cleared", MODULE, str(cleared))
+
+        # Step 4: trigger teardown of all sim VMs
+        r = self.post(f"/api/{self.tenant_id}/qa/teardown-all-vms")
+        res = self._check(
+            "Queue teardown of all sim VMs", MODULE, r,
+            assert_keys=["ok", "total_vms_queued", "spokes"],
+        )
+        if not res.passed:
+            return
+        td = r.json()
+        total_queued: int = td.get("total_vms_queued", 0)
+        if total_queued == 0:
+            self._skip(
+                "VMs queued for deletion", MODULE,
+                "No sim VMs found (vmid > 9000) — already clean",
+            )
+        else:
+            self._ok(
+                "VMs queued for deletion", MODULE,
+                f"Queued delete_vm for {total_queued} VM(s) across {len(td.get('spokes', []))} spoke(s)",
+            )
+
+            # Step 5: poll until all VMs are deleted
+            timeout_s = 300
+            poll_interval_s = 10
+            deadline = time.monotonic() + timeout_s
+            teardown_ok = False
+
+            while time.monotonic() < deadline:
+                r = self.get(f"/api/{self.tenant_id}/qa/teardown-status")
+                if r.status_code != 200:
+                    self._warn("Teardown status poll", MODULE, f"HTTP {r.status_code} during poll")
+                    break
+                status = r.json()
+                if status.get("complete"):
+                    self._ok("All sim VMs deleted", MODULE, "total_remaining=0 across all spokes")
+                    teardown_ok = True
+                    break
+                remaining = status.get("total_remaining", 0)
+                elapsed_s = int(timeout_s - (deadline - time.monotonic()))
+                print(f"    ⏳  {remaining} VM(s) still present — waiting... ({elapsed_s}s elapsed)")
+                time.sleep(poll_interval_s)
+
+            if not teardown_ok:
+                r = self.get(f"/api/{self.tenant_id}/qa/teardown-status")
+                if r.status_code == 200:
+                    status = r.json()
+                    remaining = status.get("total_remaining", 0)
+                    spoke_info = ", ".join(
+                        f"{s.get('spoke_name', s.get('spoke_id', '?'))}={s.get('sim_vms_remaining', '?')}"
+                        for s in status.get("spokes", [])
+                        if s.get("sim_vms_remaining", 0) > 0
+                    )
+                    self._fail(
+                        "All sim VMs deleted", MODULE,
+                        f"Timed out after {timeout_s}s — {remaining} VM(s) still present: {spoke_info}",
+                    )
+                else:
+                    self._fail(
+                        "All sim VMs deleted", MODULE,
+                        f"Timeout + teardown status poll failed (HTTP {r.status_code})",
+                    )
+                return
+
+        # Step 6: enable auto-provisioning fleet-wide
+        r = self.post(f"/api/{self.tenant_id}/qa/enable-autoprov")
+        res = self._check(
+            "Enable Auto-Provisioning fleet-wide", MODULE, r,
+            assert_keys=["ok", "expected_clients", "updated_spokes"],
+        )
+        if not res.passed:
+            return
+        ap = r.json()
+        expected: int = ap.get("expected_clients", 0)
+        spoke_detail = ", ".join(
+            f"{s.get('spoke_name', s.get('spoke_id', '?'))}: {s.get('dongle_count', 0)} dongle(s)"
+            for s in ap.get("spokes", [])
+        )
+        self._ok(
+            "Auto-Provisioning enabled", MODULE,
+            f"expected_clients={expected} ({ap.get('updated_spokes', 0)} spoke(s)) — {spoke_detail}",
+        )
+
+        if expected == 0:
+            self._skip("Wait for clients online", MODULE, "expected_clients=0 — no dongles to provision")
+            return
+
+        # Step 7: poll provisioning-check until all clients are online (10 min)
+        timeout_s = 600
+        poll_interval_s = 15
+        deadline = time.monotonic() + timeout_s
+
+        while time.monotonic() < deadline:
+            r = self.get(f"/api/{self.tenant_id}/qa/provisioning-check")
+            if r.status_code != 200:
+                self._warn("Client online poll", MODULE, f"HTTP {r.status_code} during poll")
+                break
+            qa = r.json()
+            actual = qa.get("actual_clients", 0)
+            if qa.get("overall_pass") and actual >= expected:
+                per_spoke = ", ".join(
+                    f"{s.get('spoke_name', s.get('spoke_id', '?'))}: {s['reporting_clients']}/{s['dongle_count']}"
+                    for s in qa.get("spokes", [])
+                )
+                self._ok(
+                    f"All {expected} clients online", MODULE,
+                    f"actual={actual}, expected={expected} — {per_spoke}",
+                )
+                break
+            elapsed_s = int(timeout_s - (deadline - time.monotonic()))
+            print(f"    ⏳  {actual}/{expected} clients online — waiting... ({elapsed_s}s elapsed)")
+            time.sleep(poll_interval_s)
+        else:
+            r = self.get(f"/api/{self.tenant_id}/qa/provisioning-check")
+            if r.status_code == 200:
+                qa = r.json()
+                actual = qa.get("actual_clients", 0)
+                incomplete = ", ".join(
+                    f"{s.get('spoke_name', s.get('spoke_id', '?'))}: {s['reporting_clients']}/{s['dongle_count']}"
+                    for s in qa.get("spokes", [])
+                    if not s.get("pass")
+                )
+                self._fail(
+                    f"All {expected} clients online", MODULE,
+                    f"Timed out after {timeout_s}s — {actual}/{expected} online. Incomplete: {incomplete}",
+                )
+            else:
+                self._fail(
+                    f"All {expected} clients online", MODULE,
+                    f"Timeout + final poll failed (HTTP {r.status_code})",
+                )
+            return
+
+        # Step 8: verify provision_halt limit enforcement
+        r = self.get(f"/api/aggregate/proxmox?tenant_id={self.tenant_id}")
+        if r.status_code != 200:
+            self._warn("Provision limit enforcement", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
+        else:
+            hosts = r.json().get("hosts", [])
+            with_dongles = [h for h in hosts if (h.get("usb_count") or 0) > 0 or h.get("proxmox", {}).get("provision_halt")]
+            if not with_dongles:
+                self._skip("Provision limit enforcement", MODULE, "No spokes with dongles in proxmox aggregate")
+            else:
+                halted = [h for h in with_dongles if h.get("proxmox", {}).get("provision_halt")]
+                per_spoke = "; ".join(
+                    f"{h.get('spoke_name', h.get('spoke_id', '?'))}: "
+                    f"{'HALTED' if h.get('proxmox', {}).get('provision_halt') else 'ok'} "
+                    f"(vms={h.get('vm_count', '?')}, dongles={h.get('usb_count', '?')})"
+                    for h in with_dongles
+                )
+                if halted:
+                    self._ok(
+                        "Provision limit enforced (provision_halt)",
+                        MODULE,
+                        f"provision_halt set on {len(halted)}/{len(with_dongles)} spoke(s) — {per_spoke}",
+                    )
+                else:
+                    self._warn(
+                        "Provision limit enforced (provision_halt)",
+                        MODULE,
+                        f"provision_halt not yet set on any spoke — {per_spoke}",
+                    )
+
+        # Step 9: report CPU stats vs delete threshold (informational)
+        r = self.get(f"/api/aggregate/proxmox?tenant_id={self.tenant_id}")
+        if r.status_code != 200:
+            self._warn("CPU delete threshold", MODULE, f"HTTP {r.status_code} fetching proxmox aggregate")
+        else:
+            hosts = r.json().get("hosts", [])
+            online = [h for h in hosts if h.get("spoke_online")]
+            if not online:
+                self._skip("CPU delete threshold configured", MODULE, "No online spokes")
+            else:
+                above_threshold = []
+                lines = []
+                for h in online:
+                    name = h.get("spoke_name", h.get("spoke_id", "?"))
+                    cpu_avg = h.get("proxmox", {}).get("cpu_1h_avg")
+                    del_thr = float((h.get("spoke_config") or {}).get("cpu_delete_threshold") or 90)
+                    cpu_str = f"{float(cpu_avg):.1f}%" if cpu_avg is not None else "n/a"
+                    lines.append(f"{name}: cpu_1h_avg={cpu_str} (delete_thr={del_thr:.0f}%)")
+                    if cpu_avg is not None and float(cpu_avg) >= del_thr:
+                        above_threshold.append(name)
+                detail_str = "; ".join(lines)
+                if above_threshold:
+                    self._ok(
+                        "CPU teardown triggered",
+                        MODULE,
+                        f"cpu_1h_avg >= delete_threshold on {', '.join(above_threshold)} — {detail_str}",
+                    )
+                else:
+                    self._warn(
+                        "CPU delete threshold configured",
+                        MODULE,
+                        f"CPU below delete threshold on all spokes (teardown not triggered) — {detail_str}",
+                    )
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # Run all phases
     # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1469,6 +1717,7 @@ class QARunner:
             "background":   self.phase_background,
             "teardown":     self.phase_teardown,
             "autoprov_e2e": self.phase_autoprov_e2e,
+            "sim_cycle":    self.phase_sim_cycle,
         }
 
         selected = phases if phases else list(all_phases.keys())
