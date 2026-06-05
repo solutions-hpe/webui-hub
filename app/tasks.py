@@ -590,14 +590,15 @@ async def aruba_poller() -> None:
                                             dist_insight_names.add(cname)
                                         else:
                                             dist_alert_names.add(cname)
-                            # Also pull from real browse data (new_central spokes send this in telemetry)
-                            for ins in (central_tel.get("central_browse_insights") or []):
+                            # Also pull from real browse data (new_central spokes send this in telemetry
+                            # as "central_insights" / "central_alerts" — note: NOT "central_browse_*").
+                            for ins in (central_tel.get("central_insights") or []):
                                 n = str(ins.get("name") or "").strip().lower()
                                 if n:
                                     dist_insight_names.add(n)
                                     if ins.get("ts") and n not in dist_insight_ts:
                                         dist_insight_ts[n] = str(ins["ts"])
-                            for alt in (central_tel.get("central_browse_alerts") or []):
+                            for alt in (central_tel.get("central_alerts") or []):
                                 n = str(alt.get("name") or "").strip().lower()
                                 if n:
                                     dist_alert_names.add(n)
@@ -607,7 +608,8 @@ async def aruba_poller() -> None:
                                 if isinstance(client_entry, dict) and client_entry.get("mac"):
                                     dist_client_macs.add(str(client_entry["mac"]).strip().lower())
                             # Collect gateway device names from browse data sent by distributed spokes
-                            for devs in (central_tel.get("devices_by_site") or {}).values():
+                            # (spoke sends "central_devices_by_site"; fall back to "devices_by_site" for older spokes)
+                            for devs in (central_tel.get("central_devices_by_site") or central_tel.get("devices_by_site") or {}).values():
                                 for dev in (devs or []):
                                     dev_key = str(dev.get("name") or dev.get("serial") or "").strip().lower()
                                     if dev_key and dev_key not in dist_device_names:
