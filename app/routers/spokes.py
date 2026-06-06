@@ -317,6 +317,7 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
 
     filtered_alerts = _filter_by_site(hub_browse.get("alerts") or [])
     filtered_insights = _filter_by_site(hub_browse.get("insights") or [])
+    filtered_clients = _filter_by_site(hub_browse.get("clients") or [])
     # clients_by_site and devices_by_site are dicts keyed by site name
     filtered_clients_by_site = {
         k: v for k, v in (hub_browse.get("clients_by_site") or {}).items()
@@ -344,6 +345,7 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
         # Browse data for the spoke's Central Monitoring browse tab (centralized mode)
         "central_browse_alerts": filtered_alerts,
         "central_browse_insights": filtered_insights,
+        "central_browse_clients": filtered_clients,
         "central_browse_clients_by_site": filtered_clients_by_site,
         "central_browse_devices_by_site": filtered_devices_by_site,
     }
