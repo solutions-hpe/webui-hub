@@ -23,9 +23,10 @@ Hub is designed for operators who need to manage many spoke environments from on
 - Local JWT authentication plus hub-side LDAP/AD, RADIUS, and TACACS+ provider support; OIDC remains stubbed for future work
 - GitHub-first tenant config editors for `simulation.conf` and `user-overrides.conf`, with hub override mode pushed to spokes
 - Deployment options for Docker, Azure Container Instance, and BYOD Linux hosts
-- Per-spoke command queue, inbox/ack relay, and 7-day rolling audit history
-- Relayed Proxmox VM Server details including warmup/1-hour CPU and memory averages, cached agent/PVE version metadata, and VM recovery/watchdog state surfaced through the shared frontend
-- Sites monitoring that compares current wireless clients against a sticky 7-day rolling baseline alarm
+- Per-spoke command queue, inbox/ack relay, 7-day rolling audit history, and VM Server command detail/result drill-downs
+- Relayed Proxmox VM Server details including warmup/1-hour CPU and memory averages, cached agent/PVE version metadata, spoke version metadata, provision-halt badges, Command Trace visibility, and VM recovery/watchdog state surfaced through the shared frontend
+- Sites monitoring that compares current wireless clients against a sticky 7-day rolling baseline alarm, with Central Monitoring background polling while the tab is active
+- Hub-connected hardware alerts from gateways, APs, and switches surfaced directly on spoke cards and detail views
 
 ## Architecture
 
@@ -64,7 +65,9 @@ Hub no longer owns a separate frontend codebase. Instead, it depends on `cs-webu
 - `frontend/` is a git submodule that tracks `https://github.com/solutions-hpe/cs-webui.git` on `main` for local development and bump commits.
 - `app/main.py` serves the shared `templates/index.html` and injects `WEBUI_MODE=hub` before returning the page.
 - `static/js/*`, the legacy `static/app.js` compatibility bundle, and `static/style.css` are sourced from `cs-webui`.
-- The shared VM Server Details view renders relayed `agent_version`, `pve_version`, `cpu_1h_avg`, `mem_1h_avg`, `cpu_est_avg`, `mem_est_avg`, `resource_samples_started`, and per-VM recovery states from spoke telemetry.
+- The shared VM Server Details view renders relayed `agent_version`, `pve_version`, `spoke_version`, `cpu_1h_avg`, `mem_1h_avg`, `cpu_est_avg`, `mem_est_avg`, `resource_samples_started`, `vmid_range`, `provision_halt`, and per-VM recovery states from spoke telemetry.
+- Hub mode now surfaces hardware alerts from hub-connected spokes on the spoke cards, expands Command Queue rows with smart payload summaries and detail/result sub-rows, and adds a Command Trace panel in VM Server details.
+- Central Monitoring continues its background poll loop whenever the central tab stays active.
 - Each hub deploy stamps `VERSION` with the git SHA and serves frontend assets as `...?v=<sha>` so browsers do not keep stale files.
 - The footer version pills are populated from `frontend/SEMVER` (`CS-WebUI v…`) and `CLIENT_SIM_VERSION` (`GitHub Repo v…`).
 - Branch alignment matters: `main` is the production branch across `webui-hub`, `client-sim`, and `cs-webui`.
@@ -88,7 +91,7 @@ Key pieces of the flow:
 - `GET /api/backup/installer/sas-token` returns a **2-hour read-only container SAS URL** after the caller supplies `X-Installer-Key` matching `INSTALLER_API_KEY`.
 - Hub-triggered Proxmox backup jobs use the stored Azure account key to enqueue spoke backup work and upload VM snapshots into Azure Blob Storage.
 - The Proxmox installer and reseed flows use the SAS URL so they can download private blobs without ever receiving the raw storage account key.
-- Hub mode in `cs-webui` exposes VM backup, reseed, recovery controls, relayed resource-average warmup pills, and VM watchdog/retry state through the VM Server workflows.
+- Hub mode in `cs-webui` exposes VM backup, reseed, recovery controls, relayed resource-average warmup pills, spoke/proxmox version rows, Command Queue detail/result drill-downs, and VM watchdog/retry state through the VM Server workflows.
 
 ## Quick Start (Docker)
 
@@ -469,7 +472,7 @@ Hub returns queued commands, including the one-time registration payload with th
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `POST` | `/api/spokes/register` | None | Register a spoke and create a pending spoke record |
-| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/telemetry` | `X-API-Key` | Push telemetry and heartbeat data, including relayed Proxmox node/VM details and 1-hour resource-average warmup fields |
+| `POST` | `/api/{tenant_id}/spokes/{spoke_id}/telemetry` | `X-API-Key` | Push telemetry and heartbeat data, including relayed Proxmox node/VM details, 1-hour resource-average warmup fields, `vmid_range`, `provision_halt`, and hub-fed hardware alert state |
 | `GET` | `/api/{tenant_id}/spokes/{spoke_id}/inbox` | `X-API-Key` | Pull queued commands and config updates |
 | `POST` | `/api/{tenant_id}/spokes/{spoke_id}/ack` | `X-API-Key` | Acknowledge command execution and optionally report task results |
 
@@ -477,9 +480,10 @@ Hub heartbeat monitoring treats a spoke as offline after 300 seconds without tel
 
 Hub stores the relayed Proxmox snapshot from each spoke and surfaces it in the shared VM Server UI. The relayed fields include:
 
-- node connectivity plus `agent_version` / `pve_version`
+- node connectivity plus `agent_version` / `pve_version` / `spoke_version`
 - per-VM `cpu`, `mem`, `maxmem`, template flags, USB/T3 metadata, and recovery states such as `post_prov_retry`, `agent_rebooting`, and `agent_unresponsive`
-- `cpu_1h_avg`, `mem_1h_avg`, `cpu_est_avg`, `mem_est_avg`, and `resource_samples_started` so Hub can render the same three warmup states as the spoke Details view
+- `cpu_1h_avg`, `mem_1h_avg`, `cpu_est_avg`, `mem_est_avg`, `resource_samples_started`, `vmid_range`, and `provision_halt` so Hub can render the same warmup, throttle, and halt states as the spoke Details view
+- hardware-alert summaries from hub-connected spokes so gateway / AP / switch alerts stay visible in the hub VM Server context
 
 The raw sample arrays in `resource_cache.json` stay local on the spoke; Hub only stores the summarized telemetry snapshot.
 
