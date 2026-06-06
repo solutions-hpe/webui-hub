@@ -288,15 +288,20 @@ async def test_auth_provider(
             bind_password = _decrypt_secret(config.auth_ldap_bind_password_enc)
             if not config.auth_ldap_url or not config.auth_ldap_bind_dn or not bind_password:
                 return {"ok": False, "message": "LDAP server URL, bind DN, and bind password are required."}
-            server = Server(config.auth_ldap_url, get_info=ALL)
-            with Connection(server, user=config.auth_ldap_bind_dn, password=bind_password, auto_bind=True):
-                if test_username and test_password:
-                    user = await asyncio.to_thread(_ldap_authenticate_sync, config, test_username, test_password, provision=False)
-                    if not user:
-                        return {"ok": False, "message": "LDAP test login failed."}
-                    role = "superadmin" if user.is_superadmin else ("tenant-admin" if user.tenant_roles else "user")
-                    return {"ok": True, "message": f"LDAP bind and test login succeeded ({role})."}
-                return {"ok": True, "message": f"Connected to {config.auth_ldap_url}."}
+
+            def _ldap_bind_probe() -> None:
+                server = Server(config.auth_ldap_url, get_info=ALL)
+                with Connection(server, user=config.auth_ldap_bind_dn, password=bind_password, auto_bind=True):
+                    pass
+
+            await asyncio.to_thread(_ldap_bind_probe)
+            if test_username and test_password:
+                user = await asyncio.to_thread(_ldap_authenticate_sync, config, test_username, test_password, provision=False)
+                if not user:
+                    return {"ok": False, "message": "LDAP test login failed."}
+                role = "superadmin" if user.is_superadmin else ("tenant-admin" if user.tenant_roles else "user")
+                return {"ok": True, "message": f"LDAP bind and test login succeeded ({role})."}
+            return {"ok": True, "message": f"Connected to {config.auth_ldap_url}."}
         except Exception as exc:
             return {"ok": False, "message": str(exc)}
 
@@ -323,8 +328,15 @@ async def test_auth_provider(
 
             if not config.auth_tacacs_host:
                 return {"ok": False, "message": "TACACS+ host is required."}
-            sock = socket.create_connection((config.auth_tacacs_host, int(config.auth_tacacs_port or 49)), timeout=5)
-            sock.close()
+
+            def _tacacs_tcp_probe() -> None:
+                s = socket.create_connection(
+                    (config.auth_tacacs_host, int(config.auth_tacacs_port or 49)),
+                    timeout=5,
+                )
+                s.close()
+
+            await asyncio.to_thread(_tacacs_tcp_probe)
             return {"ok": True, "message": f"TCP connection to {config.auth_tacacs_host}:{config.auth_tacacs_port or 49} OK."}
         except Exception as exc:
             return {"ok": False, "message": str(exc)}
