@@ -295,11 +295,38 @@ def _serialize_spoke_command(command) -> dict[str, Any]:
 
 def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
     from ..tasks import _hub_central_status
+    from .aggregate import _central_browse_cache
 
     tenant_data = _hub_central_status.get(tenant_id, {})
     spoke_data = tenant_data.get("spokes", {}).get(spoke_id, {})
     token_valid = bool(tenant_data.get("token_valid", False))
     token_state_str = tenant_data.get("token_state", "not_configured")
+
+    # Include Central browse data (alerts, insights, clients, devices) filtered to
+    # only the sites assigned to this spoke, so the spoke's browse tab populates
+    # in centralized mode without the spoke querying Central directly.
+    spoke_site_names: set[str] = {
+        str(v).strip().lower() for v in (spoke_data.get("site_mappings") or {}).values() if v
+    }
+    hub_browse = _central_browse_cache.get(tenant_id) or {}
+
+    def _filter_by_site(items: list[dict], field: str = "site") -> list[dict]:
+        if not spoke_site_names:
+            return list(items)
+        return [i for i in (items or []) if str(i.get(field) or "").strip().lower() in spoke_site_names]
+
+    filtered_alerts = _filter_by_site(hub_browse.get("alerts") or [])
+    filtered_insights = _filter_by_site(hub_browse.get("insights") or [])
+    # clients_by_site and devices_by_site are dicts keyed by site name
+    filtered_clients_by_site = {
+        k: v for k, v in (hub_browse.get("clients_by_site") or {}).items()
+        if not spoke_site_names or str(k).strip().lower() in spoke_site_names
+    }
+    filtered_devices_by_site = {
+        k: v for k, v in (hub_browse.get("devices_by_site") or {}).items()
+        if not spoke_site_names or str(k).strip().lower() in spoke_site_names
+    }
+
     return {
         "status": spoke_data.get("status", {}),
         "wireless_clients": spoke_data.get("wireless_clients", {}),
@@ -314,6 +341,11 @@ def _build_spoke_central_feed(tenant_id: str, spoke_id: str) -> dict[str, Any]:
         "site_mappings": spoke_data.get("site_mappings", {}),
         "monitored_checks": spoke_data.get("monitored_checks", []),
         "hardware_checks": spoke_data.get("hardware_checks", []),
+        # Browse data for the spoke's Central Monitoring browse tab (centralized mode)
+        "central_browse_alerts": filtered_alerts,
+        "central_browse_insights": filtered_insights,
+        "central_browse_clients_by_site": filtered_clients_by_site,
+        "central_browse_devices_by_site": filtered_devices_by_site,
     }
 
 
